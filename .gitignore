@@ -1,0 +1,17 @@
+# Local secrets and private key-setup artifacts
+.env.local
+.private-tmp/
+
+# Local development artifacts
+node_modules/
+dist/
+.npm-cache/
+coverage/
+.DS_Store
+*.log
+
+# Salesforce local state and CLI output
+.sf/
+.sfdx/
+salesforce/.sf/
+salesforce/.sfdx/

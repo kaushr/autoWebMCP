@@ -1,0 +1,22 @@
+{
+  "name": "auto-webmcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:semanticizer": "node --env-file=.env.local server.mjs",
+    "build": "tsc --noEmit && vite build",
+    "start": "node --env-file=.env.local server.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rrweb/record": "^2.1.1",
+    "openai": "^7.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}
