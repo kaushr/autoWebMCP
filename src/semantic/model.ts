@@ -18,7 +18,8 @@ export interface CapabilityOutput {
 
 /**
  * This is intentionally a small hackathon contract, not a workflow graph or
- * generalized ontology. Bindings are deterministic application identifiers.
+ * generalized ontology. A semantic capability may be confirmed before an
+ * existing application execution binding has been discovered and validated.
  */
 export interface SemanticCapability {
   id: string;
@@ -26,7 +27,8 @@ export interface SemanticCapability {
   description: string;
   inputs: CapabilityInput[];
   outputs: CapabilityOutput[];
-  binding: {
+  /** An observed or configured existing application execution path. */
+  binding?: {
     application: "prospect-intelligence" | "salesforce";
     action: string;
   };

@@ -43,6 +43,9 @@ export function invokeProspectCapability(
   capability: SemanticCapability,
   input: Record<string, string | number | boolean | undefined>
 ): unknown {
+  if (!capability.binding) {
+    throw new Error(`No execution binding has been established for capability: ${capability.id}`);
+  }
   switch (capability.binding.action) {
     case "search_companies":
       return { companies: searchCompanies(String(input.query ?? "")) };

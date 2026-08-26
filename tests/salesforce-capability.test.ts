@@ -7,7 +7,7 @@ describe("get_opportunity_context capability", () => {
     expect(assertSemanticCapability(getOpportunityContextCapability)).toEqual(getOpportunityContextCapability);
     expect(getOpportunityContextCapability.id).toBe("get_opportunity_context");
     expect(getOpportunityContextCapability.inputs).toEqual([]);
-    expect(getOpportunityContextCapability.binding).toEqual({ application: "salesforce", action: "GET_OPPORTUNITY_CONTEXT" });
+    expect(getOpportunityContextCapability.binding).toBeUndefined();
     expect(getOpportunityContextCapability.safety).toEqual({ readOnly: true, requiresConfirmation: false });
   });
 });
