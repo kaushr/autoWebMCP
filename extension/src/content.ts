@@ -139,6 +139,30 @@ function elementContext(element: Element): SafeElementContext {
   };
 }
 
+/**
+ * Whether an element is actually on screen.
+ *
+ * Component libraries keep empty live regions, collapsed dialogs, and toast
+ * containers in the DOM permanently. Counting elements rather than *visible*
+ * ones turns any of them appearing or being replaced into "a toast was shown",
+ * which is how a click on Search came to report a confirmation.
+ */
+function isVisible(element: Element): boolean {
+  if (element.getAttribute("aria-hidden") === "true") return false;
+  if (element instanceof HTMLElement && element.hidden) return false;
+  return element.getClientRects().length > 0;
+}
+
+function countVisible(selector: string, extra?: (element: Element) => boolean): number {
+  let visible = 0;
+  for (const element of document.querySelectorAll(selector)) {
+    if (!isVisible(element)) continue;
+    if (extra && !extra(element)) continue;
+    visible += 1;
+  }
+  return visible;
+}
+
 function descriptorFor(element: Element): FieldDescriptor {
   const tag = element.tagName.toLowerCase();
   const type =
@@ -152,6 +176,32 @@ function descriptorFor(element: Element): FieldDescriptor {
   };
 }
 
+/**
+ * The element that actually holds the value.
+ *
+ * A change event crossing a shadow boundary is retargeted to the host, so on a
+ * component library the target is the custom element rather than the control
+ * the human typed into. The composed path still starts at the real one.
+ */
+function valueSource(event: Event): Element | undefined {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  for (const entry of path) {
+    if (entry instanceof HTMLInputElement || entry instanceof HTMLSelectElement || entry instanceof HTMLTextAreaElement) {
+      return entry;
+    }
+  }
+  return event.target instanceof Element ? event.target : undefined;
+}
+
+/**
+ * A value, or nothing.
+ *
+ * Never an element's text. A compound control's text is its entire widget —
+ * "*Close DateSelect a date for Close DatePrevious MonthOctober…" — which is a
+ * description of the control, not what the human entered. Recording that as a
+ * value teaches the semanticizer nonsense, so an unreadable control reports no
+ * value at all and the interaction is still captured.
+ */
 function readableValue(element: Element): string | undefined {
   if (element instanceof HTMLSelectElement) {
     return compact(element.selectedOptions[0]?.textContent ?? element.value);
@@ -161,7 +211,13 @@ function readableValue(element: Element): string | undefined {
     return element.value === "" ? undefined : element.value;
   }
   if (element instanceof HTMLTextAreaElement) return element.value === "" ? undefined : element.value;
-  return compact(element.textContent);
+  if (element.getAttribute("contenteditable") === "true") return compact(element.textContent);
+
+  // Many components mirror their control's value onto the host element.
+  const hosted = (element as Element & { value?: unknown }).value;
+  if (typeof hosted === "string") return hosted === "" ? undefined : hosted;
+  if (typeof hosted === "number" || typeof hosted === "boolean") return String(hosted);
+  return undefined;
 }
 
 function fieldContext(element: Element): CaptureFieldContext {
@@ -214,9 +270,9 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   function markPage() {
     return {
       url: location.href,
-      validation: document.querySelectorAll(VALIDATION).length,
-      dialog: document.querySelectorAll(DIALOG).length,
-      toast: document.querySelectorAll(TOAST).length,
+      validation: countVisible(VALIDATION),
+      dialog: countVisible(DIALOG),
+      toast: countVisible(TOAST, (element) => Boolean(compact(element.textContent))),
       fields: document.querySelectorAll(FIELDS).length,
       content: document.body.textContent?.length ?? 0
     };
@@ -284,12 +340,13 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   };
 
   const onFocus = (event: Event): void => {
-    if (event.target instanceof Element) previousValues.set(event.target, readableValue(event.target));
+    const source = valueSource(event);
+    if (source) previousValues.set(source, readableValue(source));
   };
 
   const onChange = (event: Event): void => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
+    const target = valueSource(event);
+    if (!target) return;
     const descriptor = descriptorFor(target);
     const next = readableValue(target);
     const previous = previousValues.get(target);
