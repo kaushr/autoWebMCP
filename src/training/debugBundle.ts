@@ -2,6 +2,7 @@ import type { ObservationTrace } from "../capture/normalize";
 import type { SemanticCapability } from "../semantic/model";
 import type { PublicationRecord } from "../webmcp/publication";
 import type { SemanticizerRun } from "./semanticizer";
+import type { BindingCandidateRecord, BindingInferenceRun } from "./bindingInference";
 import { resolveAdvertisedBinding } from "./bindingProvider";
 import { sourceApplicationFor } from "./sourceApplication";
 
@@ -9,7 +10,7 @@ import { sourceApplicationFor } from "./sourceApplication";
  * Bumped when the shape changes. Deliberately a plain string with no migration
  * machinery: the format will move, and a reader can branch on it.
  */
-export const DEBUG_BUNDLE_VERSION = "1";
+export const DEBUG_BUNDLE_VERSION = "2";
 
 export interface DebugBundleInput {
   trace: ObservationTrace;
@@ -17,6 +18,8 @@ export interface DebugBundleInput {
   candidate?: SemanticCapability;
   ambiguities?: readonly string[];
   publications?: readonly PublicationRecord[];
+  bindingRuns?: readonly BindingInferenceRun[];
+  bindingCandidate?: BindingCandidateRecord;
   exportedAt: string;
 }
 
@@ -38,6 +41,10 @@ export interface DebugBundle {
   labels: string[];
   executionEvidence: ObservationTrace["executionEvidence"];
   semanticizerRuns: SemanticizerRun[];
+  /** Binding inference is a separate question, so it exports separately. */
+  bindingInferenceRuns: BindingInferenceRun[];
+  bindingCandidate: BindingCandidateRecord["proposal"] | null;
+  bindingCandidateState: BindingCandidateRecord["state"];
   capabilityLifecycle: {
     candidate: SemanticCapability | null;
     ambiguities: string[];
@@ -108,6 +115,19 @@ export function buildDebugBundle(input: DebugBundleInput): DebugBundle {
     labels: trace.labels,
     executionEvidence: trace.executionEvidence ?? [],
     semanticizerRuns: sessionRuns,
+    bindingInferenceRuns: (input.bindingRuns ?? [])
+      .filter((run) => run.traceSessionId === trace.sessionId)
+      .slice()
+      .sort((left, right) => left.diagnostics.requestedAt.localeCompare(right.diagnostics.requestedAt)),
+    // A candidate belongs to the capability this session produced, or to nothing.
+    bindingCandidate:
+      ownCandidate && input.bindingCandidate?.proposal.capabilityId === ownCandidate.id
+        ? input.bindingCandidate.proposal
+        : null,
+    bindingCandidateState:
+      ownCandidate && input.bindingCandidate?.proposal.capabilityId === ownCandidate.id
+        ? input.bindingCandidate.state
+        : "none",
     capabilityLifecycle: {
       candidate: ownCandidate ?? null,
       ambiguities: [...(input.ambiguities ?? [])],

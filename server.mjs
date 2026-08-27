@@ -82,6 +82,42 @@ const capabilitySchema = {
  */
 const SEMANTICIZER_PROMPT_VERSION = "2026-08-27.1";
 
+/** Binding inference is a separate question, so it versions separately. */
+const BINDING_PROMPT_VERSION = "2026-08-27.1";
+
+const bindingCandidateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["candidate", "confidence", "eligibility", "evidence", "warnings", "validationRequired"],
+  properties: {
+    candidate: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      required: ["bindingFamily", "mechanism", "observedTransport"],
+      properties: {
+        bindingFamily: { type: "string" },
+        mechanism: { type: "string" },
+        observedTransport: { type: ["string", "null"] }
+      }
+    },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    eligibility: {
+      type: "string",
+      enum: [
+        "supported-candidate",
+        "needs-validation",
+        "private-observed-transport",
+        "unsafe-to-replay",
+        "unresolved",
+        "no-safe-candidate"
+      ]
+    },
+    evidence: { type: "array", items: { type: "string" } },
+    warnings: { type: "array", items: { type: "string" } },
+    validationRequired: { type: "array", items: { type: "string" } }
+  }
+};
+
 /** Ephemeral in-memory handoff buffer. Traces are never written to disk. */
 const traces = new Map();
 const MAX_TRACES = 20;
@@ -273,6 +309,76 @@ async function semanticize(request, response) {
   });
 }
 
+/**
+ * Binding inference. A different question from semantic inference, so a
+ * separate call, separate prompt version, and separate run history.
+ */
+async function inferBindingCandidate(request, response) {
+  if (!openai) {
+    send(response, 503, { error: "OPENAI_API_KEY is not configured on this server." });
+    return;
+  }
+
+  const input = await readJson(request, 200_000);
+  if (!input?.capability?.id || !Array.isArray(input?.causalCandidates)) {
+    send(response, 400, { error: "A prepared binding-candidate input is required." });
+    return;
+  }
+
+  const instructions = [
+    "Propose which reusable, supported execution mechanism should be investigated as the binding for a demonstrated capability.",
+    "You are given a semantic capability, the application it was demonstrated on, and the request that most plausibly carried the action.",
+    "The observed transport is evidence of what happened. It is never permission to call it, and you must never propose replaying it.",
+    "Propose a FAMILY of supported mechanisms, never a specific URL, payload, or code.",
+    "Respect the supplied platform policy: never claim an eligibility stronger than its maximum, and treat its warnings as binding.",
+    "An internal or unversioned transport means the supported equivalent is the candidate, and it is unvalidated.",
+    "Prefer honest uncertainty. If the evidence does not support a mechanism, return a null candidate with eligibility no-safe-candidate.",
+    "Evidence entries must describe what was observed, in plain language, without asserting causation."
+  ];
+
+  const model = process.env.OPENAI_BINDING_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-5.4";
+  const modelInput = JSON.stringify(input);
+  const requestedAt = Date.now();
+
+  const modelResponse = await openai.responses.create({
+    model,
+    store: false,
+    instructions: instructions.join(" "),
+    input: modelInput,
+    text: {
+      format: { type: "json_schema", name: "binding_candidate", strict: true, schema: bindingCandidateSchema }
+    }
+  });
+
+  send(response, 200, {
+    raw: modelResponse.output_text,
+    diagnostics: {
+      runId: `bind-${requestedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      requestedAt: new Date(requestedAt).toISOString(),
+      latencyMs: Date.now() - requestedAt,
+      model,
+      promptVersion: BINDING_PROMPT_VERSION,
+      instructions,
+      input: modelInput,
+      parameters: { store: false, responseFormat: "json_schema", schemaName: "binding_candidate", strict: true },
+      ...(modelResponse.id ? { providerResponseId: modelResponse.id } : {})
+    }
+  });
+}
+
+/**
+ * Development reset. Clears the ephemeral control plane and nothing else: no
+ * source application data, no configuration, no code. Everything it drops was
+ * already lost on restart.
+ */
+function resetControlPlane(request, response) {
+  const cleared = { traces: traces.size, publications: publications.size };
+  traces.clear();
+  publications.clear();
+  console.log(`control plane reset: ${cleared.traces} traces, ${cleared.publications} publications`);
+  send(response, 200, { cleared: true, ...cleared }, corsHeaders(request));
+}
+
 const mimeTypes = { ".css": "text/css", ".html": "text/html", ".js": "application/javascript", ".svg": "image/svg+xml" };
 
 createServer(async (request, response) => {
@@ -284,6 +390,14 @@ createServer(async (request, response) => {
     }
     if (request.method === "POST" && request.url === "/api/semanticize") {
       await semanticize(request, response);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/binding-candidate") {
+      await inferBindingCandidate(request, response);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/debug/reset") {
+      resetControlPlane(request, response);
       return;
     }
     if (request.method === "POST" && request.url === "/api/traces") {
