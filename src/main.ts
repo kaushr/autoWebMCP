@@ -1,8 +1,5 @@
 import "./styles.css";
-import { formatEmployeeCount, type Company, type Contact } from "./prospect/data";
-import { findContacts, getCompany, searchCompanies } from "./prospect/service";
-import { TrainingSession } from "./training/events";
-import { confirmCandidate, semanticizeTrace, type SemanticizationResponse } from "./training/semanticizer";
+import { confirmCandidate, semanticizeTrace } from "./training/semanticizer";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
@@ -28,18 +25,13 @@ const captureMode = new URLSearchParams(window.location.search).get("capture") =
  */
 const registration = controlMode ? registerHelloControl() : document.modelContext ? "available" : "unavailable";
 
-let companyResults: Company[] = searchCompanies("Acme");
-let selectedCompany: Company | undefined = companyResults[0];
-let contactResults: Contact[] = selectedCompany ? findContacts({ company_id: selectedCompany.id }) : [];
-let selectedContact: Contact | undefined;
 const stopCaptureProbe = captureMode ? startRrwebCaptureProbe((snapshot) => {
   const status = document.querySelector("#capture-probe-status");
   if (status) status.textContent = `rrweb probe active · ${snapshot.raw.total} masked raw events · ${snapshot.interactions.length} safe interactions`;
 }) : undefined;
-const trainingSession = new TrainingSession();
 let candidate: SemanticCapability | undefined;
 let ambiguities: string[] = [];
-let semanticizerStatus = "Demonstrate a session, then request a candidate capability.";
+let semanticizerStatus = "Review the proposed contract, choose an execution binding, then confirm.";
 let extensionTraces: TraceSummary[] = [];
 let selectedTrace: ObservationTrace | undefined;
 let traceStatus = "Record a session with the Teach Mode extension, then refresh.";
@@ -54,21 +46,6 @@ function escapeHtml(value: string): string {
     "'": "&#39;",
     '"': "&quot;"
   })[character] ?? character);
-}
-
-function renderCompanyCard(company: Company): string {
-  return `<button class="company-card ${company.id === selectedCompany?.id ? "selected" : ""}" data-company-id="${company.id}">
-    <span class="company-name">${escapeHtml(company.name)}</span>
-    <span>${escapeHtml(company.industry)} · ${escapeHtml(formatEmployeeCount(company.employeeCount))}</span>
-  </button>`;
-}
-
-function renderContactCard(contact: Contact): string {
-  return `<button class="contact-card ${contact.id === selectedContact?.id ? "selected" : ""}" data-contact-id="${contact.id}">
-    <strong>${escapeHtml(contact.name)}</strong>
-    <span>${escapeHtml(contact.title)}</span>
-    <span class="tag">${escapeHtml(contact.function)}</span>
-  </button>`;
 }
 
 function describeObservation(observation: ObservationTrace["observations"][number]): string {
@@ -167,7 +144,6 @@ function renderBindingPicker(capability: SemanticCapability, confirmed: boolean)
 }
 
 function renderTrainingStudio(): string {
-  const events = trainingSession.list();
   const confirmed = Boolean(candidate?.provenance.confirmedByHuman);
   const bound = candidate ? Boolean(resolveAdvertisedBinding(candidate)) : false;
   const candidateEditor = candidate
@@ -186,14 +162,12 @@ function renderTrainingStudio(): string {
           <button type="submit">Save candidate edits</button>
           <button type="button" id="confirm-capability" ${confirmed || !bound ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
           <button type="button" id="publish-capability" class="${confirmed ? "" : "secondary"}" ${confirmed ? "" : "disabled"}>Publish to WebMCP</button>
+          <p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p>
         </div>
       </form>`
     : "";
 
   return `<section class="training-studio" aria-label="Training Studio">
-    <div class="studio-heading"><div><p class="eyebrow">Training Studio</p><h2>Teach one session. Publish one capability.</h2><p>Capture normalized evidence from this controlled application; the model proposes meaning, while the compiler produces the tool deterministically.</p></div><div class="studio-links"><a href="/prospect/">Open SignalBase &#8599;</a><a href="/?control=1">WebMCP control</a></div></div>
-    <ol class="event-trace">${events.length ? events.map((event) => `<li><span>${event.type}</span><strong>${escapeHtml(event.entity)}</strong> ${escapeHtml(event.target ?? "")} <em>${escapeHtml(event.value ?? "")}</em></li>`).join("") : "<li class=empty>Start by searching, opening a company, filtering contacts, and opening a contact.</li>"}</ol>
-    <div class="studio-actions"><button id="semanticize-trace" ${events.length < 2 ? "disabled" : ""}>Propose capability</button><button id="clear-training" class="secondary">Clear session</button><p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p></div>
     ${renderExtensionTraces()}
     ${candidateEditor}
     ${renderPublications()}
@@ -228,110 +202,13 @@ function render(): void {
       <section class="hero">
         <p class="eyebrow">Training Studio</p>
         <h1>Teach a workflow. Publish a capability.</h1>
-        <p>The control plane for Teach → Understand → Confirm → Publish → Use. The panels below are an
-        in-page rehearsal of the SignalBase workflow, kept only until the extension path replaces them;
-        the real evidence arrives from the Teach Mode extension as a captured trace.</p>
+        <p>Understand what a human demonstrated, bind it to behaviour the application already has,
+        and publish it for agents. Evidence arrives from the Teach Mode extension as a captured trace.</p>
+        <div class="studio-links"><a href="/prospect/">Open SignalBase &#8599;</a><a href="/?control=1">WebMCP control</a></div>
         ${captureMode ? `<p id="capture-probe-status" class="runtime-status registered">rrweb probe active · raw events remain in memory and inputs are masked</p>` : ""}
-      </section>
-      <section class="workspace" aria-label="Rehearsal harness for the SignalBase workflow">
-        <aside class="panel companies-panel">
-          <div class="panel-heading"><div><p class="eyebrow">01 · Companies</p><h2>Search accounts</h2></div><span>${companyResults.length}</span></div>
-          <form id="company-search"><label class="sr-only" for="company-query">Search companies</label><input id="company-query" name="query" value="Acme" placeholder="Search company or industry" /><button type="submit">Search</button></form>
-          <div class="result-list">${companyResults.map(renderCompanyCard).join("") || "<p class=empty>No matching companies.</p>"}</div>
-        </aside>
-        <section class="panel contacts-panel">
-          <div class="panel-heading"><div><p class="eyebrow">02 · Contacts</p><h2>${selectedCompany ? escapeHtml(selectedCompany.name) : "Select a company"}</h2></div><span>${contactResults.length}</span></div>
-          ${selectedCompany ? `<p class="company-summary">${escapeHtml(selectedCompany.description)}</p>
-          <form id="contact-filter" class="filters">
-            <label>Function<select name="function"><option value="">All functions</option><option>Procurement</option><option>Operations</option><option>Information Technology</option><option>Finance</option></select></label>
-            <label>Seniority<select name="seniority"><option value="">All seniority</option><option>C-Level</option><option>SVP</option><option>VP</option><option>Director</option><option>Manager</option></select></label>
-            <label>Title contains<input name="title_keywords" placeholder="e.g. procurement" /></label>
-            <button type="submit">Apply filters</button>
-          </form>
-          <div class="result-list contacts">${contactResults.map(renderContactCard).join("") || "<p class=empty>No contacts match these filters.</p>"}</div>` : "<p class=empty>Select a company to view contacts.</p>"}
-        </section>
-        <aside class="panel detail-panel">
-          <p class="eyebrow">03 · Contact detail</p>
-          ${selectedContact ? `<h2>${escapeHtml(selectedContact.name)}</h2><p class="title">${escapeHtml(selectedContact.title)}</p><dl class="contact-detail"><div><dt>Function</dt><dd>${escapeHtml(selectedContact.function)}</dd></div><div><dt>Seniority</dt><dd>${escapeHtml(selectedContact.seniority)}</dd></div><div><dt>Email</dt><dd>${escapeHtml(selectedContact.email)}</dd></div></dl><p>${escapeHtml(selectedContact.responsibilitySummary)}</p>` : "<h2>Inspect a contact</h2><p class=empty>Choose a result to finish the rehearsal. Nothing here is exposed to an agent until a capability is taught, confirmed, and published.</p>"}
-        </aside>
       </section>
       ${renderTrainingStudio()}
     </main>`;
-
-  document.querySelector<HTMLFormElement>("#company-search")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const query = new FormData(event.currentTarget as HTMLFormElement).get("query");
-    trainingSession.record({ type: "search", entity: "company", target: "company query", value: String(query ?? "") });
-    companyResults = searchCompanies(String(query ?? ""));
-    selectedCompany = companyResults[0];
-    contactResults = selectedCompany ? findContacts({ company_id: selectedCompany.id }) : [];
-    selectedContact = undefined;
-    render();
-  });
-
-  document.querySelectorAll<HTMLButtonElement>("[data-company-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      selectedCompany = getCompany(button.dataset.companyId ?? "");
-      if (selectedCompany) trainingSession.record({ type: "open", entity: "company", value: selectedCompany.id });
-      contactResults = selectedCompany ? findContacts({ company_id: selectedCompany.id }) : [];
-      selectedContact = undefined;
-      render();
-    });
-  });
-
-  document.querySelector<HTMLFormElement>("#contact-filter")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    if (!selectedCompany) return;
-    const form = new FormData(event.currentTarget as HTMLFormElement);
-    const functionValue = String(form.get("function") ?? "");
-    const seniorityValue = String(form.get("seniority") ?? "");
-    const titleValue = String(form.get("title_keywords") ?? "");
-    if (functionValue) trainingSession.record({ type: "filter", entity: "contact", target: "function", value: functionValue });
-    if (seniorityValue) trainingSession.record({ type: "filter", entity: "contact", target: "seniority", value: seniorityValue });
-    if (titleValue) trainingSession.record({ type: "filter", entity: "contact", target: "title keywords", value: titleValue });
-    contactResults = findContacts({
-      company_id: selectedCompany.id,
-      function: functionValue || undefined,
-      seniority: seniorityValue || undefined,
-      title_keywords: titleValue || undefined
-    });
-    selectedContact = undefined;
-    render();
-  });
-
-  document.querySelectorAll<HTMLButtonElement>("[data-contact-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      selectedContact = contactResults.find((contact) => contact.id === button.dataset.contactId);
-      if (selectedContact) trainingSession.record({ type: "open", entity: "contact", value: selectedContact.id });
-      render();
-    });
-  });
-
-  document.querySelector<HTMLButtonElement>("#clear-training")?.addEventListener("click", () => {
-    trainingSession.clear();
-    candidate = undefined;
-    ambiguities = [];
-    semanticizerStatus = "Session cleared.";
-    render();
-  });
-
-  document.querySelector<HTMLButtonElement>("#semanticize-trace")?.addEventListener("click", async () => {
-    semanticizerStatus = "Proposing a bounded candidate capability…";
-    render();
-    try {
-      const response: SemanticizationResponse = await semanticizeTrace({
-        application: "prospect-intelligence",
-        trace: trainingSession.list(),
-        uiLabels: ["Company Search", "Function", "Seniority", "Title contains", "Contact Detail"]
-      });
-      candidate = response.candidate;
-      ambiguities = response.ambiguities;
-      semanticizerStatus = "Candidate ready for human review.";
-    } catch (error) {
-      semanticizerStatus = error instanceof Error ? error.message : "Candidate generation failed.";
-    }
-    render();
-  });
 
   document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", async () => {
     traceStatus = "Loading extension traces…";

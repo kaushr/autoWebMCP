@@ -49,16 +49,10 @@ const capabilitySchema = {
           }
         },
         binding: {
-          type: "object",
+          type: ["object", "null"],
           additionalProperties: false,
           required: ["application", "action"],
-          properties: {
-            application: { type: "string", enum: ["prospect-intelligence"] },
-            action: {
-              type: "string",
-              enum: ["find_relevant_contacts", "search_companies", "find_contacts", "get_contact"]
-            }
-          }
+          properties: { application: { type: "string" }, action: { type: "string" } }
         },
         provenance: {
           type: "object",
@@ -80,19 +74,6 @@ const capabilitySchema = {
     },
     ambiguities: { type: "array", items: { type: "string" } }
   }
-};
-
-/**
- * Extension traces come from arbitrary applications, so no binding allowlist
- * applies: the model may return `binding: null` when the evidence does not
- * establish an execution path. Discovering a binding is a separate step.
- */
-const extensionCapabilitySchema = structuredClone(capabilitySchema);
-extensionCapabilitySchema.properties.candidate.properties.binding = {
-  type: ["object", "null"],
-  additionalProperties: false,
-  required: ["application", "action"],
-  properties: { application: { type: "string" }, action: { type: "string" } }
 };
 
 /** Ephemeral in-memory handoff buffer. Traces are never written to disk. */
@@ -200,13 +181,12 @@ async function semanticize(request, response) {
   }
 
   const input = await readJson(request, 500_000);
-  const fromExtension = input?.traceKind === "extension";
-  if (!Array.isArray(input?.trace) || (!fromExtension && input?.application !== "prospect-intelligence")) {
-    send(response, 400, { error: "An observation trace is required." });
+  if (input?.traceKind !== "extension" || !Array.isArray(input?.trace)) {
+    send(response, 400, { error: "An extension observation trace is required." });
     return;
   }
 
-  const sharedInstructions = [
+  const instructions = [
     "Infer exactly ONE lightweight candidate business capability from the observed evidence.",
     "Move up an abstraction level: the whole demonstration is one capability, never one capability per UI step.",
     "Never propose per-step primitives such as opening a record, setting a filter, or clicking a result.",
@@ -214,23 +194,12 @@ async function semanticize(request, response) {
     "Name the capability for the business outcome, never for the sequence of UI steps.",
     "Generalize: the specific values the human chose become inputs, never part of the capability name.",
     "Every id, input name, and output name must be lower snake case derived from the visible label.",
-    "Return an inferred, unconfirmed candidate; a human confirms it separately."
+    "Return an inferred, unconfirmed candidate; a human confirms it separately.",
+    "The evidence was observed by a browser extension on a real application.",
+    "Each observation carries an action, the field label and section it touched, the value transition, and how the application reacted.",
+    "Derive inputs from the fields the human actually varied, using their visible labels.",
+    "Set binding to null unless the evidence directly establishes a named existing application action."
   ];
-
-  const instructions = fromExtension
-    ? [
-        ...sharedInstructions,
-        "The evidence was observed by a browser extension on a real application.",
-        "Each observation carries an action, the field label and section it touched, the value transition, and how the application reacted.",
-        "Derive inputs from the fields the human actually varied, using their visible labels.",
-        "Set binding to null unless the evidence directly establishes a named existing application action."
-      ]
-    : [
-        ...sharedInstructions,
-        "Choose an action from the supplied allowlist only when it is directly supported by the trace.",
-        "A search, then a company, then facet filters, then opening a person is one capability: finding relevant contacts.",
-        "For find_relevant_contacts, the inputs are company, function, and seniority; only company is required."
-      ];
 
   const modelResponse = await openai.responses.create({
     model: process.env.OPENAI_MODEL ?? "gpt-5.4",
@@ -238,7 +207,7 @@ async function semanticize(request, response) {
     instructions: instructions.join(" "),
     input: JSON.stringify({
       application: input.application,
-      ...(fromExtension ? { platform: input.platform ?? "generic" } : {}),
+      platform: input.platform ?? "generic",
       trace: input.trace,
       uiLabels: input.uiLabels ?? []
     }),
@@ -247,7 +216,7 @@ async function semanticize(request, response) {
         type: "json_schema",
         name: "semantic_capability",
         strict: true,
-        schema: fromExtension ? extensionCapabilitySchema : capabilitySchema
+        schema: capabilitySchema
       }
     }
   });

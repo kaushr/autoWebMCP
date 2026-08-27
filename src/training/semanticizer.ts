@@ -1,26 +1,15 @@
 import { assertSemanticCapability, type SemanticCapability } from "../semantic/model";
 import type { NormalizedObservation } from "../capture/normalize";
 import type { CapturePlatform } from "../capture/types";
-import type { ObservationEvent } from "./events";
-
-/** Evidence instrumented by the Prospect Intelligence application itself. */
-export interface AppTraceRequest {
-  traceKind?: "app";
-  application: "prospect-intelligence";
-  trace: readonly ObservationEvent[];
-  uiLabels: string[];
-}
 
 /** Evidence captured by the browser extension on an arbitrary application. */
-export interface ExtensionTraceRequest {
+export interface SemanticizationRequest {
   traceKind: "extension";
   application: string;
   platform: CapturePlatform;
   trace: readonly NormalizedObservation[];
   uiLabels: string[];
 }
-
-export type SemanticizationRequest = AppTraceRequest | ExtensionTraceRequest;
 
 export interface SemanticizationResponse {
   candidate: SemanticCapability;
