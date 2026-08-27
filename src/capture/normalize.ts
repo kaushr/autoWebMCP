@@ -77,8 +77,8 @@ export interface NormalizedObservation {
   newValue?: string;
   /** Accessible label of the control that was actuated. */
   target?: string;
+  /** Application reactions the human could see. Never network-derived. */
   effects?: string[];
-  network?: CaptureNetworkMetadata;
   provenance: ObservationProvenance;
   sourceEventIds: string[];
 }
@@ -118,7 +118,6 @@ export interface ObservationTrace {
 // "Apply" is deliberately absent: it labels filter buttons at least as often
 // as it labels a commit, and misreading a read as a write is the worse error.
 const SAVE_LABEL = /^(save|submit|update|create|confirm|publish)\b/i;
-const NETWORK_CORRELATION_WINDOW_MS = 5_000;
 /** A click on a submit control and the resulting submit event are one intent. */
 const SUBMIT_COLLAPSE_WINDOW_MS = 400;
 
@@ -292,18 +291,11 @@ export function normalizeCapture(events: readonly CaptureEvent[]): NormalizedObs
       continue;
     }
 
-    if (event.kind === "network" && event.network) {
-      if (event.network.category !== "mutation") continue;
-      const target = precedingAction(event.t);
-      if (!target || event.t - target.t > NETWORK_CORRELATION_WINDOW_MS) continue;
-      addEffect(target, "network mutation observed");
-      target.network ??= event.network;
-      if (!target.sourceEventIds.includes(event.id)) target.sourceEventIds.push(event.id);
-      if (target.action === "save" && event.network.status >= 200 && event.network.status < 300) {
-        addEffect(target, "record became persisted");
-        target.provenance = "INFERRED";
-      }
-    }
+    // Network events deliberately contribute nothing here. What a human did and
+    // how the application carried it out are separate layers, and folding
+    // "network mutation observed" into a field change made the semantic trace
+    // describe a mechanism it never showed the user. Requests are correlated in
+    // `execution.ts` instead, against a copy of the same events.
   }
 
   return collapseSubmits(observations).filter(isSubstantive);

@@ -65,7 +65,7 @@ describe("normalizeCapture", () => {
     });
   });
 
-  it("classifies a save action and folds its application reaction into effects", () => {
+  it("classifies a save action and folds only its visible reaction into effects", () => {
     const observations = normalizeCapture([
       base("save", 1_000, { actionLabel: "Save" }),
       base("reaction", 1_200, {
@@ -95,18 +95,14 @@ describe("normalizeCapture", () => {
     ]);
 
     expect(observations).toHaveLength(1);
-    expect(observations[0]).toMatchObject({
-      action: "save",
-      target: "Save",
-      provenance: "INFERRED",
-      network: { method: "PATCH", status: 204 }
-    });
-    expect(observations[0].effects).toEqual([
-      "confirmation toast shown",
-      "network mutation observed",
-      "record became persisted"
-    ]);
-    expect(observations[0].sourceEventIds).toEqual(["save", "reaction", "net"]);
+    expect(observations[0]).toMatchObject({ action: "save", target: "Save", provenance: "OBSERVED" });
+
+    // Only what the human could see. The request that carried the save is
+    // execution evidence and lives on the trace, not in this observation.
+    expect(observations[0].effects).toEqual(["confirmation toast shown"]);
+    expect(observations[0].sourceEventIds).toEqual(["save", "reaction"]);
+    expect(JSON.stringify(observations)).not.toContain("network");
+    expect(JSON.stringify(observations)).not.toContain("/services/data");
   });
 
   it("is evidence, not a replay script", () => {
@@ -177,7 +173,7 @@ describe("normalizeCapture", () => {
     ]);
 
     expect(observations[0].effects).toBeUndefined();
-    expect(observations[0].network).toBeUndefined();
+    expect("network" in observations[0]).toBe(false);
   });
 
   it("folds a submit into the click that caused it", () => {
