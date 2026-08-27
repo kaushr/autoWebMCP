@@ -58,7 +58,8 @@ describe("normalizeCapture", () => {
           validationShown: false,
           fieldsAppeared: false,
           dialogShown: false,
-          toastShown: true
+          toastShown: true,
+          contentChanged: true
         }
       }),
       base("net", 1_300, {
@@ -132,7 +133,8 @@ describe("normalizeCapture", () => {
           validationShown: false,
           fieldsAppeared: false,
           dialogShown: false,
-          toastShown: false
+          toastShown: false,
+          contentChanged: false
         }
       })
     ]);
@@ -156,6 +158,40 @@ describe("normalizeCapture", () => {
 
     expect(observations[0].effects).toBeUndefined();
     expect(observations[0].network).toBeUndefined();
+  });
+
+  it("folds a submit into the click that caused it", () => {
+    const observations = normalizeCapture([
+      base("click", 1_000, { actionLabel: "Apply filters" }),
+      base("submit", 1_001, { kind: "submit" }),
+      base("reaction", 1_400, {
+        kind: "reaction",
+        correlatesWith: "submit",
+        reaction: {
+          domMutations: 1,
+          urlChanged: false,
+          validationShown: false,
+          fieldsAppeared: false,
+          dialogShown: false,
+          toastShown: false,
+          contentChanged: true
+        }
+      })
+    ]);
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ action: "click", target: "Apply filters" });
+    expect(observations[0].effects).toEqual(["page content updated"]);
+    expect(observations[0].sourceEventIds).toEqual(["click", "submit", "reaction"]);
+  });
+
+  it("keeps a submit that stands on its own", () => {
+    const observations = normalizeCapture([
+      base("click", 0, { actionLabel: "Close Date" }),
+      base("submit", 9_000, { kind: "submit", actionLabel: "Update opportunity" })
+    ]);
+
+    expect(observations.map((observation) => observation.action)).toEqual(["click", "submit"]);
   });
 
   it("collects the distinct labels the semanticizer should be grounded in", () => {

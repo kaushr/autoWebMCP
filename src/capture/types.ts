@@ -83,6 +83,8 @@ export interface CaptureReaction {
   fieldsAppeared: boolean;
   dialogShown: boolean;
   toastShown: boolean;
+  /** Visible text length changed, which survives frameworks that batch mutations. */
+  contentChanged: boolean;
 }
 
 export type NetworkCategory = "read" | "mutation" | "document" | "other";

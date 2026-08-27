@@ -103,6 +103,8 @@ export interface ObservationTrace {
 // as it labels a commit, and misreading a read as a write is the worse error.
 const SAVE_LABEL = /^(save|submit|update|create|confirm|publish)\b/i;
 const NETWORK_CORRELATION_WINDOW_MS = 5_000;
+/** A click on a submit control and the resulting submit event are one intent. */
+const SUBMIT_COLLAPSE_WINDOW_MS = 400;
 
 /**
  * Reduces a URL to a path pattern. Identifiers are replaced, query values
@@ -147,7 +149,11 @@ function reactionEffects(reaction: CaptureReaction): string[] {
   if (reaction.fieldsAppeared) effects.push("new fields became visible");
   if (reaction.dialogShown) effects.push("dialog opened");
   if (reaction.toastShown) effects.push("confirmation toast shown");
-  if (effects.length === 0 && reaction.domMutations >= 3) effects.push("page content updated");
+  // Frameworks batch mutations into one rrweb event per frame, so a count
+  // threshold under-reports; the visible content delta is the steadier signal.
+  if (effects.length === 0 && (reaction.contentChanged || reaction.domMutations >= 2)) {
+    effects.push("page content updated");
+  }
   return effects;
 }
 
@@ -165,9 +171,38 @@ function actionFor(event: CaptureEvent): ObservationAction | undefined {
 }
 
 function isSubstantive(observation: NormalizedObservation): boolean {
-  if (observation.action !== "click") return true;
+  if (observation.action !== "click" && observation.action !== "submit") return true;
   if (observation.target) return true;
   return (observation.effects?.length ?? 0) > 0;
+}
+
+/**
+ * Clicking a submit control fires both a click and a submit. They describe one
+ * human intent, and the click carries the better label, so the submit is
+ * folded into it.
+ */
+function collapseSubmits(observations: NormalizedObservation[]): NormalizedObservation[] {
+  const kept: NormalizedObservation[] = [];
+  for (const observation of observations) {
+    const previous = kept[kept.length - 1];
+    const collapsible =
+      observation.action === "submit" &&
+      previous !== undefined &&
+      (previous.action === "click" || previous.action === "save") &&
+      observation.t - previous.t <= SUBMIT_COLLAPSE_WINDOW_MS;
+
+    if (!collapsible || !previous) {
+      kept.push(observation);
+      continue;
+    }
+
+    for (const effect of observation.effects ?? []) addEffect(previous, effect);
+    for (const id of observation.sourceEventIds) {
+      if (!previous.sourceEventIds.includes(id)) previous.sourceEventIds.push(id);
+    }
+    previous.target ??= observation.target;
+  }
+  return kept;
 }
 
 /**
@@ -255,7 +290,7 @@ export function normalizeCapture(events: readonly CaptureEvent[]): NormalizedObs
     }
   }
 
-  return observations.filter(isSubstantive);
+  return collapseSubmits(observations).filter(isSubstantive);
 }
 
 export function collectLabels(observations: readonly NormalizedObservation[]): string[] {

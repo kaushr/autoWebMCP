@@ -171,7 +171,8 @@ async function semanticize(request, response) {
     "Infer only a lightweight candidate business capability from observed evidence.",
     "Do not invent application truth, selectors, APIs, workflows, or validation rules.",
     "Name the capability for the business outcome, never for the sequence of UI steps.",
-    "The id must be lower snake case.",
+    "Generalize: the specific values the human chose become inputs, never part of the capability name.",
+    "Every id, input name, and output name must be lower snake case derived from the visible label.",
     "Return an inferred, unconfirmed candidate; a human confirms it separately."
   ];
 

@@ -50,7 +50,8 @@ function teachSession(): CaptureSession {
         validationShown: false,
         fieldsAppeared: false,
         dialogShown: false,
-        toastShown: false
+        toastShown: false,
+        contentChanged: false
       }
     }
   ];

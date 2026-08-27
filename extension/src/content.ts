@@ -37,6 +37,10 @@ const MAX_LABEL_LENGTH = 80;
 const ACTIONABLE =
   "button, a[href], [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [role=checkbox], [role=switch], input[type=submit], input[type=button], summary, label";
 
+/** Elements whose own text is their name. Containers are excluded on purpose. */
+const NAMED_BY_CONTENT =
+  "button, a, [role=button], [role=link], [role=option], [role=menuitem], [role=tab], summary, legend, h1, h2, h3, h4, h5, h6";
+
 const SECTION =
   "[role=dialog], [role=region], [role=tabpanel], form, fieldset, section, article, .slds-card, .slds-form-element__group, .panel";
 
@@ -76,6 +80,17 @@ function labelledByText(element: Element): string | undefined {
   return compact(text);
 }
 
+/**
+ * The text a label contributes, excluding any control it wraps. Without this a
+ * `<label>Function<select>…</select></label>` reads as its own option list.
+ */
+function labelText(label: Element | null | undefined): string | undefined {
+  if (!label) return undefined;
+  const clone = label.cloneNode(true) as Element;
+  for (const control of clone.querySelectorAll("input, select, textarea, option, button")) control.remove();
+  return compact(clone.textContent);
+}
+
 function accessibleLabel(element: Element): string | undefined {
   const explicitId = element.getAttribute("id");
   const forLabel = explicitId ? document.querySelector(`label[for="${CSS.escape(explicitId)}"]`) : null;
@@ -83,20 +98,25 @@ function accessibleLabel(element: Element): string | undefined {
   return (
     compact(element.getAttribute("aria-label")) ??
     labelledByText(element) ??
-    compact(forLabel?.textContent) ??
-    compact(element.closest("label")?.textContent) ??
+    labelText(forLabel) ??
+    labelText(element.closest("label")) ??
     compact(element.closest(".slds-form-element")?.querySelector(".slds-form-element__label")?.textContent) ??
     compact(element.getAttribute("placeholder")) ??
     compact(element.getAttribute("title")) ??
-    compact(element.textContent) ??
+    (element.matches(NAMED_BY_CONTENT) ? compact(element.textContent) : undefined) ??
     compact(element.getAttribute("name"))
   );
 }
 
 function sectionContext(element: Element): string | undefined {
-  const section = element.closest(SECTION);
-  if (!section) return undefined;
-  return compact(section.querySelector(HEADING)?.textContent) ?? compact(section.getAttribute("aria-label"));
+  let section = element.closest(SECTION);
+  while (section) {
+    const named =
+      compact(section.getAttribute("aria-label")) ?? compact(section.querySelector(HEADING)?.textContent);
+    if (named) return named;
+    section = section.parentElement?.closest(SECTION) ?? null;
+  }
+  return undefined;
 }
 
 function elementContext(element: Element): SafeElementContext {
@@ -151,7 +171,11 @@ function applicationContext(): CaptureApplicationContext {
   const lightning = Boolean(
     document.querySelector("one-record-home-flexipage2, [data-aura-rendered-by], .slds-scope, .oneHeader")
   );
-  const prospect = Boolean(document.querySelector(".training-studio, [aria-label='Prospect research workspace']"));
+  const prospect = Boolean(
+    document.querySelector(
+      "[data-app='prospect-intelligence'], .training-studio, [aria-label='Prospect research workspace']"
+    )
+  );
   return {
     host: location.host,
     platform: detectPlatform(location.host, { lightning, prospect }),
@@ -167,7 +191,19 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   let rrwebEvents = 0;
   let mutationEvents = 0;
   let lastUrl = location.href;
-  let pending: { actionId: string; timer: number; marks: ReturnType<typeof markPage>; mutationsAt: number } | undefined;
+
+  interface PendingReaction {
+    actionId: string;
+    timer: number;
+    marks: ReturnType<typeof markPage>;
+    mutationsAt: number;
+  }
+
+  // Several windows may be open at once: a human often acts again before the
+  // application has finished responding to the previous action, and closing
+  // the earlier window early would under-report what the application did.
+  const pending: PendingReaction[] = [];
+  const MAX_PENDING = 4;
 
   function markPage() {
     return {
@@ -175,7 +211,8 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
       validation: document.querySelectorAll(VALIDATION).length,
       dialog: document.querySelectorAll(DIALOG).length,
       toast: document.querySelectorAll(TOAST).length,
-      fields: document.querySelectorAll(FIELDS).length
+      fields: document.querySelectorAll(FIELDS).length,
+      content: document.body.textContent?.length ?? 0
     };
   }
 
@@ -191,31 +228,40 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
     return captured;
   }
 
-  function closeReaction(): void {
-    if (!pending) return;
-    const { actionId, marks, mutationsAt } = pending;
-    pending = undefined;
+  function closeReaction(entry: PendingReaction): void {
+    const index = pending.indexOf(entry);
+    if (index === -1) return;
+    pending.splice(index, 1);
+    window.clearTimeout(entry.timer);
+
     const now = markPage();
     const reaction: CaptureReaction = {
-      domMutations: mutationEvents - mutationsAt,
-      urlChanged: now.url !== marks.url,
-      validationShown: now.validation > marks.validation,
-      fieldsAppeared: now.fields > marks.fields,
-      dialogShown: now.dialog > marks.dialog,
-      toastShown: now.toast > marks.toast
+      domMutations: mutationEvents - entry.mutationsAt,
+      urlChanged: now.url !== entry.marks.url,
+      validationShown: now.validation > entry.marks.validation,
+      fieldsAppeared: now.fields > entry.marks.fields,
+      dialogShown: now.dialog > entry.marks.dialog,
+      toastShown: now.toast > entry.marks.toast,
+      contentChanged: now.content !== entry.marks.content
     };
-    push("reaction", { correlatesWith: actionId, reaction });
+    push("reaction", { correlatesWith: entry.actionId, reaction });
+  }
+
+  function closeAllReactions(): void {
+    for (const entry of [...pending]) closeReaction(entry);
   }
 
   /** Opens a short window in which the application's response to `actionId` is summarized. */
   function watchReaction(actionId: string): void {
-    closeReaction();
-    pending = {
+    if (pending.length >= MAX_PENDING) closeReaction(pending[0]!);
+    const entry: PendingReaction = {
       actionId,
       marks: markPage(),
       mutationsAt: mutationEvents,
-      timer: window.setTimeout(closeReaction, REACTION_WINDOW_MS)
+      timer: 0
     };
+    entry.timer = window.setTimeout(() => closeReaction(entry), REACTION_WINDOW_MS);
+    pending.push(entry);
   }
 
   const onClick = (event: Event): void => {
@@ -310,8 +356,7 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
 
   return {
     stop(): CaptureFlush {
-      if (pending) window.clearTimeout(pending.timer);
-      closeReaction();
+      closeAllReactions();
       window.clearInterval(navigationTimer);
       window.clearInterval(flushTimer);
       stopRrweb?.();
