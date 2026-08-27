@@ -1,5 +1,14 @@
 import type { FieldValueKind, SemanticTarget, VerificationCheck } from "./model";
 import type { ExecutionCheckResult } from "./result";
+import { DEFAULT_RESOLUTION_POLICY, type IdentitySignal, type ResolutionPolicy } from "./resolutionPolicy";
+import {
+  composedClosest,
+  ownerScope,
+  queryComposedTree,
+  queryComposedTreeFirst
+} from "./composedTree";
+
+export type { ResolutionPolicy } from "./resolutionPolicy";
 
 /* ------------------------------------------------------------------ *
  * Generic browser execution engine.
@@ -24,7 +33,16 @@ export interface ResolvedTarget {
   strategy: string;
 }
 
-export type ResolveOutcome = { ok: true; target: ResolvedTarget } | { ok: false; reason: string };
+/** Why a resolution went the way it did — for the failure report, never persisted on a binding. */
+export interface ResolveDiagnostics {
+  candidatesConsidered: number;
+  traversal: ResolutionPolicy["traversal"];
+  appliedSignals: string[];
+}
+
+export type ResolveOutcome =
+  | { ok: true; target: ResolvedTarget }
+  | { ok: false; reason: string; diagnostics?: ResolveDiagnostics };
 
 export type FieldWriteOutcome = { ok: boolean; detail: string };
 
@@ -39,17 +57,34 @@ export type { ExecutionCheckResult };
  */
 export interface PlatformResolverAdapter {
   id: string;
-  resolveTarget?(root: ParentNode, target: SemanticTarget): ResolvedTarget | undefined;
+  /**
+   * How this platform must be traversed and identified, compiled from
+   * Platform Intelligence at the composition root (`adapters.ts`). Absent
+   * means the generic default applies.
+   */
+  resolutionPolicy?: ResolutionPolicy;
+  /**
+   * Brings the page to the state a binding's `context.pageMode` expects
+   * before anything is resolved — e.g. opening a record's edit form. Not a
+   * write in itself (nothing here sets a value or commits anything), so it
+   * runs automatically under an already-confirmed execution rather than
+   * needing its own separate approval. Returns `true` once the expected
+   * state is confirmed present, `false` if it tried and could not get
+   * there, `undefined` to decline (the page is already assumed ready).
+   */
+  ensureEditable?(root: ParentNode, policy: ResolutionPolicy): Promise<boolean> | boolean | undefined;
+  resolveTarget?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): ResolvedTarget | undefined;
   setFieldValue?(
     resolved: ResolvedTarget,
     value: string,
-    valueKind: FieldValueKind
+    valueKind: FieldValueKind,
+    policy: ResolutionPolicy
   ): Promise<FieldWriteOutcome> | FieldWriteOutcome | undefined;
   /** `true`/`false` is a real answer; `undefined` means "ask the generic check instead". */
-  hasValidationError?(root: ParentNode): boolean | undefined;
-  isEditStateClosed?(root: ParentNode): boolean | undefined;
+  hasValidationError?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
+  isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /** Reads a field's current on-screen value back, for verification. `undefined` means unreadable. */
-  readFieldValue?(root: ParentNode, target: SemanticTarget): string | undefined;
+  readFieldValue?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined;
 }
 
 /* --------------------------- name/label reading --------------------------- */
@@ -67,17 +102,22 @@ function textOf(node: Element | null | undefined): string | undefined {
   return text ? text : undefined;
 }
 
-function findById(root: ParentNode, id: string): Element | null {
-  const owner = "getElementById" in root ? (root as Document) : (root.getRootNode?.() as Document | undefined);
-  return owner?.getElementById?.(id) ?? root.querySelector(`#${cssEscapeId(id)}`);
-}
-
 function cssEscapeId(id: string): string {
   return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id.replace(/([^\w-])/g, "\\$1");
 }
 
-/** The accessible name of an element, by the same priority a screen reader would use. */
-export function accessibleName(element: Element, root: ParentNode): string | undefined {
+/**
+ * The accessible name of an element, by the same priority a screen reader
+ * would use.
+ *
+ * Self-scoping on purpose. `aria-labelledby` and `<label for>` reference
+ * ids scoped to the element's *own* root, so resolving them against the
+ * document finds nothing for anything inside a component — and making that
+ * the caller's job is precisely how it went wrong repeatedly. Callers pass
+ * an element; the correct scope is derived here, once.
+ */
+export function accessibleName(element: Element): string | undefined {
+  const scope = ownerScope(element);
   const ariaLabel = element.getAttribute("aria-label");
   if (ariaLabel?.trim()) return ariaLabel.trim();
 
@@ -85,7 +125,7 @@ export function accessibleName(element: Element, root: ParentNode): string | und
   if (labelledBy) {
     const text = labelledBy
       .split(/\s+/)
-      .map((id) => textOf(findById(root, id)))
+      .map((id) => textOf(scope.querySelector(`#${cssEscapeId(id)}`)))
       .filter(Boolean)
       .join(" ")
       .trim();
@@ -94,13 +134,14 @@ export function accessibleName(element: Element, root: ParentNode): string | und
 
   const id = element.getAttribute("id");
   if (id) {
-    const label = root.querySelector(`label[for="${cssEscapeId(id)}"]`);
+    const label = scope.querySelector(`label[for="${cssEscapeId(id)}"]`);
     const labelText = textOf(label);
     if (labelText) return labelText;
   }
 
-  const closestLabel = element.closest("label");
-  const closestLabelText = textOf(closestLabel);
+  // An ancestor `<label>` is by definition in the same tree, so plain
+  // `closest` is correct here and needs no composed walk.
+  const closestLabelText = textOf(element.closest("label"));
   if (closestLabelText) return closestLabelText;
 
   const tag = element.tagName.toLowerCase();
@@ -116,31 +157,30 @@ export function accessibleName(element: Element, root: ParentNode): string | und
   return undefined;
 }
 
-/** The nearest enclosing section/card/fieldset heading, mirroring the extension's own capture policy. */
-function nearestSectionHeading(element: Element): string | undefined {
-  const section = element.closest(
-    '[role="dialog"], [role="region"], [role="tabpanel"], form, fieldset, section, article'
-  );
+const SECTION_SELECTOR = '[role="dialog"], [role="region"], [role="tabpanel"], form, fieldset, section, article';
+const HEADING_SELECTOR = '[role="heading"], h1, h2, h3, h4, h5, h6, legend';
+
+/**
+ * The nearest enclosing section heading, mirroring the extension's own
+ * capture policy. Composed-aware: a component's enclosing section is
+ * routinely outside its shadow root, which plain `closest` cannot reach.
+ */
+function nearestSectionHeading(element: Element, policy: ResolutionPolicy): string | undefined {
+  const section = composedClosest(element, SECTION_SELECTOR, policy);
   if (!section) return undefined;
-  const heading = section.querySelector('[role="heading"], h1, h2, h3, h4, h5, h6, legend');
-  return textOf(heading);
+  return textOf(queryComposedTreeFirst(section, HEADING_SELECTOR, policy));
 }
 
 /* ----------------------------- candidate walk ----------------------------- */
 
 /**
- * Collects matching elements, piercing open shadow roots. A closed shadow
- * root exposes nothing to any script, including this one, by design — that
- * is a real limit of the browser platform, not a bug in this resolver, and
- * it is why a platform adapter exists for components that use one.
+ * The one traversal every lookup in this engine goes through. Delegates to
+ * the composed-tree primitive so that whether shadow roots are descended
+ * is a single platform-policy decision rather than a choice re-made — and
+ * repeatedly forgotten — at each call site.
  */
-function collectElements(root: ParentNode, selector: string): Element[] {
-  const found = [...root.querySelectorAll(selector)];
-  for (const host of root.querySelectorAll("*")) {
-    const shadow = (host as Element).shadowRoot;
-    if (shadow) found.push(...collectElements(shadow, selector));
-  }
-  return found;
+export function collectElements(root: ParentNode, selector: string, policy: ResolutionPolicy): Element[] {
+  return queryComposedTree(root, selector, policy);
 }
 
 const FIELD_SELECTOR = 'input, select, textarea, [role="textbox"], [role="combobox"], [contenteditable="true"]';
@@ -163,7 +203,7 @@ function selectorForRole(role: SemanticTarget["role"]): string {
   }
 }
 
-function isVisible(element: Element): boolean {
+export function isVisible(element: Element): boolean {
   if (!(element instanceof HTMLElement)) return true;
   if (element.hidden) return false;
   const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
@@ -178,55 +218,103 @@ function isVisible(element: Element): boolean {
  * Zero matches or a genuine tie both fail rather than guess — the same
  * "silence beats a wrong write" rule `fieldMapping.ts` applies to inputs.
  */
-function resolveGeneric(root: ParentNode, target: SemanticTarget): ResolveOutcome {
-  const candidates = collectElements(root, selectorForRole(target.role)).filter(isVisible);
-  const wantedLabel = normalizeLabel(target.label);
+function matchesIdentifier(element: Element, identifier: string): boolean {
+  return element.getAttribute("name") === identifier || element.getAttribute("id") === identifier;
+}
 
-  let matches = candidates.filter((element) => {
-    const name = accessibleName(element, root);
-    return name !== undefined && normalizeLabel(name) === wantedLabel;
-  });
-
-  if (matches.length === 0) {
-    // A field's application identifier is stable evidence even when the
-    // visible label drifted (a translation, a redesign) — try it before
-    // giving up entirely.
-    if (target.applicationIdentifier) {
-      matches = candidates.filter(
-        (element) =>
-          element.getAttribute("name") === target.applicationIdentifier ||
-          element.getAttribute("id") === target.applicationIdentifier
-      );
+/**
+ * Narrows candidates by one identity signal. Returns `undefined` when the
+ * signal cannot be applied (the target carries no such evidence), so the
+ * caller can move to the next signal rather than treating "no evidence" as
+ * "no match".
+ */
+function narrowBy(
+  signal: IdentitySignal,
+  candidates: readonly Element[],
+  target: SemanticTarget,
+  policy: ResolutionPolicy
+): Element[] | undefined {
+  switch (signal) {
+    case "applicationIdentifier": {
+      if (!target.applicationIdentifier) return undefined;
+      const identifier = target.applicationIdentifier;
+      return candidates.filter((element) => matchesIdentifier(element, identifier));
     }
-    if (matches.length === 0) {
-      return { ok: false, reason: `No element with the accessible name "${target.label}" was found on the page.` };
+    case "accessibleName": {
+      const wanted = normalizeLabel(target.label);
+      return candidates.filter((element) => {
+        const name = accessibleName(element);
+        return name !== undefined && normalizeLabel(name) === wanted;
+      });
+    }
+    case "section": {
+      if (!target.section) return undefined;
+      const wanted = target.section.toLowerCase();
+      return candidates.filter((element) => nearestSectionHeading(element, policy)?.toLowerCase() === wanted);
     }
   }
+}
 
-  if (matches.length > 1 && target.applicationIdentifier) {
-    const byIdentifier = matches.filter(
-      (element) =>
-        element.getAttribute("name") === target.applicationIdentifier ||
-        element.getAttribute("id") === target.applicationIdentifier
-    );
-    if (byIdentifier.length === 1) matches = byIdentifier;
+/**
+ * Generic resolution, driven by the platform's declared identity priority.
+ *
+ * Each signal narrows the candidate set in the order the platform says is
+ * strongest; the first ordering that leaves exactly one candidate wins. A
+ * signal that would eliminate everything is skipped rather than allowed to
+ * empty the set — evidence that disagrees is weaker evidence, not proof of
+ * absence. Zero matches or a genuine tie both fail rather than guess, the
+ * same "silence beats a wrong write" rule `fieldMapping.ts` applies.
+ */
+function resolveGeneric(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): ResolveOutcome {
+  const candidates = collectElements(root, selectorForRole(target.role), policy).filter(isVisible);
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason: `No ${target.role} elements at all were found on the page for "${target.label}".`,
+      diagnostics: { candidatesConsidered: 0, traversal: policy.traversal, appliedSignals: [] }
+    };
   }
 
-  if (matches.length > 1 && target.section) {
-    const bySection = matches.filter(
-      (element) => nearestSectionHeading(element)?.toLowerCase() === target.section?.toLowerCase()
-    );
-    if (bySection.length >= 1) matches = bySection;
+  let matches = [...candidates];
+  const appliedSignals: string[] = [];
+  for (const signal of policy.identityPriority) {
+    // Deliberately no early exit on a single remaining candidate: "only one
+    // field on the page" is not evidence that it is *this* target, and
+    // skipping the check would happily write into whatever happened to be
+    // there. Every applicable signal is applied.
+    const narrowed = narrowBy(signal, matches, target, policy);
+    if (!narrowed || narrowed.length === 0) continue;
+    matches = narrowed;
+    appliedSignals.push(signal);
+  }
+
+  // Nothing narrowed at all: every candidate is still in play, which is not
+  // a match, it is an unfiltered list.
+  if (appliedSignals.length === 0) {
+    return {
+      ok: false,
+      reason: `No element with the accessible name "${target.label}" was found on the page.`,
+      diagnostics: { candidatesConsidered: candidates.length, traversal: policy.traversal, appliedSignals }
+    };
   }
 
   if (matches.length !== 1) {
     return {
       ok: false,
-      reason: `"${target.label}" matched ${matches.length} elements on the page; a single unambiguous match is required.`
+      reason: `"${target.label}" matched ${matches.length} elements on the page; a single unambiguous match is required.`,
+      diagnostics: { candidatesConsidered: candidates.length, traversal: policy.traversal, appliedSignals }
     };
   }
 
-  return { ok: true, target: { element: matches[0], strategy: "generic-accessible-name" } };
+  return {
+    ok: true,
+    target: { element: matches[0], strategy: `generic:${appliedSignals.join("+")}` }
+  };
+}
+
+/** The policy in force for a resolution — the adapter's, or the generic default. */
+export function policyFor(adapter?: PlatformResolverAdapter): ResolutionPolicy {
+  return adapter?.resolutionPolicy ?? DEFAULT_RESOLUTION_POLICY;
 }
 
 /**
@@ -239,9 +327,10 @@ export function resolveSemanticTarget(
   target: SemanticTarget,
   adapter?: PlatformResolverAdapter
 ): ResolveOutcome {
-  const fromAdapter = adapter?.resolveTarget?.(root, target);
+  const policy = policyFor(adapter);
+  const fromAdapter = adapter?.resolveTarget?.(root, target, policy);
   if (fromAdapter) return { ok: true, target: fromAdapter };
-  return resolveGeneric(root, target);
+  return resolveGeneric(root, target, policy);
 }
 
 /* -------------------------------- writing -------------------------------- */
@@ -297,7 +386,7 @@ export async function setFieldValue(
   valueKind: FieldValueKind,
   adapter?: PlatformResolverAdapter
 ): Promise<FieldWriteOutcome> {
-  const fromAdapter = await adapter?.setFieldValue?.(resolved, value, valueKind);
+  const fromAdapter = await adapter?.setFieldValue?.(resolved, value, valueKind, policyFor(adapter));
   if (fromAdapter) return fromAdapter;
   return writeNativeValue(resolved.element, value);
 }
@@ -380,12 +469,16 @@ export interface VerifyContext {
 
 const GENERIC_VALIDATION_SELECTOR = '[role="alert"], [aria-invalid="true"]';
 
-function genericHasValidationError(root: ParentNode): boolean {
-  return collectElements(root, GENERIC_VALIDATION_SELECTOR).some(isVisible);
+function genericHasValidationError(root: ParentNode, policy: ResolutionPolicy): boolean {
+  return collectElements(root, GENERIC_VALIDATION_SELECTOR, policy).some(isVisible);
 }
 
-function genericReadFieldValue(root: ParentNode, target: SemanticTarget): string | undefined {
-  const outcome = resolveGeneric(root, target);
+function genericReadFieldValue(
+  root: ParentNode,
+  target: SemanticTarget,
+  policy: ResolutionPolicy
+): string | undefined {
+  const outcome = resolveGeneric(root, target, policy);
   if (!outcome.ok) return undefined;
   const element = outcome.target.element;
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) return element.value;
@@ -401,9 +494,11 @@ function genericReadFieldValue(root: ParentNode, target: SemanticTarget): string
  */
 export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
   const results: ExecutionCheckResult[] = [];
+  const policy = policyFor(context.adapter);
 
   if (context.checks.includes("no-validation-error-visible")) {
-    const hasError = context.adapter?.hasValidationError?.(context.root) ?? genericHasValidationError(context.root);
+    const hasError =
+      context.adapter?.hasValidationError?.(context.root, policy) ?? genericHasValidationError(context.root, policy);
     results.push({
       name: "validation_clear",
       status: hasError ? "fail" : "pass",
@@ -412,7 +507,7 @@ export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
   }
 
   if (context.checks.includes("edit-state-closed") || context.checks.includes("returned-to-record-view")) {
-    const closed = context.adapter?.isEditStateClosed?.(context.root);
+    const closed = context.adapter?.isEditStateClosed?.(context.root, policy);
     results.push({
       name: "returned_to_record",
       status: closed === undefined ? "skipped" : closed ? "pass" : "fail",
@@ -432,8 +527,8 @@ export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
 
     for (const input of context.inputs) {
       const value =
-        context.adapter?.readFieldValue?.(context.root, input.target) ??
-        genericReadFieldValue(context.root, input.target);
+        context.adapter?.readFieldValue?.(context.root, input.target, policy) ??
+        genericReadFieldValue(context.root, input.target, policy);
       if (value === undefined) {
         allObserved = false;
         details.push(`"${input.target.label}" could not be read back.`);

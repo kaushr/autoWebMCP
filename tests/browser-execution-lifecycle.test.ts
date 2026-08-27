@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { executeConfirmed } from "../src/binding/browserExecution/execute";
-import { createSalesforceResolverAdapter } from "../src/binding/browserExecution/salesforceAdapter";
+import { resolverAdapterForPlatform } from "../src/binding/browserExecution/adapters";
+
+/**
+ * The production composition root, not a hand-built adapter: this is what
+ * attaches the Salesforce resolution policy compiled from Platform
+ * Intelligence, so these tests exercise the same wiring the extension does.
+ */
+const salesforceAdapter = () => resolverAdapterForPlatform("salesforce-lightning");
 import type { BrowserExecutionBinding } from "../src/binding/browserExecution/model";
 import { sourceApplicationFor } from "../src/training/sourceApplication";
 
@@ -130,7 +137,7 @@ describe("executeConfirmed — full lifecycle", () => {
       root: document,
       binding: BINDING,
       inputs: { close_date: "2026-12-15" },
-      adapter: createSalesforceResolverAdapter(),
+      adapter: salesforceAdapter(),
       confirmed: true,
       reaction: { quietMs: 20, timeoutMs: 500 }
     });
@@ -154,7 +161,7 @@ describe("executeConfirmed — full lifecycle", () => {
       root: document,
       binding: BINDING,
       inputs: { close_date: "2026-12-15" },
-      adapter: createSalesforceResolverAdapter(),
+      adapter: salesforceAdapter(),
       confirmed: true,
       reaction: { quietMs: 20, timeoutMs: 500 }
     });
@@ -170,7 +177,7 @@ describe("executeConfirmed — full lifecycle", () => {
       root: document,
       binding: BINDING,
       inputs: { close_date: "2026-12-15" },
-      adapter: createSalesforceResolverAdapter(),
+      adapter: salesforceAdapter(),
       confirmed: true,
       reaction: { quietMs: 20, timeoutMs: 500 }
     });
@@ -185,8 +192,9 @@ describe("executeConfirmed — full lifecycle", () => {
       root: document,
       binding: BINDING,
       inputs: { close_date: "2026-12-15" },
-      adapter: createSalesforceResolverAdapter(),
-      confirmed: true
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      resolveRetryMs: 50
     });
 
     expect(result.status).toBe("blocked");
@@ -218,5 +226,67 @@ describe("executeConfirmed — full lifecycle", () => {
 
     expect(result.status).toBe("blocked");
     expect(saveClicked.called).toBe(false);
+  });
+});
+
+/**
+ * A live-DOM stand-in for the actual gap the live Salesforce test surfaced:
+ * the page starts in plain record view — no edit surface, no Close Date
+ * field to resolve at all — with only an accessible "Edit" control. This is
+ * where a real WebMCP invocation actually starts; a human is not there to
+ * click Edit first.
+ */
+function mountRecordViewWithEditButton(): HTMLElement {
+  document.body.innerHTML = `<button>Edit</button>`;
+  document.querySelector("button")!.addEventListener("click", () => {
+    document.body.innerHTML = `
+      <div role="dialog" aria-modal="true" id="edit-dialog">
+        <label for="cd">Close Date</label>
+        <mock-lightning-datepicker id="cd" name="CloseDate"></mock-lightning-datepicker>
+        <button id="save">Save</button>
+      </div>
+    `;
+    document.querySelector("#save")!.addEventListener("click", () => {
+      document.querySelector("#edit-dialog")!.removeAttribute("role");
+      document.querySelector("#edit-dialog")!.removeAttribute("aria-modal");
+    });
+  });
+  return document.body;
+}
+
+describe("executeConfirmed — entering edit mode automatically", () => {
+  it("opens the edit surface itself, starting from plain record view, with no manual Edit click", async () => {
+    mountRecordViewWithEditButton();
+    const result = await executeConfirmed({
+      root: document,
+      binding: BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.evidence).toContain("Entered the record's edit view before resolving targets.");
+  });
+
+  it("does not attempt to click Edit when the binding's pageMode does not call for it", async () => {
+    document.body.innerHTML = `<button>Edit</button>`; // present, but never clicked
+    const recordViewBinding: BrowserExecutionBinding = {
+      ...BINDING,
+      context: { ...BINDING.context, pageMode: "record-view" }
+    };
+    const result = await executeConfirmed({
+      root: document,
+      binding: recordViewBinding,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      resolveRetryMs: 50
+    });
+
+    // No edit surface was ever opened, so the field genuinely cannot be found.
+    expect(result.status).toBe("blocked");
+    expect(result.evidence.join(" ")).not.toMatch(/entered the record's edit view/i);
   });
 });

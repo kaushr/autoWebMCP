@@ -5,7 +5,7 @@ export const SALESFORCE_PLATFORM_ID = "salesforce-lightning";
 
 export const salesforceIntelligencePack: PlatformIntelligencePack = {
   packId: "salesforce-intelligence-pack",
-  packVersion: "0.1.0",
+  packVersion: "0.2.0",
   schemaVersion: PLATFORM_INTELLIGENCE_SCHEMA_VERSION,
   platform: {
     id: SALESFORCE_PLATFORM_ID,
@@ -83,6 +83,22 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       sourceReferenceIds: ["sf-lwc-event-propagation", "awmcp-salesforce-recording"],
       lifecycle: { status: "active", since: "0.1.0" },
       tags: ["lightning", "controls", "shadow-dom"]
+    },
+    {
+      id: "sf-composed-tree-resolution-required",
+      category: "resolution-policy",
+      strength: "validated-platform-rule",
+      summary:
+        "Lightning UI must be resolved across the composed tree: controls, their labels and their actions routinely sit inside component shadow roots, and application field identifiers are the strongest identity evidence available.",
+      resolution: {
+        traversal: "composed-tree",
+        shadowRoots: "recursive",
+        eventRetargeting: true,
+        identityPriority: ["applicationIdentifier", "accessibleName", "section"]
+      },
+      sourceReferenceIds: ["sf-lwc-event-propagation", "awmcp-salesforce-recording", "awmcp-platform-intelligence"],
+      lifecycle: { status: "active", since: "0.2.0" },
+      tags: ["lightning", "shadow-dom", "resolution", "execution"]
     },
     {
       id: "sf-missing-value-is-not-no-value",

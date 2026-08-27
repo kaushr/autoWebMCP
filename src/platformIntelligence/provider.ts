@@ -8,6 +8,7 @@ import type {
   PlatformIntelligencePack,
   PlatformIntelligenceTrace,
   PolicyEntry,
+  ResolutionPolicyEntry,
   SourceReference,
   SupportedInterfaceEntry
 } from "./schema";
@@ -28,9 +29,23 @@ export interface SupportedInterfaceQuery {
   family?: string;
 }
 
+/** A resolution policy plus the provenance of the knowledge that produced it. */
+export interface ResolutionPolicyIntelligence {
+  platform: string;
+  resolution: ResolutionPolicyEntry["resolution"];
+  provenance: PlatformIntelligenceTrace;
+}
+
 export interface PlatformIntelligenceProvider {
   getPack(platformId: string): PlatformIntelligencePack | undefined;
   getObservationSemantics(platformId: string): KnowledgeEntry[];
+  /**
+   * How this platform's UI must be traversed and identified at execution
+   * time. `undefined` means the pack declares nothing, and the runtime
+   * keeps its generic default — an unrecognized platform is never
+   * silently given another platform's traversal rules.
+   */
+  getResolutionPolicy(platformId: string): ResolutionPolicyIntelligence | undefined;
   getSupportedInterfaces(platformId: string, query?: SupportedInterfaceQuery): SupportedInterfaceEntry[];
   getBindingKnowledge(platformId: string, transport?: TransportObservation): BindingKnowledgeEntry[];
   getBindingPolicy(platformId: string, transport?: TransportObservation): BindingPolicyIntelligence | undefined;
@@ -81,6 +96,16 @@ export function createPlatformIntelligenceProvider(
       return active(pack.knowledge).filter(
         (entry) => entry.category === "observation-semantics" || entry.category === "component-framework-behavior"
       );
+    },
+
+    getResolutionPolicy(platformId) {
+      const pack = byPlatform.get(platformId);
+      if (!pack) return undefined;
+      const entry = active(pack.knowledge).find(
+        (candidate): candidate is ResolutionPolicyEntry => candidate.category === "resolution-policy"
+      );
+      if (!entry) return undefined;
+      return { platform: platformId, resolution: entry.resolution, provenance: traceFor(pack, [entry]) };
     },
 
     getSupportedInterfaces(platformId, query = {}) {

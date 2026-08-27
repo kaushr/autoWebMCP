@@ -23,7 +23,10 @@ import type {
   ToContentMessage
 } from "./protocol";
 import { executeConfirmed } from "../../src/binding/browserExecution/execute";
-import { resolverAdapterForPlatform } from "../../src/binding/browserExecution/adapters";
+import {
+  resolutionProvenanceForPlatform,
+  resolverAdapterForPlatform
+} from "../../src/binding/browserExecution/adapters";
 
 /**
  * Teach Mode sensor.
@@ -456,7 +459,10 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
       adapter: resolverAdapterForPlatform(request.binding.platform),
       confirmed: true
     });
-    return { ok: true, result };
+    // Which pack knowledge governed this run, recorded alongside the result
+    // so an execution can be audited back to the platform facts that shaped it.
+    const provenance = resolutionProvenanceForPlatform(request.binding.platform);
+    return { ok: true, result: provenance ? { ...result, evidence: [provenance, ...result.evidence] } : result };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

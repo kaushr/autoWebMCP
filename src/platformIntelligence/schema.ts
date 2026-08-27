@@ -20,6 +20,7 @@ export type KnowledgeCategory =
   | "heuristic"
   | "supported-interface"
   | "component-framework-behavior"
+  | "resolution-policy"
   | "binding-knowledge"
   | "anti-pattern"
   | "reference";
@@ -128,6 +129,29 @@ export interface ComponentFrameworkBehaviorEntry extends KnowledgeEntryBase {
   appliesTo: "events" | "shadow-dom" | "forms" | "selectors" | "routing";
 }
 
+/**
+ * How a platform's UI must be traversed and identified at execution time.
+ *
+ * The runtime-actionable counterpart to `component-framework-behavior`:
+ * that category *states* that Lightning hides native controls behind
+ * component boundaries, and this one says what a resolver must therefore
+ * *do* about it. Deterministic and declarative — a browser runtime reads
+ * it once and applies it mechanically; no model is consulted for a DOM
+ * lookup. Kept as knowledge here, compiled to mechanism at the
+ * composition root, exactly like every other pack entry.
+ */
+export interface ResolutionPolicyEntry extends KnowledgeEntryBase {
+  category: "resolution-policy";
+  strength: "documented-fact" | "documented-policy" | "validated-platform-rule";
+  resolution: {
+    traversal: "flat-dom" | "composed-tree";
+    shadowRoots: "ignore" | "recursive";
+    eventRetargeting: boolean;
+    /** Ordered strongest-first; a resolver uses the first signal that disambiguates. */
+    identityPriority: Array<"applicationIdentifier" | "accessibleName" | "section">;
+  };
+}
+
 export interface BindingKnowledgeEntry extends KnowledgeEntryBase {
   category: "binding-knowledge";
   binding: {
@@ -163,6 +187,7 @@ export type KnowledgeEntry =
   | HeuristicEntry
   | SupportedInterfaceEntry
   | ComponentFrameworkBehaviorEntry
+  | ResolutionPolicyEntry
   | BindingKnowledgeEntry
   | AntiPatternEntry
   | ReferenceEntry;

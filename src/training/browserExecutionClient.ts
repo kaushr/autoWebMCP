@@ -17,7 +17,16 @@ export interface BrowserExecutionClient {
 }
 
 const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
-const RESPONSE_TIMEOUT_MS = 15_000;
+/**
+ * Generous on purpose: a single execution can legitimately spend up to ~8s
+ * retrying target resolution alone (see `execute.ts`'s `resolveAllTargets`,
+ * added after live Salesforce evidence showed a form settling well after
+ * its container first appears), plus separate waits for the edit surface to
+ * open and for the page to settle again after committing. Timing this out
+ * too eagerly would misreport a slow-but-working execution as an
+ * unreachable extension.
+ */
+const RESPONSE_TIMEOUT_MS = 45_000;
 
 function newRequestId(): string {
   return `exec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

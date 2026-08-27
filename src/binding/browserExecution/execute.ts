@@ -1,5 +1,6 @@
 import {
   invokeSemanticAction,
+  policyFor,
   resolveSemanticTarget,
   setFieldValue,
   verifyOutcome,
@@ -37,6 +38,8 @@ export interface ExecuteOptions {
    */
   confirmed: true;
   reaction?: { timeoutMs?: number; quietMs?: number };
+  /** How long to keep retrying target resolution before giving up. Defaults to 8s; tests override it to stay fast. */
+  resolveRetryMs?: number;
 }
 
 /**
@@ -57,6 +60,77 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const RESOLVE_RETRY_WINDOW_MS = 8_000;
+const RESOLVE_RETRY_INTERVAL_MS = 300;
+
+/**
+ * Resolves every input target, retrying for a bounded window rather than
+ * failing on the first miss. A real Lightning edit form does not finish
+ * rendering the moment its container appears or the DOM briefly goes
+ * quiet — the capture this binding was built from showed several seconds
+ * of staggered network-driven rendering after the form opened, arriving in
+ * bursts with pauses between them that a single "wait, then try once" check
+ * can mistake for done. Retrying costs nothing when the target is already
+ * there — the first pass always runs immediately — and only spends the
+ * extra time when something is still catching up.
+ */
+async function resolveAllTargets(
+  root: ParentNode,
+  inputs: readonly BrowserBindingInput[],
+  adapter: PlatformResolverAdapter | undefined,
+  retryWindowMs: number
+): Promise<
+  | { ok: true; resolved: Array<{ input: BrowserBindingInput; target: ResolvedTarget }> }
+  | { ok: false; reason: string; diagnostics: string[] }
+> {
+  const deadline = Date.now() + retryWindowMs;
+  let lastReason = "";
+  let lastDiagnostics: string[] = [];
+  let attempts = 0;
+  for (;;) {
+    attempts++;
+    const resolved: Array<{ input: BrowserBindingInput; target: ResolvedTarget }> = [];
+    let failed: string | undefined;
+    let failedDiagnostics: string[] = [];
+    for (const input of inputs) {
+      const outcome = resolveSemanticTarget(root, input.semanticTarget, adapter);
+      if (!outcome.ok) {
+        failed = `"${input.semanticInput}": ${outcome.reason}`;
+        // Captured so a failure explains itself rather than needing another
+        // live round-trip to diagnose: what was sought, how the page was
+        // traversed, how many candidates that surfaced, and which identity
+        // signals were actually able to narrow them.
+        const diagnostics = outcome.diagnostics;
+        failedDiagnostics = [
+          `Target: ${input.semanticTarget.role} labelled "${input.semanticTarget.label}"` +
+            (input.semanticTarget.applicationIdentifier
+              ? `, application identifier "${input.semanticTarget.applicationIdentifier}"`
+              : "") +
+            (input.semanticTarget.section ? `, section "${input.semanticTarget.section}"` : ""),
+          `Traversal: ${diagnostics?.traversal ?? policyFor(adapter).traversal}` +
+            ` (shadow roots: ${policyFor(adapter).shadowRoots})`,
+          `Candidates of that role discovered: ${diagnostics?.candidatesConsidered ?? "unknown"}`,
+          `Identity signals that narrowed: ${
+            diagnostics?.appliedSignals.length ? diagnostics.appliedSignals.join(", ") : "none"
+          } (priority: ${policyFor(adapter).identityPriority.join(" → ")})`,
+          `Resolution attempts: ${attempts}`
+        ];
+        break;
+      }
+      resolved.push({ input, target: outcome.target });
+    }
+    if (!failed) return { ok: true, resolved };
+    lastReason = failed;
+    lastDiagnostics = failedDiagnostics;
+    if (Date.now() >= deadline) return { ok: false, reason: lastReason, diagnostics: lastDiagnostics };
+    await sleep(RESOLVE_RETRY_INTERVAL_MS);
+  }
+}
+
 /**
  * Performs one execution attempt of a browser execution binding against a
  * live DOM: resolve → set → commit → wait → verify. Refuses to run without
@@ -74,22 +148,50 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const evidence: string[] = [];
   const warnings: string[] = [];
 
-  /* --- A: resolve every target before writing anything --------------- */
-  const resolved: Array<{ input: BrowserBindingInput; target: ResolvedTarget }> = [];
-  for (const input of binding.inputs) {
-    const outcome = resolveSemanticTarget(root, input.semanticTarget, adapter);
-    if (!outcome.ok) {
-      checks.push({ name: "target_resolved", status: "fail", detail: `"${input.semanticInput}": ${outcome.reason}` });
-      return {
-        status: "blocked",
-        checks,
-        evidence,
-        warnings: [`Execution stopped before writing anything — ${outcome.reason}`],
-        executedAt: now()
-      };
+  /* --- ensure the page is in the state the binding expects --------------- *
+   * A read-only "record" page and an editable "edit" page are different DOM
+   * states, and a target captured mid-edit will not exist on the former.
+   * Not a data write, so it runs under the confirmation already given for
+   * this call rather than needing its own.
+   */
+  if (binding.context.pageMode === "edit-or-record") {
+    const ensured = await adapter?.ensureEditable?.(root, policyFor(adapter));
+    if (ensured === true) {
+      evidence.push("Entered the record's edit view before resolving targets.");
+      // The edit surface appearing and its fields finishing rendering are
+      // two different moments — the real capture this binding was built
+      // from showed several seconds of application activity between them.
+      // Resolving immediately after the container appears risks looking
+      // for a field that has not rendered yet.
+      const settled = await waitForApplicationReaction({ root, ...options.reaction });
+      evidence.push(
+        settled.settled
+          ? `The edit view settled ${settled.elapsedMs}ms after opening.`
+          : `The edit view did not settle within ${settled.elapsedMs}ms; resolving targets anyway.`
+      );
+    } else if (ensured === false) {
+      warnings.push("Could not confirm the page was in an editable state before resolving targets.");
     }
-    resolved.push({ input, target: outcome.target });
   }
+
+  /* --- A: resolve every target before writing anything --------------- */
+  const resolution = await resolveAllTargets(
+    root,
+    binding.inputs,
+    adapter,
+    options.resolveRetryMs ?? RESOLVE_RETRY_WINDOW_MS
+  );
+  if (!resolution.ok) {
+    checks.push({ name: "target_resolved", status: "fail", detail: resolution.reason });
+    return {
+      status: "blocked",
+      checks,
+      evidence: [...evidence, ...resolution.diagnostics],
+      warnings: [`Execution stopped before writing anything — ${resolution.reason}`],
+      executedAt: now()
+    };
+  }
+  const resolved = resolution.resolved;
   checks.push({
     name: "target_resolved",
     status: "pass",

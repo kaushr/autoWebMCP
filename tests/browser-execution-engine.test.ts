@@ -75,13 +75,35 @@ describe("resolveSemanticTarget — generic resolution", () => {
     expect(outcome.ok).toBe(true);
   });
 
-  it("pierces an open shadow root to find a nested field", () => {
+  it("pierces an open shadow root when the platform's policy calls for composed traversal", () => {
+    const container = mount(`<div id="host"></div>`);
+    const host = container.querySelector("#host") as HTMLElement;
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<label for="cd">Close Date</label><input id="cd" name="CloseDate" />`;
+
+    const composed: PlatformResolverAdapter = {
+      id: "composed-platform",
+      resolutionPolicy: {
+        traversal: "composed-tree",
+        shadowRoots: "recursive",
+        eventRetargeting: true,
+        identityPriority: ["applicationIdentifier", "accessibleName", "section"]
+      }
+    };
+    const outcome = resolveSemanticTarget(container, CLOSE_DATE, composed);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("does not pierce shadow roots for an ordinary page, which declares no such policy", () => {
+    // Traversal depth is a platform decision, not a universal default: an
+    // ordinary web page keeps flat-DOM resolution, and a component's
+    // internals stay its own business.
     const container = mount(`<div id="host"></div>`);
     const host = container.querySelector("#host") as HTMLElement;
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `<label for="cd">Close Date</label><input id="cd" name="CloseDate" />`;
     const outcome = resolveSemanticTarget(container, CLOSE_DATE);
-    expect(outcome.ok).toBe(true);
+    expect(outcome.ok).toBe(false);
   });
 
   it("lets a platform adapter resolve a target before falling back to generic search", () => {

@@ -499,6 +499,7 @@ function renderBrowserValidationStage(view: StudioLifecycleView): string {
         )}</strong> ${escapeHtml(check.name)} — ${escapeHtml(check.detail)}</li>`
     )
     .join("")}</ul>
+    ${result.evidence.length ? `<ul class="reasons">${result.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
     ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}`;
 
   return `<div class="lifecycle-section">
@@ -1335,6 +1336,12 @@ function render(): void {
   // A real write against the live page: gathers the values to test with,
   // requires an explicit confirmation beyond the click itself, then runs the
   // engine through the Teach Mode extension's live tab access.
+  // `browserBindingStatus` drives the Semantic Browser Execution panel's own
+  // caption, which is always on screen; `browserValidationStatus` drives the
+  // separate Test Result section, which only exists once a result object
+  // does. Every branch below sets both, so a cancellation or an early
+  // failure — which never produces a result — is still visible somewhere,
+  // instead of silently updating a variable with no render path.
   document.querySelector<HTMLButtonElement>("#test-browser-binding")?.addEventListener("click", async () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!candidate || !binding) return;
@@ -1345,6 +1352,7 @@ function render(): void {
         `Test value for "${input.semanticTarget.label}" (${input.semanticInput}):`
       );
       if (value === null) {
+        browserBindingStatus = "Test cancelled.";
         browserValidationStatus = "Test cancelled.";
         render();
         return;
@@ -1357,21 +1365,25 @@ function render(): void {
         "on, and clicks its commit action.\n\nOnly proceed if you intend to make this change."
     );
     if (!confirmed) {
+      browserBindingStatus = "Test cancelled.";
       browserValidationStatus = "Test cancelled.";
       render();
       return;
     }
 
-    browserValidationStatus = "Testing browser execution — writing through the live page…";
+    browserBindingStatus = "Testing browser execution — writing through the live page…";
+    browserValidationStatus = browserBindingStatus;
     connectionIssue = undefined;
     render();
     try {
       const result = await extensionBridgeExecutionClient.execute(binding, inputs);
       browserBindingCandidate = browserBindingCandidate ? { ...browserBindingCandidate, state: "tested" } : undefined;
       browserBindingValidation = { state: "tested", binding, result };
-      browserValidationStatus = `Test finished: ${result.status}.`;
+      browserBindingStatus = `Test finished: ${result.status}.`;
+      browserValidationStatus = browserBindingStatus;
     } catch (error) {
-      browserValidationStatus = error instanceof Error ? error.message : "Browser execution test failed.";
+      browserBindingStatus = error instanceof Error ? error.message : "Browser execution test failed.";
+      browserValidationStatus = browserBindingStatus;
     }
     render();
   });
