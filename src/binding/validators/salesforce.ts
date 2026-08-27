@@ -1,3 +1,4 @@
+import { SALESFORCE_PLATFORM_ID, defaultPlatformIntelligenceProvider } from "../../platformIntelligence";
 import type { BindingValidator, BindingValidationResult, ValidationCheck, ValidationContext } from "../validation";
 
 /**
@@ -37,6 +38,20 @@ export const salesforceRecordUpdateValidator: BindingValidator = {
     const checks: ValidationCheck[] = [];
     const evidence: string[] = [];
     const warnings: string[] = [];
+    const supportedInterfaces = defaultPlatformIntelligenceProvider.getSupportedInterfaces(SALESFORCE_PLATFORM_ID, {
+      family: "salesforce-record-update"
+    });
+    const pack = defaultPlatformIntelligenceProvider.getPack(SALESFORCE_PLATFORM_ID);
+    const platformIntelligence =
+      pack && supportedInterfaces.length > 0
+        ? {
+            packId: pack.packId,
+            packVersion: pack.packVersion,
+            schemaVersion: pack.schemaVersion,
+            knowledgeEntryIds: supportedInterfaces.map((entry) => entry.id),
+            sourceReferenceIds: [...new Set(supportedInterfaces.flatMap((entry) => entry.sourceReferenceIds))]
+          }
+        : undefined;
 
     /* --- record context ------------------------------------------------ */
     const recordType = context.observedRecordType;
@@ -91,7 +106,7 @@ export const salesforceRecordUpdateValidator: BindingValidator = {
       name: "Supported mechanism reachable",
       status: "blocked",
       detail:
-        "UI API / Lightning Data Service is the supported mechanism, but it is not reachable from the " +
+        `${supportedInterfaces[0]?.interface.label ?? "UI API / Lightning Data Service"} is the supported mechanism, but it is not reachable from the ` +
         "browser context AutoWebMCP runs in. It is hosted on the instance origin rather than the Lightning " +
         "origin and authenticates with a bearer token, not the page session cookie."
     });
@@ -118,6 +133,7 @@ export const salesforceRecordUpdateValidator: BindingValidator = {
         "Confirmation of object and field-level permissions for the intended user once a mechanism is reachable.",
         "A sandbox record and a test-safe value before any controlled write is attempted."
       ],
+      ...(platformIntelligence ? { platformIntelligence } : {}),
       validatedAt: context.validatedAt
     };
   }

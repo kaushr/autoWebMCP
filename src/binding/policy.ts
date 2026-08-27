@@ -1,4 +1,10 @@
 import type { SourceApplication } from "../semantic/model";
+import {
+  SALESFORCE_PLATFORM_ID,
+  defaultPlatformIntelligenceProvider,
+  type PlatformIntelligenceProvider,
+  type PlatformIntelligenceTrace
+} from "../platformIntelligence";
 import type { BindingEligibility } from "./model";
 
 /** The one transport fact a policy reasons about. Metadata only, as always. */
@@ -26,16 +32,11 @@ export interface PolicyNotes {
   notes: string[];
   warnings: string[];
   validationRequired: string[];
+  /** Which pack entries influenced this deterministic policy view. */
+  platformIntelligence?: PlatformIntelligenceTrace;
 }
 
-/**
- * Platform knowledge, kept out of the evidence engine.
- *
- * Correlation can tell you a request carried a Save. Only knowledge of a
- * platform can tell you whether that request is a supported interface or an
- * internal one that happens to work today. Nothing in `capture/` knows what
- * Salesforce is, and nothing in it should.
- */
+/** Platform policy view, kept out of the evidence engine. */
 export interface BindingPolicyProvider {
   notesFor(source: SourceApplication, transport: TransportObservation | undefined): PolicyNotes;
 }
@@ -51,47 +52,41 @@ const NO_TRANSPORT_NOTES = (platform: string): PolicyNotes => ({
   ]
 });
 
-/**
- * Salesforce Lightning.
- *
- * Aura is how Lightning talks to itself. It is unversioned, undocumented, and
- * carries framework state, so an observed `RecordUi.updateRecord` is excellent
- * evidence of *what happened* and no basis at all for calling it. The lead it
- * gives is the family — a record update — which supported platform interfaces
- * also cover. Which one, and whether it applies here, is unvalidated.
- */
-const salesforcePolicy: BindingPolicyProvider = {
-  notesFor(_source, transport) {
-    if (!transport) return NO_TRANSPORT_NOTES("salesforce-lightning");
+function packBackedPolicyNotes(
+  source: SourceApplication,
+  transport: TransportObservation | undefined,
+  intelligence: PlatformIntelligenceProvider
+): PolicyNotes | undefined {
+  if (source.id !== SALESFORCE_PLATFORM_ID) return undefined;
+  if (!transport) return NO_TRANSPORT_NOTES(SALESFORCE_PLATFORM_ID);
 
-    const aura = /\/aura\b/.test(transport.pathPattern);
-    const recordMutation = /RecordUi\.(update|create|delete)Record/i.test(transport.pathPattern);
+  const policy = intelligence.getBindingPolicy(source.id, transport);
+  if (!policy) return undefined;
 
-    return {
-      platform: "salesforce-lightning",
-      transportClass: aura ? "private-internal" : "unknown",
-      maximumEligibility: "needs-validation",
-      ...(recordMutation ? { preferredBindingFamily: "salesforce-record-update" } : {}),
-      notes: [
-        aura
-          ? "The observed transport is Salesforce's internal Aura endpoint."
-          : "The observed transport is not a recognized Salesforce interface.",
-        ...(recordMutation
-          ? ["The Aura operation name indicates a record mutation rather than a read."]
-          : [])
-      ],
-      warnings: [
-        "Aura is an internal, unversioned Salesforce transport and must never be replayed directly.",
-        "A supported Salesforce record interface is the candidate family; the specific interface is unvalidated."
-      ],
-      validationRequired: [
-        "Identify the supported Salesforce interface equivalent to the observed operation",
-        "Verify object and field-level permissions for the intended user",
-        "Verify how the capability's inputs map onto that interface"
-      ]
-    };
+  return {
+    platform: policy.platform,
+    transportClass: policy.transportClass ?? "unknown",
+    maximumEligibility: policy.maximumEligibility ?? "unresolved",
+    ...(policy.preferredBindingFamily ? { preferredBindingFamily: policy.preferredBindingFamily } : {}),
+    notes:
+      policy.notes.length > 0
+        ? policy.notes
+        : ["The observed transport is not a recognized Salesforce interface."],
+    warnings: policy.warnings,
+    validationRequired: policy.validationRequired,
+    platformIntelligence: policy.provenance
+  };
+}
+
+export function createPackBackedBindingPolicyProvider(
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): BindingPolicyProvider {
+  return {
+    notesFor(source, transport) {
+      return packBackedPolicyNotes(source, transport, intelligence) ?? genericPolicy.notesFor(source, transport);
+    }
   }
-};
+}
 
 /** Everything else, by transport shape alone. No vendor knowledge involved. */
 const genericPolicy: BindingPolicyProvider = {
@@ -138,12 +133,7 @@ const genericPolicy: BindingPolicyProvider = {
 };
 
 /** Dispatches on source application; unknown platforms fall back to shape. */
-export const defaultBindingPolicyProvider: BindingPolicyProvider = {
-  notesFor(source, transport) {
-    if (source.id === "salesforce-lightning") return salesforcePolicy.notesFor(source, transport);
-    return genericPolicy.notesFor(source, transport);
-  }
-};
+export const defaultBindingPolicyProvider: BindingPolicyProvider = createPackBackedBindingPolicyProvider();
 
 const ELIGIBILITY_RANK: Record<BindingEligibility, number> = {
   "no-safe-candidate": 0,
