@@ -56,6 +56,19 @@ export const prospectBindings: Record<string, BindingHandler> = {
 };
 
 /**
+ * The canonical parameter each binding reads, in order. Aliases exist for a
+ * human who renamed an input, but these are the names the site advertises and
+ * the ones the Training Studio shows when a capability is bound.
+ */
+export const bindingParameters: Record<string, readonly string[]> = {
+  find_relevant_contacts: ["company", "function", "seniority", "title_keywords"],
+  search_companies: ["query"],
+  find_contacts: ["company_id", "function", "seniority", "title_keywords"],
+  get_contact: ["contact_id"],
+  get_company: ["company_id"]
+};
+
+/**
  * A capability taught through the extension often carries no binding at all, so
  * the application matches on its own action names and falls back to the
  * capability id. Returning undefined means "this site cannot execute that".

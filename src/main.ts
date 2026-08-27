@@ -3,6 +3,7 @@ import { formatEmployeeCount, type Company, type Contact } from "./prospect/data
 import { findContacts, getCompany, searchCompanies } from "./prospect/service";
 import { TrainingSession } from "./training/events";
 import { confirmCandidate, semanticizeTrace, type SemanticizationResponse } from "./training/semanticizer";
+import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
 import {
@@ -136,9 +137,39 @@ function renderPublications(): string {
   </section>`;
 }
 
+function renderBindingPicker(capability: SemanticCapability, confirmed: boolean): string {
+  const advertised = localRegistryBindingProvider.list();
+  const selected = resolveAdvertisedBinding(capability);
+  const options = advertised
+    .map(
+      (binding) =>
+        `<option value="${escapeHtml(`${binding.application}:${binding.action}`)}" ${
+          selected && selected.action === binding.action && selected.application === binding.application
+            ? "selected"
+            : ""
+        }>${escapeHtml(binding.application)} · ${escapeHtml(binding.action)}</option>`
+    )
+    .join("");
+
+  return `<label>Execution binding
+    <select name="binding" ${confirmed ? "disabled" : ""}>
+      <option value="">No execution binding</option>
+      ${options}
+    </select>
+  </label>
+  <p class="semanticizer-status">${
+    selected
+      ? `<code>${escapeHtml(selected.action)}</code> reads ${selected.parameters
+          .map((parameter) => `<code>${escapeHtml(parameter)}</code>`)
+          .join(", ")}. Rename the parameters above to match.`
+      : "A capability with no execution binding cannot be published. Automatic binding discovery is not implemented; choose the existing action this workflow already performs."
+  }</p>`;
+}
+
 function renderTrainingStudio(): string {
   const events = trainingSession.list();
   const confirmed = Boolean(candidate?.provenance.confirmedByHuman);
+  const bound = candidate ? Boolean(resolveAdvertisedBinding(candidate)) : false;
   const candidateEditor = candidate
     ? `<form id="candidate-editor" class="candidate-editor">
         <div class="panel-heading"><div><p class="eyebrow">Candidate capability</p><h2>Review before publication</h2></div><span>Human confirmation required</span></div>
@@ -149,10 +180,11 @@ function renderTrainingStudio(): string {
             (input, index) => `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
           )
           .join("")}</div>
+        ${renderBindingPicker(candidate, confirmed)}
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
         <div class="studio-actions">
           <button type="submit">Save candidate edits</button>
-          <button type="button" id="confirm-capability" ${confirmed ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
+          <button type="button" id="confirm-capability" ${confirmed || !bound ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
           <button type="button" id="publish-capability" class="${confirmed ? "" : "secondary"}" ${confirmed ? "" : "disabled"}>Publish to WebMCP</button>
         </div>
       </form>`
@@ -349,11 +381,14 @@ function render(): void {
     render();
   });
 
-  document.querySelector<HTMLFormElement>("#candidate-editor")?.addEventListener("submit", (event) => {
-    event.preventDefault();
+  /** One read of the editor, so changing the binding never discards typed edits. */
+  function applyCandidateEdits(element: HTMLFormElement): void {
     if (!candidate) return;
-    const form = new FormData(event.currentTarget as HTMLFormElement);
-    candidate = {
+    const form = new FormData(element);
+    const binding = String(form.get("binding") ?? "");
+    const [application, action] = binding.split(":");
+
+    const edited: SemanticCapability = {
       ...candidate,
       name: String(form.get("name") ?? candidate.name),
       description: String(form.get("description") ?? candidate.description),
@@ -363,14 +398,43 @@ function render(): void {
         required: form.get(`input-required-${index}`) === "on"
       }))
     };
-    semanticizerStatus = "Candidate edits saved. Confirm when the contract is correct.";
+
+    if (application && action) edited.binding = { application, action };
+    else delete edited.binding;
+    candidate = edited;
+  }
+
+  document.querySelector<HTMLFormElement>("#candidate-editor")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyCandidateEdits(event.currentTarget as HTMLFormElement);
+    semanticizerStatus = candidate && resolveAdvertisedBinding(candidate)
+      ? "Candidate edits saved. Confirm when the contract is correct."
+      : "Candidate edits saved. Choose an execution binding before confirming.";
     render();
   });
+
+  document.querySelector<HTMLSelectElement>("#candidate-editor select[name=binding]")?.addEventListener(
+    "change",
+    (event) => {
+      const form = (event.currentTarget as HTMLSelectElement).form;
+      if (!form) return;
+      applyCandidateEdits(form);
+      render();
+    }
+  );
 
   // Confirmation is its own step. It records that a human accepted the contract
   // and unlocks publication; it does not put a tool on any site.
   document.querySelector<HTMLButtonElement>("#confirm-capability")?.addEventListener("click", () => {
     if (!candidate) return;
+
+    // Confirmation covers meaning and execution together: a capability nothing
+    // can run is not a contract a human can meaningfully accept.
+    if (!resolveAdvertisedBinding(candidate)) {
+      semanticizerStatus = "Choose an execution binding the taught application advertises before confirming.";
+      render();
+      return;
+    }
     candidate = confirmCandidate(candidate);
     semanticizerStatus = "Capability confirmed. Publish it to make the taught site agent-ready.";
     render();
