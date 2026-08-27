@@ -117,6 +117,14 @@ parsed result kept apart, so a bad model answer and a bad parse look different.
 Runs accumulate rather than overwrite. It reads the pipeline and changes
 nothing; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+**Download debug bundle** exports everything safely retained about the selected
+capture as one JSON file — capture stream, observations, execution evidence,
+every inference run, and the capability lifecycle — so a session can be shared
+as a file instead of a stack of screenshots. It is built from typed state rather
+than the rendered page, reports missing data as missing, and carries no
+credential, header, body, or replayable URL, because the pipeline never retained
+any.
+
 ## Verify
 
 ```bash
