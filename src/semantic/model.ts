@@ -1,5 +1,15 @@
 export type CapabilityInputType = "string" | "number" | "boolean";
 
+/**
+ * The application a capability was demonstrated on. Deliberately just an
+ * identity: the semantic model knows that capabilities come from somewhere,
+ * never what any particular application can do.
+ */
+export interface SourceApplication {
+  id: string;
+  label: string;
+}
+
 export type ProvenanceSource = "observed" | "configured" | "inferred" | "confirmed";
 
 export interface CapabilityInput {
@@ -40,6 +50,11 @@ export interface SemanticCapability {
     source: ProvenanceSource;
     observationIds: string[];
     confirmedByHuman: boolean;
+    /**
+     * Where the capability was learned. It scopes which execution bindings may
+     * be offered, and is absent when the evidence did not identify one.
+     */
+    sourceApplication?: SourceApplication;
   };
   safety: {
     readOnly: boolean;

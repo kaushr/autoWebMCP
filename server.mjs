@@ -156,6 +156,17 @@ function capabilityProblem(capability) {
   if (capability.provenance?.source !== "confirmed" || capability.provenance?.confirmedByHuman !== true) {
     return "Only a human-confirmed capability can be published.";
   }
+
+  // Understanding a workflow and knowing how to execute it are separate
+  // achievements. Publication requires both, and the UI is not the only gate.
+  const binding = capability.binding;
+  if (!binding || typeof binding.application !== "string" || typeof binding.action !== "string") {
+    return "A capability with no execution binding cannot be published.";
+  }
+  const source = capability.provenance?.sourceApplication;
+  if (source && source.id !== binding.application) {
+    return "An execution binding must belong to the application the capability was learned from.";
+  }
   return undefined;
 }
 

@@ -7,14 +7,24 @@ export interface PublicationRecord {
 }
 
 /**
- * Confirmation is the gate on publication, and the gate is enforced on both
- * sides of the wire. A capability the model merely proposed can never reach a
- * site's tool surface.
+ * Publication needs both answers: a human confirmed what the capability means,
+ * and an execution binding says how the application performs it. Either alone
+ * is a legitimate state; only together are they publishable. Enforced on both
+ * sides of the wire, so a capability the model merely proposed — or one we
+ * understand but cannot run — never reaches a site's tool surface.
  */
 export function assertPublishable(capability: SemanticCapability): SemanticCapability {
   assertSemanticCapability(capability);
   if (capability.provenance.source !== "confirmed" || !capability.provenance.confirmedByHuman) {
     throw new Error("Only a human-confirmed capability can be published.");
+  }
+  if (!capability.binding) {
+    throw new Error("A capability with no execution binding cannot be published.");
+  }
+
+  const source = capability.provenance.sourceApplication;
+  if (source && source.id !== capability.binding.application) {
+    throw new Error("An execution binding must belong to the application the capability was learned from.");
   }
   return capability;
 }

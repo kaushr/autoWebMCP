@@ -1,4 +1,4 @@
-import type { SemanticCapability } from "../semantic/model";
+import type { SemanticCapability, SourceApplication } from "../semantic/model";
 import { PROSPECT_APPLICATION, bindingParameters } from "../prospect/bindings";
 
 /** One execution path a taught application says it already has. */
@@ -8,9 +8,14 @@ export interface AdvertisedBinding {
   parameters: readonly string[];
 }
 
+/**
+ * Bindings are always scoped to the application a capability was learned from.
+ * A provider that does not know an application returns none, which is how a
+ * capability taught somewhere unsupported stays honestly unbindable rather than
+ * being offered another application's actions.
+ */
 export interface BindingProvider {
-  list(): AdvertisedBinding[];
-  find(application: string, action: string): AdvertisedBinding | undefined;
+  getBindings(source: SourceApplication | undefined): AdvertisedBinding[];
 }
 
 /**
@@ -34,29 +39,29 @@ export interface BindingProvider {
  * ==========================================================================
  */
 export const localRegistryBindingProvider: BindingProvider = {
-  list(): AdvertisedBinding[] {
+  getBindings(source: SourceApplication | undefined): AdvertisedBinding[] {
+    if (source?.id !== PROSPECT_APPLICATION) return [];
     return Object.entries(bindingParameters).map(([action, parameters]) => ({
       application: PROSPECT_APPLICATION,
       action,
       parameters
     }));
-  },
-  find(application: string, action: string): AdvertisedBinding | undefined {
-    return this.list().find(
-      (binding) => binding.application === application && binding.action === action
-    );
   }
 };
 
 /**
- * Whether a capability names an execution path the provider actually advertises.
- * Exact match only: no fuzzy matching, no guessing from input names. An
- * unrecognized binding is unbound, and an unbound capability is not publishable.
+ * Whether a capability names an execution path the provider advertises for the
+ * application it was learned from. Exact match only: no fuzzy matching, no
+ * guessing from input names, and no borrowing another application's actions.
  */
 export function resolveAdvertisedBinding(
   capability: SemanticCapability,
   provider: BindingProvider = localRegistryBindingProvider
 ): AdvertisedBinding | undefined {
-  if (!capability.binding) return undefined;
-  return provider.find(capability.binding.application, capability.binding.action);
+  const binding = capability.binding;
+  if (!binding) return undefined;
+
+  return provider
+    .getBindings(capability.provenance.sourceApplication)
+    .find((candidate) => candidate.application === binding.application && candidate.action === binding.action);
 }

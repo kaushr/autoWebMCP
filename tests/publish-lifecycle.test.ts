@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { sourceApplicationFor } from "../src/training/sourceApplication";
 import { findRelevantContactsProposal, referenceCapabilities } from "../src/prospect/capabilities";
 import { bindingActionFor, invokeProspectBinding, prospectBindings } from "../src/prospect/bindings";
 import { confirmCandidate } from "../src/training/semanticizer";
@@ -8,33 +9,63 @@ import type { WebMcpTool } from "../src/webmcp/types";
 import { describeReadiness } from "../src/prospect/app/agentReadiness";
 import type { SemanticCapability } from "../src/semantic/model";
 
+const SIGNALBASE = sourceApplicationFor("prospect-intelligence", "127.0.0.1:5173");
+
+/** What the Studio hands over: taught on SignalBase and bound by a human. */
+function taughtAndBound(overrides: Partial<SemanticCapability> = {}): SemanticCapability {
+  return {
+    ...findRelevantContactsProposal,
+    binding: { application: "prospect-intelligence", action: "find_relevant_contacts" },
+    ...overrides,
+    provenance: {
+      ...findRelevantContactsProposal.provenance,
+      sourceApplication: SIGNALBASE,
+      ...(overrides.provenance ?? {})
+    }
+  };
+}
+
 describe("Publication gate", () => {
   it("refuses to publish a capability the model merely proposed", () => {
-    expect(() => assertPublishable(findRelevantContactsProposal)).toThrow(/human-confirmed/);
+    expect(() => assertPublishable(taughtAndBound())).toThrow(/human-confirmed/);
+  });
+
+  it("refuses to publish a confirmed capability that has no execution binding", () => {
+    const understood = confirmCandidate(taughtAndBound({ binding: undefined }));
+    expect(understood.provenance.confirmedByHuman).toBe(true);
+    expect(() => assertPublishable(understood)).toThrow(/no execution binding/);
+  });
+
+  it("refuses a binding borrowed from another application", () => {
+    const borrowed = confirmCandidate({
+      ...taughtAndBound(),
+      provenance: {
+        ...findRelevantContactsProposal.provenance,
+        sourceApplication: sourceApplicationFor("salesforce-lightning", "acme.lightning.force.com")
+      }
+    });
+    expect(() => assertPublishable(borrowed)).toThrow(/must belong to the application/);
   });
 
   it("refuses a capability whose provenance claims confirmation without a human", () => {
-    const forged: SemanticCapability = {
-      ...findRelevantContactsProposal,
+    const forged = taughtAndBound({
       provenance: { source: "confirmed", observationIds: [], confirmedByHuman: false }
-    };
+    });
     expect(() => assertPublishable(forged)).toThrow(/human-confirmed/);
   });
 
-  it("accepts a capability a human confirmed", () => {
-    expect(() => assertPublishable(confirmCandidate(findRelevantContactsProposal))).not.toThrow();
+  it("accepts a capability that is both confirmed and bound", () => {
+    expect(() => assertPublishable(confirmCandidate(taughtAndBound()))).not.toThrow();
   });
 
   it("rejects an unconfirmed capability arriving from the control plane", () => {
-    const list = { publications: [{ capability: findRelevantContactsProposal, publishedAt: "2026-08-26T18:00:00Z" }] };
+    const list = { publications: [{ capability: taughtAndBound(), publishedAt: "2026-08-26T18:00:00Z" }] };
     expect(() => parsePublicationList(list)).toThrow(/human-confirmed/);
   });
 
   it("reads back a confirmed publication", () => {
     const list = {
-      publications: [
-        { capability: confirmCandidate(findRelevantContactsProposal), publishedAt: "2026-08-26T18:00:00Z" }
-      ]
+      publications: [{ capability: confirmCandidate(taughtAndBound()), publishedAt: "2026-08-26T18:00:00Z" }]
     };
     expect(parsePublicationList(list)[0].capability.id).toBe("find_relevant_contacts");
   });
@@ -69,7 +100,7 @@ describe("Binding resolution on the taught site", () => {
 });
 
 describe("Published capability execution", () => {
-  const published = confirmCandidate(findRelevantContactsProposal);
+  const published = confirmCandidate(taughtAndBound());
 
   it("compiles to a tool named for the confirmed capability", () => {
     const tool = compileCapability(published, invokeProspectBinding);
@@ -135,7 +166,7 @@ describe("Registration into WebMCP", () => {
   it("registers a published capability and nothing else", async () => {
     await new Promise<void>((resolve) => {
       withModelContext((tools) => {
-        const result = registerCapability(confirmCandidate(findRelevantContactsProposal), invokeProspectBinding);
+        const result = registerCapability(confirmCandidate(taughtAndBound()), invokeProspectBinding);
         expect(result).toBe("registered");
         expect(tools.map((tool) => tool.name)).toEqual(["find_relevant_contacts"]);
         resolve();
@@ -147,7 +178,7 @@ describe("Registration into WebMCP", () => {
     const previous = (globalThis as { document?: unknown }).document;
     (globalThis as { document?: unknown }).document = {};
     try {
-      expect(registerCapability(confirmCandidate(findRelevantContactsProposal), invokeProspectBinding)).toBe(
+      expect(registerCapability(confirmCandidate(taughtAndBound()), invokeProspectBinding)).toBe(
         "unavailable"
       );
     } finally {

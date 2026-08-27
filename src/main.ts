@@ -1,6 +1,7 @@
 import "./styles.css";
 import { confirmCandidate, semanticizeTrace } from "./training/semanticizer";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
+import { sourceApplicationFor } from "./training/sourceApplication";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
 import {
@@ -114,9 +115,31 @@ function renderPublications(): string {
   </section>`;
 }
 
-function renderBindingPicker(capability: SemanticCapability, confirmed: boolean): string {
-  const advertised = localRegistryBindingProvider.list();
+/** Everything a human is asked to accept as the meaning of the capability. */
+function semanticContract(capability: SemanticCapability): string {
+  return JSON.stringify({
+    name: capability.name,
+    description: capability.description,
+    inputs: capability.inputs.map((input) => [input.name, input.required])
+  });
+}
+
+function renderBindingPicker(capability: SemanticCapability): string {
+  const source = capability.provenance.sourceApplication;
+  const advertised = localRegistryBindingProvider.getBindings(source);
   const selected = resolveAdvertisedBinding(capability);
+
+  // Nothing is known about how this application executes anything. Offering
+  // another application's actions here would be worse than offering none.
+  if (advertised.length === 0) {
+    return `<div class="binding-empty">
+      <p class="eyebrow">Execution binding</p>
+      <p><strong>No execution binding discovered${
+        source ? ` for ${escapeHtml(source.label)}` : ""
+      }.</strong> This capability can be confirmed, but cannot be published until an execution path is identified.</p>
+    </div>`;
+  }
+
   const options = advertised
     .map(
       (binding) =>
@@ -124,12 +147,12 @@ function renderBindingPicker(capability: SemanticCapability, confirmed: boolean)
           selected && selected.action === binding.action && selected.application === binding.application
             ? "selected"
             : ""
-        }>${escapeHtml(binding.application)} · ${escapeHtml(binding.action)}</option>`
+        }>${escapeHtml(binding.action)}</option>`
     )
     .join("");
 
   return `<label>Execution binding
-    <select name="binding" ${confirmed ? "disabled" : ""}>
+    <select name="binding">
       <option value="">No execution binding</option>
       ${options}
     </select>
@@ -139,8 +162,21 @@ function renderBindingPicker(capability: SemanticCapability, confirmed: boolean)
       ? `<code>${escapeHtml(selected.action)}</code> reads ${selected.parameters
           .map((parameter) => `<code>${escapeHtml(parameter)}</code>`)
           .join(", ")}. Rename the parameters above to match.`
-      : "A capability with no execution binding cannot be published. Automatic binding discovery is not implemented; choose the existing action this workflow already performs."
+      : `Automatic binding discovery is not implemented. Choose the action ${escapeHtml(
+          source?.label ?? "this application"
+        )} already performs for this workflow.`
   }</p>`;
+}
+
+/** The two questions the lifecycle keeps apart, answered side by side. */
+function renderCapabilityState(capability: SemanticCapability, confirmed: boolean, bound: boolean): string {
+  const source = capability.provenance.sourceApplication;
+  return `<dl class="capability-state">
+    <div><dt>Learned from</dt><dd>${escapeHtml(source?.label ?? "Unknown application")}</dd></div>
+    <div><dt>Semantic capability</dt><dd>${confirmed ? "Confirmed" : "Awaiting confirmation"}</dd></div>
+    <div><dt>Execution binding</dt><dd>${bound ? "Resolved" : "Not discovered"}</dd></div>
+    <div><dt>Publication</dt><dd>${confirmed && bound ? "Ready" : "Blocked"}</dd></div>
+  </dl>`;
 }
 
 function renderTrainingStudio(): string {
@@ -156,12 +192,13 @@ function renderTrainingStudio(): string {
             (input, index) => `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
           )
           .join("")}</div>
-        ${renderBindingPicker(candidate, confirmed)}
+        ${renderBindingPicker(candidate)}
+        ${renderCapabilityState(candidate, confirmed, bound)}
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
         <div class="studio-actions">
           <button type="submit">Save candidate edits</button>
-          <button type="button" id="confirm-capability" ${confirmed || !bound ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
-          <button type="button" id="publish-capability" class="${confirmed ? "" : "secondary"}" ${confirmed ? "" : "disabled"}>Publish to WebMCP</button>
+          <button type="button" id="confirm-capability" ${confirmed ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
+          <button type="button" id="publish-capability" class="${confirmed && bound ? "" : "secondary"}" ${confirmed && bound ? "" : "disabled"}>Publish to WebMCP</button>
           <p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p>
         </div>
       </form>`
@@ -248,7 +285,16 @@ function render(): void {
         trace: selectedTrace.observations,
         uiLabels: selectedTrace.labels
       });
-      candidate = response.candidate;
+      candidate = {
+        ...response.candidate,
+        provenance: {
+          ...response.candidate.provenance,
+          sourceApplication: sourceApplicationFor(
+            selectedTrace.application.platform,
+            selectedTrace.application.host
+          )
+        }
+      };
       ambiguities = response.ambiguities;
       traceStatus = "Candidate ready for human review.";
       semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
@@ -278,6 +324,13 @@ function render(): void {
 
     if (application && action) edited.binding = { application, action };
     else delete edited.binding;
+
+    // The binding is not part of what a human confirmed, so changing it leaves
+    // confirmation standing. Changing the contract itself does not.
+    if (candidate.provenance.confirmedByHuman && semanticContract(edited) !== semanticContract(candidate)) {
+      edited.provenance = { ...edited.provenance, source: "inferred", confirmedByHuman: false };
+      semanticizerStatus = "The contract changed, so confirmation was withdrawn. Review and confirm again.";
+    }
     candidate = edited;
   }
 
@@ -305,15 +358,12 @@ function render(): void {
   document.querySelector<HTMLButtonElement>("#confirm-capability")?.addEventListener("click", () => {
     if (!candidate) return;
 
-    // Confirmation covers meaning and execution together: a capability nothing
-    // can run is not a contract a human can meaningfully accept.
-    if (!resolveAdvertisedBinding(candidate)) {
-      semanticizerStatus = "Choose an execution binding the taught application advertises before confirming.";
-      render();
-      return;
-    }
+    // Confirmation answers "did we understand this correctly", nothing more.
+    // A capability can be understood on an application we cannot yet drive.
     candidate = confirmCandidate(candidate);
-    semanticizerStatus = "Capability confirmed. Publish it to make the taught site agent-ready.";
+    semanticizerStatus = resolveAdvertisedBinding(candidate)
+      ? "Meaning confirmed and an execution binding is resolved. Ready to publish."
+      : "Meaning confirmed. Publication stays blocked until an execution binding exists for this application.";
     render();
   });
 
