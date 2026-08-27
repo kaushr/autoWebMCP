@@ -1,3 +1,4 @@
+import type { ExecutionEvidence } from "./execution";
 import type {
   CaptureApplicationContext,
   CaptureEvent,
@@ -89,6 +90,13 @@ export interface ObservationTrace {
   startedAt: string;
   endedAt: string;
   observations: NormalizedObservation[];
+  /**
+   * How the application appeared to carry out the demonstrated actions. A
+   * sibling of `observations`, never folded into them: what a human meant and
+   * how an application executes it are separate artifacts, and this one is
+   * evidence rather than anything executable.
+   */
+  executionEvidence: ExecutionEvidence[];
   /** Distinct field and action labels observed, for semanticizer grounding. */
   labels: string[];
   stats: {

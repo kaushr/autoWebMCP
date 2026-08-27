@@ -1,11 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { categorizeRequest, collectLabels, normalizeCapture, normalizeEndpoint } from "../src/capture/normalize";
-import type { CaptureEvent } from "../src/capture/types";
+import type { CaptureEvent, CaptureNetworkMetadata } from "../src/capture/types";
 
 const page = { host: "app.example.com", path: "/opportunity" };
 
 function base(id: string, t: number, overrides: Partial<CaptureEvent>): CaptureEvent {
   return { id, kind: "click", t, page, ...overrides };
+}
+
+export function net(
+  overrides: Partial<CaptureNetworkMetadata> & Pick<CaptureNetworkMetadata, "method" | "endpoint" | "category">
+): CaptureNetworkMetadata {
+  const status = overrides.status ?? 200;
+  const startedAt = overrides.startedAt ?? 0;
+  return {
+    requestId: overrides.requestId ?? `req-${overrides.method}-${startedAt}`,
+    origin: "https://app.example.com",
+    resourceType: "xmlhttprequest",
+    status,
+    ok: status >= 200 && status < 400,
+    failed: overrides.failed ?? status === 0,
+    startedAt,
+    completedAt: overrides.completedAt ?? startedAt + (overrides.durationMs ?? 20),
+    durationMs: 20,
+    ...overrides
+  };
 }
 
 describe("normalizeEndpoint", () => {
@@ -64,13 +83,14 @@ describe("normalizeCapture", () => {
       }),
       base("net", 1_300, {
         kind: "network",
-        network: {
+        network: net({
           method: "PATCH",
           endpoint: "/services/data/:v/sobjects/Opportunity/:id",
           status: 204,
           durationMs: 180,
-          category: "mutation"
-        }
+          category: "mutation",
+          startedAt: 1_120
+        })
       })
     ]);
 
@@ -148,11 +168,11 @@ describe("normalizeCapture", () => {
       base("click", 0, { actionLabel: "Search" }),
       base("read", 100, {
         kind: "network",
-        network: { method: "GET", endpoint: "/api/companies", status: 200, durationMs: 20, category: "read" }
+        network: net({ method: "GET", endpoint: "/api/companies", category: "read", startedAt: 80 })
       }),
       base("orphan", 60_000, {
         kind: "network",
-        network: { method: "POST", endpoint: "/api/telemetry", status: 200, durationMs: 20, category: "mutation" }
+        network: net({ method: "POST", endpoint: "/api/telemetry", category: "mutation", startedAt: 59_980 })
       })
     ]);
 

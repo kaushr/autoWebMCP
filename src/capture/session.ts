@@ -1,4 +1,5 @@
 import { collectLabels, normalizeCapture, type ObservationTrace } from "./normalize";
+import { correlateExecutionEvidence } from "./execution";
 import type { CaptureApplicationContext, CaptureEvent } from "./types";
 
 export type CaptureSessionStatus = "recording" | "stopped";
@@ -137,6 +138,7 @@ export class CaptureSession {
       startedAt: new Date(this.startedAt).toISOString(),
       endedAt: new Date(this.endedAt ?? this.startedAt).toISOString(),
       observations,
+      executionEvidence: correlateExecutionEvidence(this.events, observations),
       labels: collectLabels(observations),
       stats: {
         rrwebEvents: this.rrwebEvents,
