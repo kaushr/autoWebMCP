@@ -16,6 +16,12 @@ evidence and platform policy — a lead worth investigating, never permission to
 call anything. An **execution binding** is a validated mechanism a human chose,
 and only that permits publication.
 
+**Platform Intelligence** is the next architectural layer: documented platform
+behaviour — how Lightning retargets events, which interfaces are supported, what
+must never be replayed — compiled once into a versioned pack that runtime
+consumes, rather than rediscovered by a model from raw traces on every session.
+Designed, not built; see [docs/PLATFORM_INTELLIGENCE.md](docs/PLATFORM_INTELLIGENCE.md).
+
 Salesforce remains a documented enterprise/platform constraint and compatibility spike, not a product integration.
 
 ## Run locally
