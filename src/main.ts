@@ -1,9 +1,10 @@
 import "./styles.css";
-import { confirmCandidate, semanticizeTrace } from "./training/semanticizer";
+import { confirmCandidate, semanticizeTrace, type SemanticizerRun } from "./training/semanticizer";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { sourceApplicationFor } from "./training/sourceApplication";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
+import type { CaptureEvent } from "./capture/types";
 import {
   listPublishedCapabilities,
   publishCapability,
@@ -36,6 +37,8 @@ let semanticizerStatus = "Review the proposed contract, choose an execution bind
 let extensionTraces: TraceSummary[] = [];
 let selectedTrace: ObservationTrace | undefined;
 let traceStatus = "Record a session with the Teach Mode extension, then refresh.";
+/** Every semanticizer invocation this session made, oldest first. Ephemeral. */
+let semanticizerRuns: SemanticizerRun[] = [];
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 
@@ -226,6 +229,167 @@ function renderCapabilityState(capability: SemanticCapability, confirmed: boolea
   </dl>`;
 }
 
+/* ----------------------- admin / debug surface ---------------------- *
+ * The provenance plane: what was observed, what it was transformed into,
+ * what was sent to the model, what came back, and what was read out of it.
+ * It only reads state the pipeline already produced — nothing here changes
+ * a capability, a binding, or a publication.
+ * ------------------------------------------------------------------- */
+
+function json(value: unknown): string {
+  return `<pre class="admin-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+}
+
+function panel(title: string, count: string, body: string): string {
+  return `<details class="admin-panel"><summary>${escapeHtml(title)} <span>${escapeHtml(count)}</span></summary>${body}</details>`;
+}
+
+function describeCaptureEvent(event: CaptureEvent): string {
+  const parts = [`<span>${escapeHtml(event.kind)}</span>`];
+  if (event.actionLabel) parts.push(`<strong>${escapeHtml(event.actionLabel)}</strong>`);
+  if (event.field?.label) parts.push(escapeHtml(event.field.label));
+  if (event.field?.section) parts.push(`<small>in ${escapeHtml(event.field.section)}</small>`);
+  if (event.value) {
+    parts.push(
+      event.value.masked
+        ? "<em>value masked</em>"
+        : `<em>${escapeHtml(event.value.from ?? "∅")} → ${escapeHtml(event.value.to ?? "∅")}</em>`
+    );
+  }
+  if (event.network) {
+    const net = event.network;
+    parts.push(
+      `<em>${escapeHtml(net.method)} ${escapeHtml(net.endpoint)} · ${net.failed ? "failed" : net.status} · ${net.durationMs}ms · ${escapeHtml(net.resourceType)}</em>`
+    );
+  }
+  if (event.reaction) {
+    const signals = Object.entries(event.reaction)
+      .filter(([, value]) => value === true)
+      .map(([key]) => key);
+    parts.push(`<small>${signals.length ? escapeHtml(signals.join(", ")) : "no visible reaction"}</small>`);
+  }
+  return parts.join(" ");
+}
+
+function renderCaptureStream(trace: ObservationTrace): string {
+  const events = trace.captureEvents ?? [];
+  if (events.length === 0) {
+    return panel(
+      "Capture stream",
+      "unavailable",
+      `<p class="semanticizer-status">This trace was captured before the capture stream was carried across the
+        handoff. Re-record to inspect it.</p>`
+    );
+  }
+
+  const lines = [...events]
+    .sort((left, right) => left.t - right.t)
+    .map((event) => `<li><code>${event.t}ms</code> ${describeCaptureEvent(event)}</li>`)
+    .join("");
+
+  return panel(
+    "Capture stream",
+    `${events.length} events`,
+    `<ol class="admin-stream">${lines}</ol>
+     <details class="admin-raw"><summary>JSON</summary>${json(events)}</details>`
+  );
+}
+
+function renderNormalizedPanel(trace: ObservationTrace): string {
+  const lines = trace.observations
+    .map(
+      (observation) =>
+        `<li><code>${observation.t}ms</code> <span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`
+    )
+    .join("");
+
+  return panel(
+    "Normalized trace",
+    `${trace.stats.captureEvents} → ${trace.observations.length}`,
+    `<ol class="admin-stream">${lines}</ol>
+     <details class="admin-raw"><summary>JSON</summary>${json(trace.observations)}</details>`
+  );
+}
+
+function renderEvidencePanel(trace: ObservationTrace): string {
+  const evidence = trace.executionEvidence ?? [];
+  return panel(
+    "Execution evidence",
+    evidence.length ? `${evidence.length} correlated` : "none observed",
+    `<p class="semanticizer-status">Observed evidence only. No execution binding is inferred from any of this;
+      a binding exists only where a human selected one.</p>
+     ${evidence.length ? json(evidence) : "<p class=empty>No network activity was correlated with this session.</p>"}`
+  );
+}
+
+function renderSemanticizerRuns(): string {
+  if (semanticizerRuns.length === 0) {
+    return panel(
+      "Semanticizer runs",
+      "none yet",
+      `<p class="semanticizer-status">Propose a capability from a trace to record a run.</p>`
+    );
+  }
+
+  const runs = semanticizerRuns
+    .map((run, index) => {
+      const result = run.candidate
+        ? `<details class="admin-raw"><summary>Parsed result</summary>${json({
+            candidate: run.candidate,
+            ambiguities: run.ambiguities
+          })}</details>`
+        : `<details class="admin-raw" open><summary>Parsed result — failed</summary>
+            <p class="ambiguity">${escapeHtml(run.parseError ?? "unknown parse error")}</p></details>`;
+
+      return `<details class="admin-run">
+        <summary>Run #${index + 1} · <code>${escapeHtml(run.diagnostics.model)}</code> ·
+          ${run.diagnostics.latencyMs}ms · ${run.candidate ? "parsed" : "parse failed"}</summary>
+        <p class="semanticizer-status">
+          run <code>${escapeHtml(run.runId)}</code> ·
+          trace <code>${escapeHtml(run.traceSessionId)}</code> ·
+          prompt <code>${escapeHtml(run.diagnostics.promptVersion)}</code> ·
+          ${escapeHtml(run.diagnostics.requestedAt)}
+          ${run.diagnostics.providerResponseId ? ` · provider <code>${escapeHtml(run.diagnostics.providerResponseId)}</code>` : ""}
+        </p>
+        <details class="admin-raw"><summary>Request</summary>${json({
+          model: run.diagnostics.model,
+          parameters: run.diagnostics.parameters,
+          instructions: run.diagnostics.instructions,
+          input: safeJsonParse(run.diagnostics.input)
+        })}</details>
+        <details class="admin-raw"><summary>Raw response</summary><pre class="admin-json">${escapeHtml(
+          run.rawResponse
+        )}</pre></details>
+        ${result}
+      </details>`;
+    })
+    .join("");
+
+  return panel("Semanticizer runs", `${semanticizerRuns.length}`, runs);
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function renderAdminDebug(): string {
+  const body = selectedTrace
+    ? `${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}`
+    : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
+       ${renderSemanticizerRuns()}`;
+
+  return `<details class="admin-debug">
+    <summary>Admin / Debug</summary>
+    <p class="semanticizer-status">Everything AutoWebMCP observed, transformed, sent to the model, and read back.
+      Development observability: it reads the pipeline and never changes it.</p>
+    ${body}
+  </details>`;
+}
+
 function renderTrainingStudio(): string {
   const confirmed = Boolean(candidate?.provenance.confirmedByHuman);
   const bound = candidate ? Boolean(resolveAdvertisedBinding(candidate)) : false;
@@ -255,6 +419,7 @@ function renderTrainingStudio(): string {
     ${renderExtensionTraces()}
     ${candidateEditor}
     ${renderPublications()}
+    ${renderAdminDebug()}
   </section>`;
 }
 
@@ -325,24 +490,37 @@ function render(): void {
     traceStatus = "Proposing a bounded candidate capability from extension evidence…";
     render();
     try {
-      const response = await semanticizeTrace({
+      const run = await semanticizeTrace({
         traceKind: "extension",
+        traceSessionId: selectedTrace.sessionId,
         application: selectedTrace.application.host,
         platform: selectedTrace.application.platform,
         trace: selectedTrace.observations,
         uiLabels: selectedTrace.labels
       });
+      // Every run is kept, including one the parser rejected. Re-proposing
+      // must not erase the evidence of what the previous attempt returned.
+      semanticizerRuns = [...semanticizerRuns, run];
+
+      if (!run.candidate) {
+        traceStatus = `The model responded, but the candidate could not be parsed: ${run.parseError}`;
+        semanticizerStatus = "See Admin / Debug for the raw response.";
+        render();
+        return;
+      }
+
+      const proposed = run.candidate;
       candidate = {
-        ...response.candidate,
+        ...proposed,
         provenance: {
-          ...response.candidate.provenance,
+          ...proposed.provenance,
           sourceApplication: sourceApplicationFor(
             selectedTrace.application.platform,
             selectedTrace.application.host
           )
         }
       };
-      ambiguities = response.ambiguities;
+      ambiguities = run.ambiguities;
       traceStatus = "Candidate ready for human review.";
       semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
     } catch (error) {

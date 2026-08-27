@@ -138,6 +138,7 @@ export class CaptureSession {
       startedAt: new Date(this.startedAt).toISOString(),
       endedAt: new Date(this.endedAt ?? this.startedAt).toISOString(),
       observations,
+      captureEvents: [...this.events],
       executionEvidence: correlateExecutionEvidence(this.events, observations),
       labels: collectLabels(observations),
       stats: {

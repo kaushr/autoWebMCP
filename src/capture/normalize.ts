@@ -91,6 +91,14 @@ export interface ObservationTrace {
   endedAt: string;
   observations: NormalizedObservation[];
   /**
+   * The safe capture stream the observations were derived from, carried so the
+   * transformation can be inspected rather than trusted. This is the earliest
+   * representation that exists after the privacy boundary — already masked,
+   * selector-free, and free of headers, bodies, and query values — not a raw
+   * recording. Absent on traces captured before observability existed.
+   */
+  captureEvents?: CaptureEvent[];
+  /**
    * How the application appeared to carry out the demonstrated actions. A
    * sibling of `observations`, never folded into them: what a human meant and
    * how an application executes it are separate artifacts, and this one is

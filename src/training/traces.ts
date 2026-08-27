@@ -34,12 +34,19 @@ export function parseObservationTrace(value: unknown): ObservationTrace {
   if (!Array.isArray(trace.observations)) throw new Error("Trace observations must be an array.");
   if (!Array.isArray(trace.labels)) throw new Error("Trace labels must be an array.");
 
-  // Execution evidence arrived after the first traces did; an older trace is
-  // still a valid trace, it simply carries none.
+  // Execution evidence and the capture stream arrived after the first traces
+  // did; an older trace is still a valid trace, it simply carries neither.
   if (trace.executionEvidence !== undefined && !Array.isArray(trace.executionEvidence)) {
     throw new Error("Trace execution evidence must be an array.");
   }
-  return { ...(trace as ObservationTrace), executionEvidence: trace.executionEvidence ?? [] };
+  if (trace.captureEvents !== undefined && !Array.isArray(trace.captureEvents)) {
+    throw new Error("Trace capture events must be an array.");
+  }
+  return {
+    ...(trace as ObservationTrace),
+    executionEvidence: trace.executionEvidence ?? [],
+    captureEvents: trace.captureEvents ?? []
+  };
 }
 
 export async function listTraces(): Promise<TraceSummary[]> {

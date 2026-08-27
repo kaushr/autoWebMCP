@@ -76,6 +76,12 @@ const capabilitySchema = {
   }
 };
 
+/**
+ * Bumped whenever the instructions or response schema change, so a recorded
+ * semanticizer run can be read against the prompt that actually produced it.
+ */
+const SEMANTICIZER_PROMPT_VERSION = "2026-08-27.1";
+
 /** Ephemeral in-memory handoff buffer. Traces are never written to disk. */
 const traces = new Map();
 const MAX_TRACES = 20;
@@ -212,16 +218,20 @@ async function semanticize(request, response) {
     "Set binding to null unless the evidence directly establishes a named existing application action."
   ];
 
+  const model = process.env.OPENAI_MODEL ?? "gpt-5.4";
+  const modelInput = JSON.stringify({
+    application: input.application,
+    platform: input.platform ?? "generic",
+    trace: input.trace,
+    uiLabels: input.uiLabels ?? []
+  });
+
+  const requestedAt = Date.now();
   const modelResponse = await openai.responses.create({
-    model: process.env.OPENAI_MODEL ?? "gpt-5.4",
+    model,
     store: false,
     instructions: instructions.join(" "),
-    input: JSON.stringify({
-      application: input.application,
-      platform: input.platform ?? "generic",
-      trace: input.trace,
-      uiLabels: input.uiLabels ?? []
-    }),
+    input: modelInput,
     text: {
       format: {
         type: "json_schema",
@@ -232,7 +242,35 @@ async function semanticize(request, response) {
     }
   });
 
-  send(response, 200, JSON.parse(modelResponse.output_text));
+  /**
+   * The server keeps building the prompt; it just stops being the only thing
+   * that ever sees it. The raw model output is returned unparsed so a bad
+   * model response and a bad parser are distinguishable downstream.
+   *
+   * Everything here is already safe to show: instructions are static text, the
+   * input is the sanitized evidence trace, and no credential is in scope.
+   * `output_text` is the provider-visible response, not hidden reasoning, which
+   * is neither requested nor stored.
+   */
+  send(response, 200, {
+    raw: modelResponse.output_text,
+    diagnostics: {
+      runId: `run-${requestedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      requestedAt: new Date(requestedAt).toISOString(),
+      latencyMs: Date.now() - requestedAt,
+      model,
+      promptVersion: SEMANTICIZER_PROMPT_VERSION,
+      instructions,
+      input: modelInput,
+      parameters: {
+        store: false,
+        responseFormat: "json_schema",
+        schemaName: "semantic_capability",
+        strict: true
+      },
+      ...(modelResponse.id ? { providerResponseId: modelResponse.id } : {})
+    }
+  });
 }
 
 const mimeTypes = { ".css": "text/css", ".html": "text/html", ".js": "application/javascript", ".svg": "image/svg+xml" };
