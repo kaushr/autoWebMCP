@@ -34,6 +34,8 @@ export interface DebugBundle {
     sourceApplication: { id: string; label: string };
     host: string;
     title?: string;
+    /** Human-supplied recording metadata, exported verbatim. */
+    recording?: { name?: string; description?: string };
     capturedAt: string;
     endedAt: string;
   };
@@ -106,6 +108,7 @@ export function buildDebugBundle(input: DebugBundleInput): DebugBundle {
       sourceApplication: sourceApplicationFor(trace.application.platform, trace.application.host),
       host: trace.application.host,
       ...(trace.application.title ? { title: trace.application.title } : {}),
+      ...(trace.recording ? { recording: trace.recording } : {}),
       capturedAt: trace.startedAt,
       endedAt: trace.endedAt
     },

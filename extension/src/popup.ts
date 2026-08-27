@@ -48,7 +48,14 @@ async function send(message: unknown): Promise<void> {
   }
 }
 
-$("start").addEventListener("click", () => void send({ type: "session:start" }));
+$("start").addEventListener("click", () => {
+  const name = ($("recording-name") as HTMLInputElement).value;
+  const description = ($("recording-description") as HTMLTextAreaElement).value;
+  void send({
+    type: "session:start",
+    ...(name.trim() || description.trim() ? { recording: { name, description } } : {})
+  });
+});
 $("stop").addEventListener("click", () => void send({ type: "session:stop" }));
 $("capture-values").addEventListener("change", (event) =>
   void send({
@@ -63,7 +70,7 @@ $("copy").addEventListener("click", async () => {
   const notice = $("notice");
   notice.hidden = false;
   notice.className = "notice";
-  notice.textContent = "Trace JSON copied to the clipboard.";
+  notice.textContent = "Recording JSON copied to the clipboard.";
 });
 
 void send({ type: "session:status" });

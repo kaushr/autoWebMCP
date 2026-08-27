@@ -83,10 +83,25 @@ export interface NormalizedObservation {
   sourceEventIds: string[];
 }
 
+/**
+ * Human-supplied recording metadata. This is what the person said the
+ * recording is, never something inferred from the application — editing it
+ * must not touch captured evidence, and the session identity does not
+ * change with it. No user identity field: AutoWebMCP has no authenticated
+ * actor of its own, and scraping who happens to be signed into the taught
+ * application would be the wrong kind of evidence.
+ */
+export interface RecordingMetadata {
+  name?: string;
+  description?: string;
+}
+
 export interface ObservationTrace {
   version: 1;
   sessionId: string;
   application: CaptureApplicationContext;
+  /** What the human called this recording; absent when none was given. */
+  recording?: RecordingMetadata;
   startedAt: string;
   endedAt: string;
   observations: NormalizedObservation[];

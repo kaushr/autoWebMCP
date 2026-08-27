@@ -138,10 +138,25 @@ export function proposeBrowserBinding(
       applicationIdentifier: identifier,
       ...(observed.section ? { section: observed.section } : {})
     };
+    // The capability's canonical type is stronger evidence than the capture's
+    // control classification: a Lightning datepicker reports `control:
+    // "other"`, which read as plain text and sent raw canonical dates into a
+    // control expecting its display format. The human-confirmed contract
+    // says what the value *is*; the observed control only suggests it.
+    const valueKind: FieldValueKind =
+      input.enum && input.enum.length > 0
+        ? "select"
+        : input.type === "date"
+          ? "date"
+          : input.type === "number"
+            ? "number"
+            : input.type === "boolean"
+              ? "checkbox"
+              : (CONTROL_TO_VALUE_KIND[observed.control ?? "text"] ?? "text");
     inputs.push({
       semanticInput: input.name,
       semanticTarget: target,
-      valueKind: CONTROL_TO_VALUE_KIND[observed.control ?? "text"] ?? "text"
+      valueKind
     });
     evidence.push(
       `"${input.name}" resolves at runtime to the control labelled "${observed.label}"` +

@@ -1,4 +1,4 @@
-import type { ObservationTrace } from "../capture/normalize";
+import type { ObservationTrace, RecordingMetadata } from "../capture/normalize";
 
 /** One extension-captured trace as summarized by the Training Studio list. */
 export interface TraceSummary {
@@ -6,7 +6,11 @@ export interface TraceSummary {
   application: string;
   platform: string;
   title?: string;
+  /** Human-supplied recording name; the derived page title is the fallback. */
+  name?: string;
+  description?: string;
   startedAt: string;
+  endedAt?: string;
   observations: number;
   receivedAt: string;
 }
@@ -17,7 +21,10 @@ export function summarizeTrace(trace: ObservationTrace, receivedAt: string): Tra
     application: trace.application.host,
     platform: trace.application.platform,
     ...(trace.application.title ? { title: trace.application.title } : {}),
+    ...(trace.recording?.name ? { name: trace.recording.name } : {}),
+    ...(trace.recording?.description ? { description: trace.recording.description } : {}),
     startedAt: trace.startedAt,
+    ...(trace.endedAt ? { endedAt: trace.endedAt } : {}),
     observations: trace.observations.length,
     receivedAt
   };
@@ -60,4 +67,39 @@ export async function getTrace(sessionId: string): Promise<ObservationTrace> {
   const response = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`);
   if (!response.ok) throw new Error(`Could not load trace ${sessionId} (${response.status}).`);
   return parseObservationTrace(await response.json());
+}
+
+/** Recording duration when both ends were captured; absent otherwise. */
+export function summaryDurationMs(summary: Pick<TraceSummary, "startedAt" | "endedAt">): number | undefined {
+  if (!summary.endedAt) return undefined;
+  const started = Date.parse(summary.startedAt);
+  const ended = Date.parse(summary.endedAt);
+  if (Number.isNaN(started) || Number.isNaN(ended) || ended < started) return undefined;
+  return ended - started;
+}
+
+/**
+ * A trace with only its human-supplied metadata changed. Everything the
+ * session captured — identity, events, observations, evidence — is the same
+ * object graph as before, which is the whole contract of editing a name.
+ */
+export function withRecordingMetadata(trace: ObservationTrace, recording: RecordingMetadata): ObservationTrace {
+  const name = recording.name?.trim();
+  const description = recording.description?.trim();
+  if (!name && !description) {
+    const { recording: _dropped, ...rest } = trace;
+    return rest as ObservationTrace;
+  }
+  return { ...trace, recording: { ...(name ? { name } : {}), ...(description ? { description } : {}) } };
+}
+
+/** Updates a stored trace's recording metadata; evidence is untouched by design. */
+export async function updateTraceRecording(sessionId: string, recording: RecordingMetadata): Promise<TraceSummary> {
+  const response = await fetch(`/api/traces/${encodeURIComponent(sessionId)}/recording`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(recording)
+  });
+  if (!response.ok) throw new Error(`Could not update the recording details (${response.status}).`);
+  return (await response.json()) as TraceSummary;
 }

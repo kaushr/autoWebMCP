@@ -1,5 +1,5 @@
 import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/types";
-import type { ObservationTrace } from "../../src/capture/normalize";
+import type { ObservationTrace, RecordingMetadata } from "../../src/capture/normalize";
 import type { BrowserExecutionBinding } from "../../src/binding/browserExecution/model";
 import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 
@@ -56,7 +56,7 @@ export interface BrowserBindingExecuteResponse {
 
 /** Popup, content script, or the Studio bridge → service worker. */
 export type ToBackgroundMessage =
-  | { type: "session:start" }
+  | { type: "session:start"; recording?: RecordingMetadata }
   | { type: "session:stop" }
   | { type: "session:status" }
   | { type: "session:settings"; settings: Partial<CaptureSettings> }

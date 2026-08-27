@@ -1,4 +1,10 @@
-export type CapabilityInputType = "string" | "number" | "boolean";
+/**
+ * Canonical semantic input types. `date` is a logical calendar date carried
+ * as `YYYY-MM-DD` — how a live application wants it *presented* (a locale
+ * display string, a picker interaction) is the browser binding's and the
+ * platform adapter's business, never part of the capability contract.
+ */
+export type CapabilityInputType = "string" | "date" | "number" | "boolean";
 
 /**
  * The application a capability was demonstrated on. Deliberately just an

@@ -21,8 +21,12 @@ export function compileCapability(
     capability.inputs.map((input) => [
       input.name,
       {
-        type: input.type,
-        description: input.description,
+        // JSON Schema has no date primitive; the canonical wire contract for
+        // a semantic date is an ISO string, and the description says so, so
+        // an agent supplies YYYY-MM-DD and platform presentation stays the
+        // execution layer's concern.
+        type: input.type === "date" ? ("string" as const) : input.type,
+        description: input.type === "date" ? `${input.description} (date, YYYY-MM-DD)` : input.description,
         ...(input.enum ? { enum: input.enum } : {})
       }
     ])

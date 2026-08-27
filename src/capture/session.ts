@@ -1,4 +1,4 @@
-import { collectLabels, normalizeCapture, type ObservationTrace } from "./normalize";
+import { collectLabels, normalizeCapture, type ObservationTrace, type RecordingMetadata } from "./normalize";
 import { correlateExecutionEvidence } from "./execution";
 import type { CaptureApplicationContext, CaptureEvent } from "./types";
 
@@ -19,6 +19,7 @@ export interface CaptureSessionSnapshot {
   application: CaptureApplicationContext;
   status: CaptureSessionStatus;
   endedAt?: number;
+  recording?: RecordingMetadata;
   events: CaptureEvent[];
   rrwebEvents: number;
   dropped: number;
@@ -44,6 +45,7 @@ export class CaptureSession {
   private readonly maxEvents: number;
   private status: CaptureSessionStatus = "recording";
   private endedAt?: number;
+  private recording?: RecordingMetadata;
   private rrwebEvents = 0;
   private dropped = 0;
 
@@ -68,6 +70,7 @@ export class CaptureSession {
     session.dropped = snapshot.dropped;
     session.status = snapshot.status;
     session.endedAt = snapshot.endedAt;
+    session.recording = snapshot.recording;
     return session;
   }
 
@@ -78,10 +81,22 @@ export class CaptureSession {
       application: this.application,
       status: this.status,
       ...(this.endedAt !== undefined ? { endedAt: this.endedAt } : {}),
+      ...(this.recording ? { recording: this.recording } : {}),
       events: [...this.events],
       rrwebEvents: this.rrwebEvents,
       dropped: this.dropped,
       maxEvents: this.maxEvents
+    };
+  }
+
+  /** What the human called this recording. Metadata only, never evidence. */
+  describeRecording(recording: RecordingMetadata): void {
+    const name = recording.name?.trim();
+    const description = recording.description?.trim();
+    if (!name && !description) return;
+    this.recording = {
+      ...(name ? { name } : {}),
+      ...(description ? { description } : {})
     };
   }
 
@@ -135,6 +150,7 @@ export class CaptureSession {
       version: 1,
       sessionId: this.id,
       application: this.application,
+      ...(this.recording ? { recording: this.recording } : {}),
       startedAt: new Date(this.startedAt).toISOString(),
       endedAt: new Date(this.endedAt ?? this.startedAt).toISOString(),
       observations,

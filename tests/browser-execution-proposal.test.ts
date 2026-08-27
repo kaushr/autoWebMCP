@@ -124,6 +124,25 @@ describe("proposeBrowserBinding — deterministic, evidence-only", () => {
     expect(proposal.warnings.some((warning) => /matches several/i.test(warning))).toBe(true);
   });
 
+  it("prefers the capability's canonical type over the capture's control classification", () => {
+    // The live gap: a Lightning datepicker reports control "other", which
+    // proposed valueKind "text" and sent raw canonical dates into a control
+    // expecting its display format. The confirmed contract wins.
+    const dateCapability = capability({
+      inputs: [{ name: "close_date", description: "close_date", type: "date", required: true }]
+    });
+    const otherControl: CaptureEvent[] = [
+      REAL_WORKFLOW[0],
+      {
+        ...REAL_WORKFLOW[1],
+        field: { label: "*Close Date", section: "Opportunity Details", control: "other" }
+      },
+      REAL_WORKFLOW[2]
+    ];
+    const proposal = proposeBrowserBinding(dateCapability, traceFrom(otherControl));
+    expect(proposal.binding?.inputs[0].valueKind).toBe("date");
+  });
+
   it("proposes nothing when the capability has no recorded source application", () => {
     const noSource = capability({ provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true } });
     const proposal = proposeBrowserBinding(noSource, traceFrom(REAL_WORKFLOW));

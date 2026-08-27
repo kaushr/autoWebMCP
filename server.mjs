@@ -30,7 +30,7 @@ const capabilitySchema = {
             properties: {
               name: { type: "string" },
               description: { type: "string" },
-              type: { type: "string", enum: ["string", "number", "boolean"] },
+              type: { type: "string", enum: ["string", "date", "number", "boolean"] },
               required: { type: "boolean" }
             }
           }
@@ -137,7 +137,7 @@ function corsHeaders(request) {
   return allowed
     ? {
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       }
     : {};
@@ -168,10 +168,34 @@ function summarizeTrace(entry) {
     application: trace.application.host,
     platform: trace.application.platform,
     ...(trace.application.title ? { title: trace.application.title } : {}),
+    ...(trace.recording?.name ? { name: trace.recording.name } : {}),
+    ...(trace.recording?.description ? { description: trace.recording.description } : {}),
     startedAt: trace.startedAt,
+    ...(trace.endedAt ? { endedAt: trace.endedAt } : {}),
     observations: trace.observations.length,
     receivedAt
   };
+}
+
+/**
+ * Updates only a trace's human-supplied recording metadata. The session
+ * identity and every piece of captured evidence stay exactly as received —
+ * this is what the person calls the recording, never what was observed.
+ */
+function updateTraceRecording(sessionId, body) {
+  const entry = traces.get(sessionId);
+  if (!entry) return undefined;
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const description = typeof body?.description === "string" ? body.description.trim() : "";
+  if (name || description) {
+    entry.trace.recording = {
+      ...(name ? { name } : {}),
+      ...(description ? { description } : {})
+    };
+  } else {
+    delete entry.trace.recording;
+  }
+  return summarizeTrace(entry);
 }
 
 /** Extension → Training Studio handoff. */
@@ -430,6 +454,13 @@ createServer(async (request, response) => {
     }
     if (request.method === "GET" && request.url === "/api/traces") {
       send(response, 200, { traces: [...traces.values()].map(summarizeTrace).reverse() }, corsHeaders(request));
+      return;
+    }
+    if (request.method === "PATCH" && request.url?.startsWith("/api/traces/") && request.url.endsWith("/recording")) {
+      const sessionId = decodeURIComponent(request.url.slice("/api/traces/".length, -"/recording".length));
+      const summary = updateTraceRecording(sessionId, await readJson(request, 20_000));
+      if (!summary) send(response, 404, { error: "Unknown trace." }, corsHeaders(request));
+      else send(response, 200, summary, corsHeaders(request));
       return;
     }
     if (request.method === "GET" && request.url?.startsWith("/api/traces/")) {

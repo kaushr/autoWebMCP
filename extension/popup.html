@@ -50,6 +50,15 @@
       button:disabled { opacity: 0.4; cursor: not-allowed; }
       label.toggle { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--muted); }
       label.toggle input { margin-top: 2px; }
+      label.field { display: block; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+      label.field input, label.field textarea {
+        width: 100%; margin-top: 3px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+        font: inherit; color: var(--ink); background: transparent;
+      }
+      label.field textarea { resize: vertical; min-height: 34px; }
+      details.debug { margin-top: 12px; font-size: 12px; color: var(--muted); }
+      details.debug summary { cursor: pointer; }
+      details.debug button { margin-top: 8px; width: 100%; }
       .notice { margin-top: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
       .notice.error { border-color: var(--rec); }
       footer { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; color: var(--muted); font-size: 11px; }
@@ -68,6 +77,13 @@
       <dt>Session</dt><dd id="session">—</dd>
     </dl>
 
+    <label class="field">Recording name (optional)
+      <input id="recording-name" type="text" placeholder="e.g. Update Opportunity Close Date test" />
+    </label>
+    <label class="field">Description (optional)
+      <textarea id="recording-description" rows="2" placeholder="What this recording demonstrates"></textarea>
+    </label>
+
     <div class="actions">
       <button id="start">Start training</button>
       <button id="stop" class="secondary" disabled>Stop training</button>
@@ -79,7 +95,10 @@
     </label>
 
     <div class="notice" id="notice" hidden></div>
-    <button id="copy" class="secondary" style="margin-top: 12px" disabled>Copy last trace JSON</button>
+    <details class="debug">
+      <summary>Advanced / Debug</summary>
+      <button id="copy" class="secondary" disabled>Copy recording JSON</button>
+    </details>
 
     <footer>Capture runs only between start and stop, on this tab. Raw recording stays in the page.</footer>
     <script src="popup.js"></script>

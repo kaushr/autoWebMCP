@@ -18,9 +18,22 @@ import {
   type DebugBundle
 } from "./training/debugBundle";
 import { deriveStudioLifecycle, type StudioLifecycleView } from "./training/studioLifecycle";
-import { getTrace, listTraces, type TraceSummary } from "./training/traces";
+import {
+  getTrace,
+  listTraces,
+  summaryDurationMs,
+  updateTraceRecording,
+  withRecordingMetadata,
+  type TraceSummary
+} from "./training/traces";
+import {
+  buildTestFormFields,
+  summarizeExecutionPlan,
+  validateTestInputs,
+  type TestFormField
+} from "./training/executionTestForm";
 import type { ObservationTrace } from "./capture/normalize";
-import type { CaptureEvent } from "./capture/types";
+import type { CaptureEvent, CapturePlatform } from "./capture/types";
 import {
   listPublishedCapabilities,
   publishCapability,
@@ -107,6 +120,10 @@ let validationStatus = "";
  */
 let browserBindingCandidate: BrowserBindingCandidateRecord | undefined;
 let browserBindingStatus = "";
+/** Raw values the browser-execution test form has collected so far. */
+let browserTestValues: Record<string, string> = {};
+let browserTestErrors: string[] = [];
+let traceDetailsStatus = "";
 let browserBindingValidation: BrowserBindingValidationRecord | undefined;
 let browserValidationStatus = "";
 let publications: PublicationRecord[] = [];
@@ -160,6 +177,8 @@ function clearExecutionState(): void {
   browserBindingStatus = "";
   browserBindingValidation = undefined;
   browserValidationStatus = "";
+  browserTestValues = {};
+  browserTestErrors = [];
 }
 
 /**
@@ -205,16 +224,62 @@ function describeObservation(observation: ObservationTrace["observations"][numbe
  * into the capability. Correlation, not causation, so the wording stays
  * observational.
  */
+/** One capture card: what the human named it, where it came from, when, and how much. */
+function renderTraceCard(trace: TraceSummary): string {
+  const platformLabel = sourceApplicationFor(trace.platform as CapturePlatform, trace.application).label;
+  const capturedAt = new Date(trace.startedAt).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+  const durationMs = summaryDurationMs(trace);
+  const duration = durationMs !== undefined ? ` · ${Math.max(1, Math.round(durationMs / 1000))} sec` : "";
+  const description =
+    trace.description && trace.description.length > 140
+      ? `${trace.description.slice(0, 140)}…`
+      : trace.description;
+  const heading = trace.name ?? trace.title ?? trace.application;
+  // The page title earns a line only when the heading is a human-given name
+  // that differs from it — otherwise it would just repeat the heading.
+  const subtitle = [platformLabel, trace.title && trace.title !== heading ? trace.title : undefined]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `<li><button class="trace-option ${trace.sessionId === selectedTrace?.sessionId ? "selected" : ""}" data-trace-id="${escapeHtml(trace.sessionId)}">
+      <strong>${escapeHtml(heading)}</strong>
+      <span>${escapeHtml(subtitle)}</span>
+      <span>${escapeHtml(capturedAt)} · ${trace.observations} obs${escapeHtml(duration)} · <small>${escapeHtml(trace.sessionId.slice(0, 14))}</small></span>
+      ${description ? `<span class="trace-description">${escapeHtml(description)}</span>` : ""}
+    </button></li>`;
+}
+
+/**
+ * Recording name and description are human metadata: editing them changes
+ * what the person calls this capture and nothing else — the session
+ * identity, events, observations, and evidence are untouched by design.
+ */
+function renderTraceDetailsEditor(): string {
+  if (!selectedTrace) return "";
+  const recording = selectedTrace.recording;
+  return `<details class="admin-raw">
+    <summary>Edit recording details</summary>
+    <div class="trace-details-form">
+      <label>Recording name
+        <input id="trace-name" value="${escapeHtml(recording?.name ?? "")}" placeholder="${escapeHtml(selectedTrace.application.title ?? "Untitled recording")}" />
+      </label>
+      <label>Description
+        <textarea id="trace-description" rows="2">${escapeHtml(recording?.description ?? "")}</textarea>
+      </label>
+      <div class="studio-actions">
+        <button type="button" id="save-trace-details" class="secondary">Save details</button>
+        <p class="semanticizer-status">${escapeHtml(traceDetailsStatus)}</p>
+      </div>
+    </div>
+  </details>`;
+}
+
 function renderExtensionTraces(): string {
   const list = extensionTraces.length
-    ? extensionTraces
-        .map(
-          (trace) => `<li><button class="trace-option ${trace.sessionId === selectedTrace?.sessionId ? "selected" : ""}" data-trace-id="${escapeHtml(trace.sessionId)}">
-            <strong>${escapeHtml(trace.title ?? trace.application)}</strong>
-            <span>${escapeHtml(trace.platform)} · ${trace.observations} observations</span>
-          </button></li>`
-        )
-        .join("")
+    ? extensionTraces.map(renderTraceCard).join("")
     : "<li class=empty>No extension traces have been handed off yet.</li>";
 
   const detail = selectedTrace
@@ -224,7 +289,8 @@ function renderExtensionTraces(): string {
        <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events
          → ${selectedTrace.observations.length} normalized observations
          → ${(selectedTrace.executionEvidence ?? []).length} execution evidence groups.
-         Details are under Admin / Debug.</p>`
+         Details are under Admin / Debug.</p>
+       ${renderTraceDetailsEditor()}`
     : "";
 
   return `<section class="extension-traces" aria-label="Extension traces">
@@ -267,7 +333,7 @@ function semanticContract(capability: SemanticCapability): string {
   return JSON.stringify({
     name: capability.name,
     description: capability.description,
-    inputs: capability.inputs.map((input) => [input.name, input.required])
+    inputs: capability.inputs.map((input) => [input.name, input.type, input.required])
   });
 }
 
@@ -464,16 +530,59 @@ function renderBrowserExecutionStage(view: StudioLifecycleView): string {
         browserBindingCandidate ? "Suggest again" : "Suggest browser execution"
       }</button>
       ${
-        view.browserExecution.canTest
-          ? `<button type="button" id="test-browser-binding">Test browser execution</button>`
-          : ""
-      }
-      ${
         view.browserExecution.status === "proposed" && view.browserExecution.canReject
           ? `<button type="button" id="reject-browser-binding" class="secondary">Reject this suggestion</button>`
           : ""
       }
       <p class="semanticizer-status">${escapeHtml(browserBindingStatus)}</p>
+    </div>
+    ${view.browserExecution.canTest && candidate && binding ? renderBrowserTestForm(candidate, binding) : ""}
+  </div>`;
+}
+
+/** One typed control per field, per the canonical input contract. */
+function renderTestControl(field: TestFormField): string {
+  const value = browserTestValues[field.name] ?? "";
+  switch (field.control) {
+    case "date":
+      return `<input type="date" data-test-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+    case "number":
+      return `<input type="number" data-test-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+    case "checkbox":
+      return `<input type="checkbox" data-test-input="${escapeHtml(field.name)}" ${value === "true" ? "checked" : ""} />`;
+    case "select":
+      return `<select data-test-input="${escapeHtml(field.name)}">
+        <option value="">Choose…</option>
+        ${(field.options ?? []).map((option) => `<option value="${escapeHtml(option)}" ${value === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
+      </select>`;
+    default:
+      return `<input type="text" data-test-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+  }
+}
+
+/**
+ * The execution test form. Controls come from the capability's canonical
+ * input types, values are validated and canonicalized before the explicit
+ * confirmation, and confirmation summarizes what will actually be done —
+ * it never collects values one-by-one through prompts.
+ */
+function renderBrowserTestForm(
+  capability: SemanticCapability,
+  binding: NonNullable<BrowserBindingCandidateRecord["proposal"]["binding"]>
+): string {
+  const fields = buildTestFormFields(capability, binding);
+  return `<div class="test-form">
+    <p class="eyebrow">Test execution</p>
+    ${fields
+      .map(
+        (field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}
+          ${renderTestControl(field)}
+        </label>`
+      )
+      .join("")}
+    ${browserTestErrors.length ? `<p class="ambiguity">${browserTestErrors.map(escapeHtml).join(" · ")}</p>` : ""}
+    <div class="studio-actions">
+      <button type="button" id="run-browser-test">Run test</button>
     </div>
   </div>`;
 }
@@ -1005,7 +1114,9 @@ function renderTrainingStudio(): string {
         <label>Description<textarea name="description">${escapeHtml(capability.description)}</textarea></label>
         <div class="input-list">${capability.inputs
           .map(
-            (input, index) => `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
+            (input, index) => `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label>Type <select name="input-type-${index}">${(["string", "date", "number", "boolean"] as const)
+              .map((type) => `<option value="${type}" ${input.type === type ? "selected" : ""}>${type}</option>`)
+              .join("")}</select></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
           )
           .join("")}</div>
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
@@ -1101,6 +1212,24 @@ function render(): void {
     });
   });
 
+  document.querySelector<HTMLButtonElement>("#save-trace-details")?.addEventListener("click", async () => {
+    if (!selectedTrace) return;
+    const name = document.querySelector<HTMLInputElement>("#trace-name")?.value ?? "";
+    const description = document.querySelector<HTMLTextAreaElement>("#trace-description")?.value ?? "";
+    connectionIssue = undefined;
+    try {
+      await updateTraceRecording(selectedTrace.sessionId, { name, description });
+      // Metadata only: the local trace object keeps its identity and every
+      // piece of evidence; only what the human calls it changes.
+      selectedTrace = withRecordingMetadata(selectedTrace, { name, description });
+      extensionTraces = await listTraces();
+      traceDetailsStatus = "Recording details saved.";
+    } catch (error) {
+      traceDetailsStatus = describeActionFailure("Saving recording details", error);
+    }
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#semanticize-extension-trace")?.addEventListener("click", async () => {
     if (!selectedTrace) return;
     traceStatus = "Proposing a bounded candidate capability from extension evidence…";
@@ -1160,11 +1289,17 @@ function render(): void {
       ...candidate,
       name: String(form.get("name") ?? candidate.name),
       description: String(form.get("description") ?? candidate.description),
-      inputs: candidate.inputs.map((input, index) => ({
-        ...input,
-        name: String(form.get(`input-name-${index}`) ?? input.name),
-        required: form.get(`input-required-${index}`) === "on"
-      }))
+      inputs: candidate.inputs.map((input, index) => {
+        const type = String(form.get(`input-type-${index}`) ?? input.type);
+        return {
+          ...input,
+          name: String(form.get(`input-name-${index}`) ?? input.name),
+          type: (["string", "date", "number", "boolean"] as const).includes(type as never)
+            ? (type as (typeof input)["type"])
+            : input.type,
+          required: form.get(`input-required-${index}`) === "on"
+        };
+      })
     };
 
     if (application && action) edited.binding = { application, action };
@@ -1342,27 +1477,47 @@ function render(): void {
   // does. Every branch below sets both, so a cancellation or an early
   // failure — which never produces a result — is still visible somewhere,
   // instead of silently updating a variable with no render path.
-  document.querySelector<HTMLButtonElement>("#test-browser-binding")?.addEventListener("click", async () => {
+  // The typed test form: values collect silently (no re-render per
+  // keystroke — a full innerHTML rebuild would eat focus), validation and
+  // canonicalization run BEFORE the confirmation, and the confirmation
+  // summarizes what will be done rather than asking for anything.
+  for (const control of document.querySelectorAll<HTMLElement>("[data-test-input]")) {
+    control.addEventListener("change", (event) => {
+      const element = event.currentTarget as HTMLInputElement | HTMLSelectElement;
+      const name = element.getAttribute("data-test-input");
+      if (!name) return;
+      browserTestValues = {
+        ...browserTestValues,
+        [name]: element instanceof HTMLInputElement && element.type === "checkbox"
+          ? String(element.checked)
+          : element.value
+      };
+    });
+  }
+
+  document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", async () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!candidate || !binding) return;
 
-    const inputs: Record<string, string> = {};
-    for (const input of binding.inputs) {
-      const value = window.prompt(
-        `Test value for "${input.semanticTarget.label}" (${input.semanticInput}):`
-      );
-      if (value === null) {
-        browserBindingStatus = "Test cancelled.";
-        browserValidationStatus = "Test cancelled.";
-        render();
-        return;
-      }
-      inputs[input.semanticInput] = value;
+    const fields = buildTestFormFields(candidate, binding);
+    const validation = validateTestInputs(fields, browserTestValues);
+    if (!validation.ok) {
+      // Invalid or missing required inputs block here — the target
+      // application has not been touched.
+      browserTestErrors = validation.errors;
+      render();
+      return;
     }
+    browserTestErrors = [];
+    const inputs = validation.values;
 
     const confirmed = window.confirm(
-      "This performs a real write through the application's own browser UI, in the tab this workflow was taught " +
-        "on, and clicks its commit action.\n\nOnly proceed if you intend to make this change."
+      summarizeExecutionPlan(
+        fields,
+        inputs,
+        binding.commit.semanticAction.label,
+        binding.sourceApplication.label
+      )
     );
     if (!confirmed) {
       browserBindingStatus = "Test cancelled.";

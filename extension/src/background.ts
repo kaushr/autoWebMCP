@@ -187,7 +187,7 @@ async function injectCapture(tabId: number): Promise<void> {
   });
 }
 
-async function startSession(): Promise<SessionStatus> {
+async function startSession(recording?: { name?: string; description?: string }): Promise<SessionStatus> {
   await stopSession();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -196,6 +196,7 @@ async function startSession(): Promise<SessionStatus> {
   }
 
   session = new CaptureSession(newSessionId(), Date.now(), applicationFromTab(tab));
+  if (recording) session.describeRecording(recording);
   recordingTabId = tab.id;
   await rememberLastTab(tab.id);
   attachNetworkObserver();
@@ -219,7 +220,7 @@ async function handoff(trace: ObservationTrace): Promise<HandoffResult> {
     }
     return {
       ok: true,
-      message: `Sent ${trace.observations.length} observations to the Training Studio.`,
+      message: `Recording sent to the Training Studio (${trace.observations.length} observations).`,
       sessionId: trace.sessionId,
       observations: trace.observations.length
     };
@@ -282,7 +283,7 @@ async function status(): Promise<SessionStatus> {
 async function handle(message: ToBackgroundMessage, senderTabId?: number): Promise<unknown> {
   switch (message.type) {
     case "session:start":
-      return startSession();
+      return startSession(message.recording);
     case "session:stop":
       return stopSession();
     case "session:status":
