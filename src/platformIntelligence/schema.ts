@@ -22,6 +22,7 @@ export type KnowledgeCategory =
   | "component-framework-behavior"
   | "resolution-policy"
   | "page-state-semantics"
+  | "verification-semantics"
   | "binding-knowledge"
   | "anti-pattern"
   | "reference";
@@ -210,6 +211,34 @@ export interface PageStateSemanticsEntry extends KnowledgeEntryBase {
   };
 }
 
+/**
+ * How a committed save is verified on this platform — specifically, what
+ * distinguishes a blocking validation error from the platform's own success
+ * notification.
+ *
+ * Twice-observed evidence behind it: Salesforce's post-save notification
+ * satisfies generic alert semantics (`role="alert"`), so the original Teach
+ * capture flagged "validation message shown" and "confirmation toast shown"
+ * on the same successful human save, and a live executed save that
+ * ground-truth succeeded was misreported as failed by a document-wide alert
+ * sweep. Meanwhile a genuinely blocking validation was observed to hold the
+ * record-edit surface open with the error rendered inside it.
+ */
+export interface VerificationSemanticsEntry extends KnowledgeEntryBase {
+  category: "verification-semantics";
+  strength: "documented-fact" | "documented-policy" | "validated-platform-rule";
+  verification: {
+    /** A validation error that blocks a save keeps the record-edit surface open. */
+    blockingValidationHoldsEditSurfaceOpen: boolean;
+    /** The platform's success notification may itself carry `role="alert"`. */
+    successNotificationMatchesAlertRole: boolean;
+    /** Component identities (class names) of notification/toast regions — never validation evidence. */
+    notificationComponentClasses: string[];
+    /** ARIA roles that identify notification regions. */
+    notificationRoles: string[];
+  };
+}
+
 export type KnowledgeEntry =
   | DocumentedFactEntry
   | ObservationSemanticsEntry
@@ -221,6 +250,7 @@ export type KnowledgeEntry =
   | ComponentFrameworkBehaviorEntry
   | ResolutionPolicyEntry
   | PageStateSemanticsEntry
+  | VerificationSemanticsEntry
   | BindingKnowledgeEntry
   | AntiPatternEntry
   | ReferenceEntry;

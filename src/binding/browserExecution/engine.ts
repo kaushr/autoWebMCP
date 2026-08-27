@@ -2,6 +2,7 @@ import type { FieldValueKind, SemanticTarget, VerificationCheck } from "./model"
 import type { ExecutionCheckResult } from "./result";
 import { DEFAULT_RESOLUTION_POLICY, type IdentitySignal, type ResolutionPolicy } from "./resolutionPolicy";
 import type { EditableTransition } from "./pageState";
+import type { ValidationAssessment } from "./verificationPolicy";
 import {
   composedClosest,
   ownerScope,
@@ -11,6 +12,7 @@ import {
 
 export type { ResolutionPolicy } from "./resolutionPolicy";
 export type { EditableTransition, PageState, PageStateAssessment, PageStatePolicy } from "./pageState";
+export type { ValidationAssessment, VerificationPolicy } from "./verificationPolicy";
 
 /* ------------------------------------------------------------------ *
  * Generic browser execution engine.
@@ -86,8 +88,13 @@ export interface PlatformResolverAdapter {
     valueKind: FieldValueKind,
     policy: ResolutionPolicy
   ): Promise<FieldWriteOutcome> | FieldWriteOutcome | undefined;
-  /** `true`/`false` is a real answer; `undefined` means "ask the generic check instead". */
-  hasValidationError?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
+  /**
+   * Platform-aware post-commit validation assessment: distinguishes a
+   * blocking validation error from the platform's own notifications, tied
+   * to the save attempt's edit surface. `undefined` declines to the
+   * generic visible-alert check.
+   */
+  assessValidation?(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment | undefined;
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /** Reads a field's current on-screen value back, for verification. `undefined` means unreadable. */
   readFieldValue?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined;
@@ -473,6 +480,36 @@ export interface VerifyContext {
   adapter?: PlatformResolverAdapter;
 }
 
+/** `2026-10-01` or `10/1/2026` (month-first, as this platform displays dates) → date parts. */
+function parseDateParts(value: string): { y: number; m: number; d: number } | undefined {
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (iso) return { y: Number(iso[1]), m: Number(iso[2]), d: Number(iso[3]) };
+  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value.trim());
+  if (slash) return { y: Number(slash[3]), m: Number(slash[1]), d: Number(slash[2]) };
+  return undefined;
+}
+
+/**
+ * Compares a requested value to what the page displays. A record view does
+ * not echo the input's wire format — a date written as `2026-10-01` is
+ * displayed as `10/1/2026` — so equal date *parts* count as a match. A
+ * value that neither matches nor parses into a comparable form is
+ * `incomparable`: not proof of a wrong write, and never silently proof of
+ * a right one.
+ */
+export function compareObservedValue(expected: string, observed: string): "match" | "mismatch" | "incomparable" {
+  if (normalizeLabel(observed) === normalizeLabel(expected)) return "match";
+  const expectedDate = parseDateParts(expected);
+  const observedDate = parseDateParts(observed);
+  if (expectedDate && observedDate) {
+    return expectedDate.y === observedDate.y && expectedDate.m === observedDate.m && expectedDate.d === observedDate.d
+      ? "match"
+      : "mismatch";
+  }
+  if (expectedDate || observedDate) return "incomparable";
+  return "mismatch";
+}
+
 const GENERIC_VALIDATION_SELECTOR = '[role="alert"], [aria-invalid="true"]';
 
 function genericHasValidationError(root: ParentNode, policy: ResolutionPolicy): boolean {
@@ -503,12 +540,15 @@ export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
   const policy = policyFor(context.adapter);
 
   if (context.checks.includes("no-validation-error-visible")) {
-    const hasError =
-      context.adapter?.hasValidationError?.(context.root, policy) ?? genericHasValidationError(context.root, policy);
+    const assessment = context.adapter?.assessValidation?.(context.root, policy);
+    const hasError = assessment ? assessment.blocking : genericHasValidationError(context.root, policy);
+    const notes = assessment?.notes.length ? ` ${assessment.notes.join(" ")}` : "";
     results.push({
       name: "validation_clear",
       status: hasError ? "fail" : "pass",
-      detail: hasError ? "A validation error is visible on the page." : "No validation error is visible."
+      detail: hasError
+        ? `A blocking validation error is in effect.${notes}`
+        : `No blocking validation error is in effect.${notes}`
     });
   }
 
@@ -540,7 +580,17 @@ export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
         details.push(`"${input.target.label}" could not be read back.`);
         continue;
       }
-      if (normalizeLabel(value) !== normalizeLabel(input.expectedValue)) {
+      const comparison = compareObservedValue(input.expectedValue, value);
+      if (comparison === "incomparable") {
+        // The read-back produced something that neither matches nor can be
+        // meaningfully compared (a display string the extractor misjudged).
+        // That is "could not verify", never proof of a wrong write — and
+        // never silently proof of a right one either.
+        allObserved = false;
+        details.push(`"${input.target.label}" read back as "${value}", which cannot be compared to "${input.expectedValue}".`);
+        continue;
+      }
+      if (comparison === "mismatch") {
         allMatched = false;
         details.push(`"${input.target.label}" reads "${value}", expected "${input.expectedValue}".`);
       }

@@ -336,3 +336,59 @@ describe("executeConfirmed — entering edit mode automatically", () => {
     expect(result.evidence.join(" ")).not.toMatch(/entered the record's edit view/i);
   });
 });
+
+
+describe("post-save verification against the record view", () => {
+  it("reaches full succeeded when the save closes the edit surface, shows a success toast, and the record view displays the new value", async () => {
+    // The live run, as it should have been scored: ground truth was a
+    // successful save misreported as failed by the platform's own toast.
+    document.body.innerHTML = `
+      <div role="dialog" aria-modal="true" id="edit-dialog">
+        <label for="cd">Close Date</label>
+        <mock-lightning-datepicker id="cd" name="CloseDate"></mock-lightning-datepicker>
+        <label for="am">Amount</label>
+        <input id="am" name="Amount" />
+        <button id="save">Save</button>
+        <button>Cancel</button>
+      </div>
+    `;
+    document.querySelector("#save")!.addEventListener("click", () => {
+      document.querySelector("#edit-dialog")!.remove();
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        `<div class="slds-notify_container"><div role="alert" class="slds-notify toast">Saved.</div></div>
+         <button>Edit</button>
+         <div class="slds-form-element"><span>Close Date</span><div class="field-value">12/15/2026</div></div>`
+      );
+    });
+
+    const result = await executeConfirmed({
+      root: document,
+      binding: BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+
+    expect(result.checks.find((check) => check.name === "validation_clear")?.status).toBe("pass");
+    expect(result.checks.find((check) => check.name === "value_verified")?.status).toBe("pass");
+    expect(result.status).toBe("succeeded");
+  });
+
+  it("stays failed when the save is genuinely rejected: the edit surface remains open with the error inside it", async () => {
+    mountEditForm({ rejectSave: true });
+    const result = await executeConfirmed({
+      root: document,
+      binding: BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.checks.find((check) => check.name === "validation_clear")?.status).toBe("fail");
+    expect(result.checks.find((check) => check.name === "returned_to_record")?.status).toBe("fail");
+  });
+});

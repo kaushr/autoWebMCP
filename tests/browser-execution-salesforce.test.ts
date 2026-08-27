@@ -174,16 +174,25 @@ describe("Salesforce adapter — reading a value back", () => {
 });
 
 describe("Salesforce adapter — validation and edit-state detection", () => {
-  it("detects an SLDS validation error", () => {
-    const root = mount(`<div class="slds-has-error">Required</div>`);
-    const adapter = createSalesforceResolverAdapter();
-    expect(adapter.hasValidationError!(root, SF)).toBe(true);
+  it("detects a blocking validation error rendered inside a still-open edit surface", () => {
+    const root = mount(`
+      <div role="dialog" aria-modal="true">
+        <label for="cd">*Close Date</label><input id="cd" name="CloseDate" aria-invalid="true" />
+        <label for="am">Amount</label><input id="am" name="Amount" />
+        <div class="slds-has-error">Your entry does not match the allowed format.</div>
+        <button>Save</button>
+      </div>
+    `);
+    const adapter = salesforceAdapter();
+    const assessment = adapter.assessValidation!(root, SF)!;
+    expect(assessment.blocking).toBe(true);
+    expect(assessment.notes.join(" ")).toMatch(/edit surface is still open/i);
   });
 
-  it("reports no validation error when none is visible", () => {
-    const root = mount(`<div>fine</div>`);
-    const adapter = createSalesforceResolverAdapter();
-    expect(adapter.hasValidationError!(root, SF)).toBe(false);
+  it("reports no blocking validation when the open edit surface is clean", () => {
+    const root = mount(EDIT_SURFACE_HTML);
+    const adapter = salesforceAdapter();
+    expect(adapter.assessValidation!(root, SF)!.blocking).toBe(false);
   });
 
   it("reports the edit surface as still open while a genuine record-edit modal is present", () => {
@@ -328,5 +337,70 @@ describe("Salesforce adapter — page-state model", () => {
     expect(transition.ok).toBe(false);
     expect(transition.editActionResolved).toBe(false);
     expect(transition.diagnostics.join("\n")).toMatch(/Edit action resolved: no/);
+  });
+});
+
+
+describe("Salesforce adapter — post-save verification semantics", () => {
+  it("the live reconciliation: a success toast with role=alert after the edit surface closed is not a validation failure", () => {
+    // Ground truth from the live run: the save succeeded, the edit modal
+    // closed, and the only alert on the page was the platform's own
+    // notification — which a document-wide sweep misread as validation.
+    const root = mount(`
+      <div class="slds-notify_container"><div role="alert" class="slds-notify toast">Opportunity "PS Project Test" was saved.</div></div>
+      <button>Edit</button>
+    `);
+    const assessment = salesforceAdapter().assessValidation!(root, SF)!;
+    expect(assessment.blocking).toBe(false);
+    expect(assessment.notes.join(" ")).toMatch(/identified as platform notifications/i);
+  });
+
+  it("an unrelated non-notification alert with the edit surface closed is noted but not blocking — the closed surface is the stronger signal", () => {
+    const root = mount(`
+      <div role="alert">Some unrelated banner elsewhere on the page</div>
+      <button>Edit</button>
+    `);
+    const assessment = salesforceAdapter().assessValidation!(root, SF)!;
+    expect(assessment.blocking).toBe(false);
+    expect(assessment.notes.join(" ")).toMatch(/edit surface closed/i);
+  });
+
+  it("a notification-styled alert inside a still-open edit surface does not count as validation, but a real marker does", () => {
+    const root = mount(`
+      <div role="dialog" aria-modal="true">
+        <label for="cd">*Close Date</label><input id="cd" name="CloseDate" />
+        <label for="am">Amount</label><input id="am" name="Amount" />
+        <div role="alert" class="slds-notify toast">saving…</div>
+        <button>Save</button>
+      </div>
+    `);
+    expect(salesforceAdapter().assessValidation!(root, SF)!.blocking).toBe(false);
+  });
+
+  it("reads a record-view display value back by its field label", () => {
+    const root = mount(`
+      <button>Edit</button>
+      <div class="slds-form-element">
+        <span>Close Date</span>
+        <div class="field-value">10/1/2026</div>
+      </div>
+    `);
+    const value = salesforceAdapter().readFieldValue!(
+      root,
+      { role: "field", label: "*Close Date", applicationIdentifier: "CloseDate" },
+      SF
+    );
+    expect(value).toBe("10/1/2026");
+  });
+
+  it("returns undefined, never a guess, when the record view shows no such labelled field", () => {
+    const root = mount(`<button>Edit</button><div><span>Amount</span><div>USD 233,000.00</div></div>`);
+    expect(
+      salesforceAdapter().readFieldValue!(
+        root,
+        { role: "field", label: "*Close Date", applicationIdentifier: "CloseDate" },
+        SF
+      )
+    ).toBeUndefined();
   });
 });

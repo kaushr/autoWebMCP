@@ -5,7 +5,7 @@ export const SALESFORCE_PLATFORM_ID = "salesforce-lightning";
 
 export const salesforceIntelligencePack: PlatformIntelligencePack = {
   packId: "salesforce-intelligence-pack",
-  packVersion: "0.3.0",
+  packVersion: "0.4.0",
   schemaVersion: PLATFORM_INTELLIGENCE_SCHEMA_VERSION,
   platform: {
     id: SALESFORCE_PLATFORM_ID,
@@ -118,6 +118,22 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       sourceReferenceIds: ["sf-lwc-event-propagation", "awmcp-salesforce-recording"],
       lifecycle: { status: "active", since: "0.3.0" },
       tags: ["lightning", "page-state", "record-edit", "execution"]
+    },
+    {
+      id: "sf-save-verification-semantics",
+      category: "verification-semantics",
+      strength: "validated-platform-rule",
+      summary:
+        "A blocking validation error keeps the record-edit surface open with the error rendered inside it; once the edit surface has closed, the save was not blocked. Salesforce's post-save success notification itself carries alert semantics, so a generic role=alert sweep misreads a successful save as a validation failure — notification components are never validation evidence.",
+      verification: {
+        blockingValidationHoldsEditSurfaceOpen: true,
+        successNotificationMatchesAlertRole: true,
+        notificationComponentClasses: ["slds-notify", "toast", "slds-notify_container", "forceToastMessage"],
+        notificationRoles: ["status", "log"]
+      },
+      sourceReferenceIds: ["awmcp-salesforce-recording", "awmcp-platform-intelligence"],
+      lifecycle: { status: "active", since: "0.4.0" },
+      tags: ["lightning", "verification", "toast", "validation", "execution"]
     },
     {
       id: "sf-missing-value-is-not-no-value",

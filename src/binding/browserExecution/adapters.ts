@@ -2,6 +2,7 @@ import { defaultPlatformIntelligenceProvider, type PlatformIntelligenceProvider 
 import { createSalesforceResolverAdapter } from "./salesforceAdapter";
 import { DEFAULT_RESOLUTION_POLICY, type ResolutionPolicy } from "./resolutionPolicy";
 import { DEFAULT_PAGE_STATE_POLICY, type PageStatePolicy } from "./pageState";
+import { DEFAULT_VERIFICATION_POLICY, type VerificationPolicy } from "./verificationPolicy";
 import type { PlatformResolverAdapter } from "./engine";
 
 /* ------------------------------------------------------------------ *
@@ -18,7 +19,10 @@ import type { PlatformResolverAdapter } from "./engine";
  * No model is consulted; a DOM lookup must stay deterministic.
  * ------------------------------------------------------------------ */
 
-const ADAPTERS: Record<string, (pageState: PageStatePolicy) => PlatformResolverAdapter> = {
+const ADAPTERS: Record<
+  string,
+  (pageState: PageStatePolicy, verification: VerificationPolicy) => PlatformResolverAdapter
+> = {
   "salesforce-lightning": createSalesforceResolverAdapter
 };
 
@@ -59,6 +63,24 @@ export function pageStatePolicyForPlatform(
   };
 }
 
+/**
+ * How this platform's committed saves are verified, from its pack. The
+ * conservative generic default applies when a pack declares nothing.
+ */
+export function verificationPolicyForPlatform(
+  platform: string,
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): VerificationPolicy {
+  const declared = intelligence.getVerificationSemantics(platform);
+  if (!declared) return DEFAULT_VERIFICATION_POLICY;
+  return {
+    blockingValidationHoldsEditSurfaceOpen: declared.verification.blockingValidationHoldsEditSurfaceOpen,
+    successNotificationMatchesAlertRole: declared.verification.successNotificationMatchesAlertRole,
+    notificationComponentClasses: [...declared.verification.notificationComponentClasses],
+    notificationRoles: [...declared.verification.notificationRoles]
+  };
+}
+
 /** Which pack knowledge produced the policy in force, for execution evidence. */
 export function resolutionProvenanceForPlatform(
   platform: string,
@@ -68,7 +90,12 @@ export function resolutionProvenanceForPlatform(
   if (!declared) return undefined;
   const { packId, packVersion, knowledgeEntryIds } = declared.provenance;
   const pageState = intelligence.getPageStateSemantics(platform);
-  const entryIds = [...knowledgeEntryIds, ...(pageState?.provenance.knowledgeEntryIds ?? [])];
+  const verification = intelligence.getVerificationSemantics(platform);
+  const entryIds = [
+    ...knowledgeEntryIds,
+    ...(pageState?.provenance.knowledgeEntryIds ?? []),
+    ...(verification?.provenance.knowledgeEntryIds ?? [])
+  ];
   return `Resolution policy from ${packId}@${packVersion} (${entryIds.join(", ")}).`;
 }
 
@@ -83,6 +110,9 @@ export function resolverAdapterForPlatform(
 ): PlatformResolverAdapter | undefined {
   const factory = ADAPTERS[platform];
   if (!factory) return undefined;
-  const adapter = factory(pageStatePolicyForPlatform(platform, intelligence));
+  const adapter = factory(
+    pageStatePolicyForPlatform(platform, intelligence),
+    verificationPolicyForPlatform(platform, intelligence)
+  );
   return { ...adapter, resolutionPolicy: resolutionPolicyForPlatform(platform, intelligence) };
 }

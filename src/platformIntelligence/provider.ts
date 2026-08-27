@@ -9,6 +9,7 @@ import type {
   PlatformIntelligenceTrace,
   PageStateSemanticsEntry,
   PolicyEntry,
+  VerificationSemanticsEntry,
   ResolutionPolicyEntry,
   SourceReference,
   SupportedInterfaceEntry
@@ -37,6 +38,13 @@ export interface PageStateIntelligence {
   provenance: PlatformIntelligenceTrace;
 }
 
+/** Save-verification semantics plus the provenance of the knowledge that produced them. */
+export interface VerificationIntelligence {
+  platform: string;
+  verification: VerificationSemanticsEntry["verification"];
+  provenance: PlatformIntelligenceTrace;
+}
+
 /** A resolution policy plus the provenance of the knowledge that produced it. */
 export interface ResolutionPolicyIntelligence {
   platform: string;
@@ -60,6 +68,8 @@ export interface PlatformIntelligenceProvider {
    * generic default.
    */
   getPageStateSemantics(platformId: string): PageStateIntelligence | undefined;
+  /** How a committed save is verified — validation vs the platform's own success notification. */
+  getVerificationSemantics(platformId: string): VerificationIntelligence | undefined;
   getSupportedInterfaces(platformId: string, query?: SupportedInterfaceQuery): SupportedInterfaceEntry[];
   getBindingKnowledge(platformId: string, transport?: TransportObservation): BindingKnowledgeEntry[];
   getBindingPolicy(platformId: string, transport?: TransportObservation): BindingPolicyIntelligence | undefined;
@@ -130,6 +140,16 @@ export function createPlatformIntelligenceProvider(
       );
       if (!entry) return undefined;
       return { platform: platformId, pageState: entry.pageState, provenance: traceFor(pack, [entry]) };
+    },
+
+    getVerificationSemantics(platformId) {
+      const pack = byPlatform.get(platformId);
+      if (!pack) return undefined;
+      const entry = active(pack.knowledge).find(
+        (candidate): candidate is VerificationSemanticsEntry => candidate.category === "verification-semantics"
+      );
+      if (!entry) return undefined;
+      return { platform: platformId, verification: entry.verification, provenance: traceFor(pack, [entry]) };
     },
 
     getSupportedInterfaces(platformId, query = {}) {

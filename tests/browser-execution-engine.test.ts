@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import {
+  compareObservedValue,
   invokeSemanticAction,
   resolveSemanticTarget,
   setFieldValue,
@@ -234,5 +235,26 @@ describe("verifyOutcome", () => {
       inputs: [{ target: CLOSE_DATE, expectedValue: "2026-12-15" }]
     });
     expect(results.find((check) => check.name === "value_verified")?.status).toBe("skipped");
+  });
+});
+
+
+describe("compareObservedValue — display format vs wire format", () => {
+  it("treats equal date parts across formats as a match — a record view displays 10/1/2026 for a write of 2026-10-01", () => {
+    expect(compareObservedValue("2026-10-01", "10/1/2026")).toBe("match");
+    expect(compareObservedValue("2026-10-01", "2026-10-01")).toBe("match");
+  });
+
+  it("treats differing dates as a mismatch", () => {
+    expect(compareObservedValue("2026-10-01", "11/1/2022")).toBe("mismatch");
+  });
+
+  it("treats an unparseable read-back against a date as incomparable — never a verdict either way", () => {
+    expect(compareObservedValue("2026-10-01", "Amount Save Cancel")).toBe("incomparable");
+  });
+
+  it("plain strings still compare by normalized equality", () => {
+    expect(compareObservedValue("Acme", "acme")).toBe("match");
+    expect(compareObservedValue("Acme", "Globex")).toBe("mismatch");
   });
 });

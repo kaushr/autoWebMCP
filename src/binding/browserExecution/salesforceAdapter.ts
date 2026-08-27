@@ -17,6 +17,11 @@ import {
   type PageStateEvidence,
   type PageStatePolicy
 } from "./pageState";
+import {
+  DEFAULT_VERIFICATION_POLICY,
+  type ValidationAssessment,
+  type VerificationPolicy
+} from "./verificationPolicy";
 
 /* ------------------------------------------------------------------ *
  * Salesforce Lightning resolver adapter.
@@ -515,8 +520,139 @@ function findFieldHost(
   return undefined;
 }
 
+/**
+ * Whether an element is, or sits inside, one of the platform's notification
+ * components — the pack-declared identities of regions whose alerts are the
+ * platform talking, not a field rejecting.
+ */
+function isNotificationElement(element: Element, verification: VerificationPolicy): boolean {
+  const classMatch = (candidate: Element): boolean =>
+    verification.notificationComponentClasses.some((className) => candidate.classList.contains(className)) ||
+    verification.notificationRoles.some((role) => candidate.getAttribute("role") === role);
+
+  let current: Element | null = element;
+  let hops = 0;
+  while (current && hops < 12) {
+    if (classMatch(current)) return true;
+    if (current.parentElement) current = current.parentElement;
+    else {
+      const treeRoot = current.getRootNode();
+      current = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
+    }
+    hops++;
+  }
+  // A notification wrapper may also be a descendant of the alert element
+  // itself (an alert region containing the toast component).
+  return queryComposedTree(
+    element,
+    verification.notificationComponentClasses.map((className) => `.${className}`).join(", ") || "__none__",
+    { traversal: "composed-tree", shadowRoots: "recursive", eventRetargeting: false, identityPriority: [] }
+  ).length > 0;
+}
+
+/**
+ * Post-commit validation, tied to the save attempt rather than swept from
+ * the whole document. The live evidence this encodes: a blocking
+ * validation holds the record-edit surface open with the error inside it,
+ * and Salesforce's success notification itself carries `role="alert"` — a
+ * ground-truth-successful save was misreported as failed by exactly that.
+ */
+function assessSalesforceValidation(
+  root: ParentNode,
+  resolution: ResolutionPolicy,
+  pageState: PageStatePolicy,
+  verification: VerificationPolicy
+): ValidationAssessment {
+  const state = assessSalesforcePageState(root, resolution, pageState);
+  const notes: string[] = [];
+
+  if (state.state === "record-edit" && state.surface) {
+    // The save attempt is still on screen: validation evidence is whatever
+    // the edit surface itself shows.
+    const markers = queryComposedTree(state.surface, SLDS_VALIDATION_SELECTOR, resolution)
+      .filter(isVisible)
+      .filter((marker) => !isNotificationElement(marker, verification));
+    if (markers.length > 0) {
+      notes.push(`The edit surface is still open with ${markers.length} validation marker(s) inside it.`);
+      return { blocking: true, notes };
+    }
+    notes.push("The edit surface is open with no validation markers inside it.");
+    return { blocking: false, notes };
+  }
+
+  // The edit surface has closed. Per the pack, a blocking validation would
+  // have held it open — so classify what any lingering alerts actually are
+  // instead of treating their existence as a verdict.
+  const alerts = queryComposedTree(root, SLDS_VALIDATION_SELECTOR, resolution).filter(isVisible);
+  const notifications = alerts.filter((alert) => isNotificationElement(alert, verification));
+  const unexplained = alerts.filter((alert) => !isNotificationElement(alert, verification));
+
+  if (notifications.length > 0) {
+    notes.push(
+      `${notifications.length} alert-role element(s) identified as platform notifications (${[
+        ...new Set(notifications.map((alert) => `${alert.tagName.toLowerCase()}.${[...alert.classList].join(".")}`))
+      ].join("; ")}), not validation.`
+    );
+  }
+  if (unexplained.length > 0) {
+    notes.push(
+      `${unexplained.length} other alert-class element(s) visible (${[
+        ...new Set(unexplained.map((alert) => alert.tagName.toLowerCase()))
+      ].join(", ")}) — not treated as blocking because the edit surface closed, which a blocking validation would have prevented.`
+    );
+  }
+  if (verification.blockingValidationHoldsEditSurfaceOpen) {
+    notes.push("The record-edit surface closed, so no blocking validation was in effect.");
+    return { blocking: false, notes };
+  }
+  return { blocking: unexplained.length > 0, notes };
+}
+
+/**
+ * The value a record VIEW displays for a labelled field — read-back for a
+ * save whose edit surface has closed. The label element is found by its
+ * exact text; the value is the remaining text of its nearest enclosing
+ * field container. Display text is presentation, not the wire format (see
+ * the pack's `sf-dom-text-not-field-value`), so callers compare it
+ * tolerantly and treat anything incomparable as unverifiable — never as
+ * proof either way.
+ */
+function readRecordViewDisplayValue(
+  root: ParentNode,
+  target: SemanticTarget,
+  resolution: ResolutionPolicy
+): string | undefined {
+  const wanted = normalizeLabel(target.label);
+  const labelElements = queryComposedTree(root, "span, div, dt, label, p", resolution)
+    .filter(isVisible)
+    .filter(
+      (element) =>
+        element.children.length === 0 && normalizeLabel(element.textContent ?? "") === wanted
+    );
+
+  for (const labelElement of labelElements) {
+    let container: Element | null = labelElement.parentElement;
+    let hops = 0;
+    while (container && hops < 4) {
+      const labelText = (labelElement.textContent ?? "").replace(/\s+/g, " ").trim();
+      const leftover = (container.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .replace(labelText, "")
+        // A record-view row carries an inline pencil control ("Edit Close
+        // Date"); its text is not the field's value.
+        .replace(new RegExp(`edit\\s+${labelText.replace(/^\\*/, "")}`, "i"), "")
+        .trim();
+      if (leftover && normalizeLabel(leftover) !== wanted) return leftover;
+      container = container.parentElement;
+      hops++;
+    }
+  }
+  return undefined;
+}
+
 export function createSalesforceResolverAdapter(
-  pageState: PageStatePolicy = DEFAULT_PAGE_STATE_POLICY
+  pageState: PageStatePolicy = DEFAULT_PAGE_STATE_POLICY,
+  verification: VerificationPolicy = DEFAULT_VERIFICATION_POLICY
 ): PlatformResolverAdapter {
   return {
     id: "salesforce-lightning",
@@ -551,8 +687,8 @@ export function createSalesforceResolverAdapter(
       return setDateValue(resolved, value, policy);
     },
 
-    hasValidationError(root: ParentNode, policy: ResolutionPolicy): boolean {
-      return queryComposedTree(root, SLDS_VALIDATION_SELECTOR, policy).some(isVisible);
+    assessValidation(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment {
+      return assessSalesforceValidation(root, policy, pageState, verification);
     },
 
     isEditStateClosed(root: ParentNode, policy: ResolutionPolicy): boolean {
@@ -564,21 +700,27 @@ export function createSalesforceResolverAdapter(
     },
 
     readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {
-      // Re-resolved through the very same field-host search that wrote the
-      // value, then read back in the same native-input-first order, so a
-      // value is never read from a different source than the one written.
+      // While the edit surface is open: read through the very same
+      // field-host search that wrote the value, in the same
+      // native-input-first order, so a value is never read from a different
+      // source than the one written.
       const element = findFieldHost(root, target, policy);
-      if (!element) return undefined;
-
-      const nativeDate = nativeDateInputWithin(element, policy);
-      if (nativeDate) return nativeDate.value;
-      const anyNative = anyNativeInputWithin(element, policy);
-      if (anyNative) return anyNative.value;
-      if (hasMirroredValueProperty(element)) {
-        const value = (element as unknown as { value?: unknown }).value;
-        if (typeof value === "string") return value;
+      if (element) {
+        const nativeDate = nativeDateInputWithin(element, policy);
+        if (nativeDate) return nativeDate.value;
+        const anyNative = anyNativeInputWithin(element, policy);
+        if (anyNative) return anyNative.value;
+        if (hasMirroredValueProperty(element)) {
+          const value = (element as unknown as { value?: unknown }).value;
+          if (typeof value === "string") return value;
+        }
+        return undefined;
       }
-      return undefined;
+      // After a successful save the edit field no longer exists; the record
+      // view displays the persisted value instead. Reading it there is what
+      // lets a proven save become fully verified rather than stopping at
+      // "read-back unavailable".
+      return readRecordViewDisplayValue(root, target, policy);
     }
   };
 }
