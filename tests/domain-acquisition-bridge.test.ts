@@ -39,7 +39,7 @@ let detach: (() => void) | undefined;
 /** Installs a scripted stand-in for the extension's bridge content script. */
 function bridge(
   answer: (request: Record<string, unknown>) => Record<string, unknown> | undefined,
-  protocol: number | null = 2
+  protocol: number | null = 3
 ): void {
   if (protocol !== null) document.documentElement.setAttribute(MARKER, String(protocol));
   const listener = (event: MessageEvent): void => {
@@ -84,7 +84,7 @@ describe("A — the whole path works and the options come back", () => {
               evidence: []
             }
           }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
 
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
@@ -107,8 +107,9 @@ describe("B — no extension at all", () => {
 
 describe("the exact live failure — an installed bridge that predates this request", () => {
   it("is reported as out of date, not as a missing extension", async () => {
-    // Protocol 1 announced: installed, enabled, and too old to understand.
-    bridge(() => undefined, 1);
+    // An older protocol announced: installed, enabled, and too old to
+    // understand the request this page is about to send.
+    bridge(() => undefined, 2);
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -139,7 +140,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
             reason: "target-tab-not-registered",
             error: "No target tab is known. Start a Teach Mode session on the target application first."
           }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -152,7 +153,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "content-script-unavailable", error: "The content script could not be injected." }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -164,7 +165,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "target-tab-unreachable", error: "The target tab could not be reached." }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -178,7 +179,7 @@ describe("E — introspection itself failing is its own reason", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "introspection-failed", error: "the component exploded while opening" }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -204,7 +205,7 @@ describe("H — choices retained alongside an unproven restoration", () => {
               evidence: []
             }
           }
-        : { ok: true, protocol: 2 }
+        : { ok: true, protocol: 3 }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(true);
@@ -233,7 +234,7 @@ describe("the acquisition request carries no confirmation and no inputs", () => 
               evidence: []
             }
           }
-        : { ok: true, protocol: 2 };
+        : { ok: true, protocol: 3 };
     });
 
     await extensionBridgeExecutionClient.acquireDomains(binding);

@@ -88,6 +88,15 @@ export type AcquisitionFailureReason =
 export interface BrowserBindingExecuteResponse {
   ok: boolean;
   result?: ExecutionResult;
+  /**
+   * The protocol version of the extension that actually ran this.
+   *
+   * Three live runs were analysed against source the browser was not
+   * running, because a reloaded page and a reloaded extension are separate
+   * acts and nothing reported the difference. A result now carries the
+   * version of the code that produced it.
+   */
+  protocol?: number;
   error?: string;
 }
 
@@ -132,7 +141,7 @@ export type TraceResponse = { trace?: ObservationTrace };
  * silently — which is exactly how a stale install came to look like an
  * uninstalled one.
  */
-export const STUDIO_BRIDGE_PROTOCOL = 2;
+export const STUDIO_BRIDGE_PROTOCOL = 3;
 
 /** The attribute the bridge stamps on the page so its presence is detectable without a round trip. */
 export const STUDIO_BRIDGE_MARKER = "data-autowebmcp-bridge";

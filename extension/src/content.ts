@@ -6,6 +6,7 @@ import {
   safeValueChange,
   type FieldDescriptor
 } from "../../src/capture/policy";
+import { STUDIO_BRIDGE_PROTOCOL } from "./protocol";
 import type {
   CaptureApplicationContext,
   CaptureEvent,
@@ -464,7 +465,11 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
     // Which pack knowledge governed this run, recorded alongside the result
     // so an execution can be audited back to the platform facts that shaped it.
     const provenance = resolutionProvenanceForPlatform(request.binding.platform);
-    return { ok: true, result: provenance ? { ...result, evidence: [provenance, ...result.evidence] } : result };
+    return {
+      ok: true,
+      protocol: STUDIO_BRIDGE_PROTOCOL,
+      result: provenance ? { ...result, evidence: [provenance, ...result.evidence] } : result
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

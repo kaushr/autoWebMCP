@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { readSemanticOptions, resolveSemanticTarget, setFieldValue } from "../src/binding/browserExecution/engine";
+import {
+  compareObservedValue,
+  readSemanticOptions,
+  resolveSemanticTarget,
+  setFieldValue
+} from "../src/binding/browserExecution/engine";
 import { resolverAdapterForPlatform } from "../src/binding/browserExecution/adapters";
 import { suspiciousDomain } from "../src/binding/browserExecution/salesforceAdapter";
 import { buildTestFormFields } from "../src/training/executionTestForm";
@@ -378,5 +383,24 @@ describe("no write escapes a failed field", () => {
     if (!resolved.ok) throw new Error(resolved.reason);
     await setFieldValue(resolved.target, "Complete", "select", adapter());
     expect(page.saves).toBe(0);
+  });
+});
+
+/* ------------------- the date-format hazard ------------------- */
+
+describe("writing a date into a text control assumes a locale", () => {
+  it("documents a silent wrong-value path that verification cannot catch", () => {
+    // The adapter types M/D/YYYY, and the read-back parser reads M/D/YYYY.
+    // In an org that displays D/M/YYYY both are wrong the same way, so the
+    // check agrees with the mistake instead of catching it.
+    const requested = "2026-11-01"; // 1 November
+    const orgDisplaysDayFirst = "11/01/2026"; // the org stored 11 January
+    expect(compareObservedValue(requested, orgDisplaysDayFirst)).toBe("match");
+
+    // Stated plainly so the hazard is not mistaken for correctness: the
+    // only unambiguous path is the native date input, which takes ISO.
+    // Resolving this properly needs the org's locale, which is application
+    // knowledge rather than something to guess in the adapter.
+    expect(compareObservedValue("2026-11-01", "2026-11-01")).toBe("match");
   });
 });

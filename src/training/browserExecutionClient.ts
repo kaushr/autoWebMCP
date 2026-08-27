@@ -38,7 +38,7 @@ const PROBE_TIMEOUT_MS = 1_500;
 const ACQUIRE_TIMEOUT_MS = 25_000;
 
 /** What the bridge must speak for the Studio's current requests to be understood. */
-const REQUIRED_PROTOCOL = 2;
+const REQUIRED_PROTOCOL = 3;
 const BRIDGE_MARKER = "data-autowebmcp-bridge";
 
 /**
@@ -159,12 +159,24 @@ function bridgeRequest<T>(
  */
 export const extensionBridgeExecutionClient: BrowserExecutionClient = {
   execute(binding, inputs) {
-    return bridgeRequest<ExecutionResult>(
-      { binding, inputs, confirmed: true },
-      "exec",
-      RESPONSE_TIMEOUT_MS,
-      (data) => data.result as ExecutionResult | undefined
-    );
+    return bridgeRequest<ExecutionResult>({ binding, inputs, confirmed: true }, "exec", RESPONSE_TIMEOUT_MS, (data) => {
+      const result = data.result as ExecutionResult | undefined;
+      if (!result) return undefined;
+      // A result produced by an older extension than this page expects is
+      // evidence about the wrong code. Three live runs were analysed that
+      // way before anything reported the mismatch.
+      const ran = typeof data.protocol === "number" ? data.protocol : 0;
+      if (ran >= REQUIRED_PROTOCOL) return result;
+      return {
+        ...result,
+        warnings: [
+          `This result came from an older Teach Mode extension (version ${ran || "unknown"}; this page expects ` +
+            `${REQUIRED_PROTOCOL}). Reload the extension at chrome://extensions, reload this page, then re-run — ` +
+            "the findings below may describe code that is no longer current.",
+          ...result.warnings
+        ]
+      };
+    });
   },
 
   async acquireDomains(binding) {
