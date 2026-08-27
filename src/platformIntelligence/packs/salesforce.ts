@@ -5,7 +5,7 @@ export const SALESFORCE_PLATFORM_ID = "salesforce-lightning";
 
 export const salesforceIntelligencePack: PlatformIntelligencePack = {
   packId: "salesforce-intelligence-pack",
-  packVersion: "0.4.0",
+  packVersion: "0.5.0",
   schemaVersion: PLATFORM_INTELLIGENCE_SCHEMA_VERSION,
   platform: {
     id: SALESFORCE_PLATFORM_ID,
@@ -40,6 +40,21 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       title: "Salesforce GraphQL API",
       url: "https://developer.salesforce.com/docs/platform/graphql/guide/graphql-about.html",
       reviewedAt: "2026-08-26"
+    },
+    {
+      id: "sf-standard-opportunity-fields",
+      kind: "official-doc",
+      title: "Salesforce standard objects: Opportunity",
+      url: "https://developer.salesforce.com/docs/atlas.en-us.object_reference.meta/object_reference/sforce_api_objects_opportunity.htm",
+      reviewedAt: "2026-08-27",
+      note: "Standard field API names, default labels, and types for the fields this proving ground demonstrates."
+    },
+    {
+      id: "awmcp-application-intelligence",
+      kind: "internal-architecture",
+      title: "AutoWebMCP Application Intelligence architecture",
+      document: "docs/APPLICATION_INTELLIGENCE.md",
+      reviewedAt: "2026-08-27"
     },
     {
       id: "awmcp-platform-intelligence",
@@ -134,6 +149,28 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       sourceReferenceIds: ["awmcp-salesforce-recording", "awmcp-platform-intelligence"],
       lifecycle: { status: "active", since: "0.4.0" },
       tags: ["lightning", "verification", "toast", "validation", "execution"]
+    },
+    {
+      id: "sf-standard-application-model",
+      category: "application-schema",
+      strength: "documented-fact",
+      summary:
+        "Salesforce Summer '26 standard object model, limited to the fields this proving ground has demonstrated. " +
+        "Standard knowledge carries no picklist values: what an org's stages actually are is tenant configuration, " +
+        "even for a standard field.",
+      sourceReferenceIds: ["sf-standard-opportunity-fields", "awmcp-application-intelligence"],
+      applicationSchema: {
+        release: "summer-26",
+        objects: [
+          {
+            apiName: "Opportunity",
+            fields: [
+              { apiName: "CloseDate", defaultLabel: "Close Date", type: "date" },
+              { apiName: "StageName", defaultLabel: "Stage", type: "picklist" }
+            ]
+          }
+        ]
+      }
     },
     {
       id: "sf-missing-value-is-not-no-value",

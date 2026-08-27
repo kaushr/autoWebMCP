@@ -1,7 +1,9 @@
 import type { BindingEligibility } from "../binding/model";
 import type { TransportObservation } from "../binding/policy";
+import type { StandardApplicationSchema } from "../applicationIntelligence/model";
 import type {
   AntiPatternEntry,
+  ApplicationSchemaEntry,
   BindingKnowledgeEntry,
   DeterministicRuleEntry,
   KnowledgeEntry,
@@ -45,6 +47,20 @@ export interface VerificationIntelligence {
   provenance: PlatformIntelligenceTrace;
 }
 
+/**
+ * Vendor-shipped application knowledge plus its provenance.
+ *
+ * Separate accessor from every other one here because it answers a
+ * different kind of question: not how the platform behaves, but what the
+ * application is. A tenant's own configuration refines this downstream and
+ * never appears in a pack.
+ */
+export interface ApplicationSchemaIntelligence {
+  platform: string;
+  schema: StandardApplicationSchema;
+  provenance: PlatformIntelligenceTrace;
+}
+
 /** A resolution policy plus the provenance of the knowledge that produced it. */
 export interface ResolutionPolicyIntelligence {
   platform: string;
@@ -70,6 +86,12 @@ export interface PlatformIntelligenceProvider {
   getPageStateSemantics(platformId: string): PageStateIntelligence | undefined;
   /** How a committed save is verified — validation vs the platform's own success notification. */
   getVerificationSemantics(platformId: string): VerificationIntelligence | undefined;
+  /**
+   * The vendor's standard application model for this platform's release.
+   * `undefined` means the pack declares none, and field grounding falls
+   * back to whatever the application itself named in the capture.
+   */
+  getApplicationSchema(platformId: string): ApplicationSchemaIntelligence | undefined;
   getSupportedInterfaces(platformId: string, query?: SupportedInterfaceQuery): SupportedInterfaceEntry[];
   getBindingKnowledge(platformId: string, transport?: TransportObservation): BindingKnowledgeEntry[];
   getBindingPolicy(platformId: string, transport?: TransportObservation): BindingPolicyIntelligence | undefined;
@@ -150,6 +172,16 @@ export function createPlatformIntelligenceProvider(
       );
       if (!entry) return undefined;
       return { platform: platformId, verification: entry.verification, provenance: traceFor(pack, [entry]) };
+    },
+
+    getApplicationSchema(platformId) {
+      const pack = byPlatform.get(platformId);
+      if (!pack) return undefined;
+      const entry = active(pack.knowledge).find(
+        (candidate): candidate is ApplicationSchemaEntry => candidate.category === "application-schema"
+      );
+      if (!entry) return undefined;
+      return { platform: platformId, schema: entry.applicationSchema, provenance: traceFor(pack, [entry]) };
     },
 
     getSupportedInterfaces(platformId, query = {}) {

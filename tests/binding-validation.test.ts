@@ -110,7 +110,7 @@ describe("Field mapping comes from what the application named", () => {
   it("refuses to guess when an input matches nothing observed", () => {
     const result = resolveFieldMapping(capability(["amount"]), salesforceTrace());
     expect(result.mapping).toEqual({});
-    expect(result.ambiguities.join(" ")).toMatch(/No observed field identifier matches "amount"/);
+    expect(result.ambiguities.join(" ")).toMatch(/No observed field identifier or visible label matches "amount"/);
   });
 });
 

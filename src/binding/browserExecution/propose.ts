@@ -1,9 +1,11 @@
 import type { ObservationTrace } from "../../capture/normalize";
 import type { CaptureFieldContext } from "../../capture/types";
 import type { SemanticCapability } from "../../semantic/model";
-import { observedRecordType, resolveFieldMapping } from "../fieldMapping";
+import { observedRecordType, resolveFieldMapping, type ApplicationIntelligence } from "../fieldMapping";
+import type { ApplicationFieldType } from "../../applicationIntelligence/model";
 import {
   BROWSER_BINDING_SAFETY,
+  type BoundApplicationField,
   type BrowserBindingInput,
   type BrowserBindingProposal,
   type BrowserExecutionBinding,
@@ -33,6 +35,23 @@ const CONTROL_TO_VALUE_KIND: Record<string, FieldValueKind> = {
   radio: "select",
   other: "text",
   masked: "text"
+};
+
+/**
+ * What the application says a field *is*, mapped to how a value must be
+ * put into it. Stronger than the capture's control classification: a
+ * Lightning picklist and a Lightning datepicker both report `control:
+ * "other"`, and only the application's own model separates them.
+ */
+const APPLICATION_TYPE_TO_VALUE_KIND: Record<ApplicationFieldType, FieldValueKind> = {
+  string: "text",
+  date: "date",
+  datetime: "date",
+  number: "number",
+  currency: "number",
+  boolean: "checkbox",
+  picklist: "select",
+  reference: "text"
 };
 
 interface ObservedFieldEvidence {
@@ -85,7 +104,8 @@ function observedCommitLabel(trace: ObservationTrace): string | undefined {
  */
 export function proposeBrowserBinding(
   capability: SemanticCapability,
-  trace: ObservationTrace
+  trace: ObservationTrace,
+  intelligence: ApplicationIntelligence = {}
 ): BrowserBindingProposal {
   const source = capability.provenance.sourceApplication;
   if (!source) {
@@ -102,7 +122,7 @@ export function proposeBrowserBinding(
     };
   }
 
-  const fieldMapping = resolveFieldMapping(capability, trace);
+  const fieldMapping = resolveFieldMapping(capability, trace, intelligence);
   if (
     fieldMapping.ambiguities.length > 0 ||
     Object.keys(fieldMapping.mapping).length !== capability.inputs.length
@@ -110,7 +130,7 @@ export function proposeBrowserBinding(
     return {
       binding: null,
       warnings: [
-        "Not every capability input has an unambiguous observed application field identifier.",
+        "Not every capability input could be grounded in the application's own model.",
         ...fieldMapping.ambiguities
       ]
     };
@@ -121,47 +141,71 @@ export function proposeBrowserBinding(
   const evidence: string[] = [];
 
   for (const input of capability.inputs) {
-    const identifier = fieldMapping.mapping[input.name];
-    const observed = evidenceByIdentifier.get(identifier);
+    const applicationField = fieldMapping.fields[input.name];
+    const grounding = fieldMapping.grounding[input.name];
+    const observed = fieldMapping.observed[input.name];
     if (!observed?.label) {
       return {
         binding: null,
         warnings: [
-          `No visible label was observed for the field identified as "${identifier}", so it cannot be resolved semantically at runtime.`
+          `No visible label was observed for the field grounded as "${applicationField.apiName}", so it cannot be resolved semantically at runtime.`
         ]
       };
     }
 
+    // The target says how to FIND the control on screen, so it carries only
+    // what the page itself shows: the visible label, and the identifier the
+    // control exposed if it exposed one. The application's API name says
+    // what the field IS and belongs on `applicationField` — putting
+    // `StageName` here would invite the runtime to look for a DOM name that
+    // Lightning never renders.
     const target: SemanticTarget = {
       role: "field",
       label: observed.label,
-      applicationIdentifier: identifier,
+      ...(observed.applicationIdentifier ? { applicationIdentifier: observed.applicationIdentifier } : {}),
       ...(observed.section ? { section: observed.section } : {})
     };
-    // The capability's canonical type is stronger evidence than the capture's
-    // control classification: a Lightning datepicker reports `control:
-    // "other"`, which read as plain text and sent raw canonical dates into a
-    // control expecting its display format. The human-confirmed contract
-    // says what the value *is*; the observed control only suggests it.
+    const observedControl = observed.applicationIdentifier
+      ? evidenceByIdentifier.get(observed.applicationIdentifier)?.control
+      : undefined;
+    // How the value must be written, strongest source first.
+    //
+    // The application's own declared type outranks both the confirmed
+    // capability type and the capture's control classification, because a
+    // Lightning datepicker and a Lightning picklist both report `control:
+    // "other"` and only the application's model tells them apart. A human
+    // enumerating the domain still wins: that is an explicit statement
+    // about this capability, not a guess about the control.
     const valueKind: FieldValueKind =
       input.enum && input.enum.length > 0
         ? "select"
-        : input.type === "date"
-          ? "date"
-          : input.type === "number"
-            ? "number"
-            : input.type === "boolean"
-              ? "checkbox"
-              : (CONTROL_TO_VALUE_KIND[observed.control ?? "text"] ?? "text");
+        : grounding.knowledge !== "observation-only"
+          ? APPLICATION_TYPE_TO_VALUE_KIND[applicationField.type]
+          : input.type === "date"
+            ? "date"
+            : input.type === "number"
+              ? "number"
+              : input.type === "boolean"
+                ? "checkbox"
+                : (CONTROL_TO_VALUE_KIND[observedControl ?? "text"] ?? "text");
+
+    const bound: BoundApplicationField = {
+      ...(applicationField.objectApiName ? { objectApiName: applicationField.objectApiName } : {}),
+      apiName: applicationField.apiName,
+      type: applicationField.type,
+      ...(applicationField.options ? { options: [...applicationField.options] } : {}),
+      ...(applicationField.optionsSource ? { optionsSource: applicationField.optionsSource } : {}),
+      knowledge: grounding.knowledge,
+      ...(grounding.release ? { release: grounding.release } : {})
+    };
+
     inputs.push({
       semanticInput: input.name,
       semanticTarget: target,
-      valueKind
+      valueKind,
+      applicationField: bound
     });
-    evidence.push(
-      `"${input.name}" resolves at runtime to the control labelled "${observed.label}"` +
-        `${observed.section ? ` in "${observed.section}"` : ""}, application identifier "${identifier}".`
-    );
+    evidence.push(grounding.detail);
   }
 
   const recordType = observedRecordType(trace);

@@ -44,6 +44,24 @@ import { registerHelloControl } from "./webmcp/hello";
 import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
 import type { CapabilityInputValues, SemanticCapability } from "./semantic/model";
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
+import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
+import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
+import type { TenantIntelligenceSource } from "./applicationIntelligence/model";
+
+/**
+ * What this installation knows about the customer's own org.
+ *
+ * Empty by default and deliberately so: no supported Salesforce metadata
+ * path is installed, and inventing org configuration would be worse than
+ * admitting we do not have it. An operator (or a future org service) sets
+ * a real snapshot here; everything downstream already reads through the
+ * same seam, so nothing else changes when one arrives.
+ */
+let tenantIntelligence: TenantIntelligenceSource = emptyTenantIntelligence();
+
+export function useTenantIntelligence(source: TenantIntelligenceSource): void {
+  tenantIntelligence = source;
+}
 import { acceptedBrowserBinding, type BrowserBindingCandidateRecord, type BrowserBindingValidationRecord } from "./binding/browserExecution/model";
 import { extensionBridgeExecutionClient } from "./training/browserExecutionClient";
 import { registerCapability } from "./webmcp/compiler";
@@ -1460,7 +1478,11 @@ function render(): void {
     if (!candidate || !selectedTrace) return;
     browserBindingValidation = undefined;
     browserValidationStatus = "";
-    const proposal = proposeBrowserBinding(candidate, selectedTrace);
+    const proposal = proposeBrowserBinding(
+      candidate,
+      selectedTrace,
+      applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence)
+    );
     browserBindingCandidate = { state: "proposed", proposal };
     browserBindingStatus = proposal.binding
       ? "Browser execution path suggested from the captured evidence. Test it before accepting."

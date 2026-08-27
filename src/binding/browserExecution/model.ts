@@ -46,12 +46,48 @@ export interface SemanticTarget {
 
 export type FieldValueKind = "text" | "date" | "select" | "checkbox" | "number";
 
+/**
+ * What the application itself says this input is, resolved at proposal
+ * time and written down here.
+ *
+ * MATERIALIZED APPLICATION INTELLIGENCE — a cached answer, not a fact this
+ * binding owns. The binding is a way of reaching a control; what that
+ * control accepts belongs to the application, and for a picklist the legal
+ * set can narrow by record type, by a controlling field's current value,
+ * and by the running user's permissions. Materializing it keeps V0.1
+ * simple and is safe because the application stays authoritative: an
+ * option that is no longer legal is rejected by the app at save time, and
+ * verification catches it.
+ *
+ * The long-term shape is `application intelligence + runtime context →
+ * resolved execution contract → binding`, which is why the provenance
+ * below travels with the value: a consumer can always tell how current a
+ * materialized domain is, and where it came from.
+ */
+export interface BoundApplicationField {
+  /** e.g. `Opportunity`. */
+  objectApiName?: string;
+  /** The application's own field identity, e.g. `StageName`. */
+  apiName: string;
+  /** The application's declared type, e.g. `picklist`. */
+  type: string;
+  /** The value domain as known when this binding was proposed. Absent means unknown, never unrestricted. */
+  options?: string[];
+  /** Which knowledge layer supplied the options, when there are any. */
+  optionsSource?: "tenant" | "standard" | "observation-only";
+  /** Which knowledge layer identified the field. */
+  knowledge: "tenant" | "standard" | "observation-only";
+  /** The standard release consulted, when standard knowledge identified it. */
+  release?: string;
+}
+
 /** One capability input, and where it lands on the application's own UI. */
 export interface BrowserBindingInput {
   /** The capability's own input name, e.g. `close_date`. */
   semanticInput: string;
   semanticTarget: SemanticTarget;
   valueKind: FieldValueKind;
+  applicationField?: BoundApplicationField;
 }
 
 export type PageMode = "record-view" | "edit-form" | "edit-or-record";

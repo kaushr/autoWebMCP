@@ -58,7 +58,10 @@ describe("proposeBrowserBinding — deterministic, evidence-only", () => {
     expect(binding.inputs[0]).toEqual({
       semanticInput: "close_date",
       semanticTarget: { role: "field", label: "*Close Date", applicationIdentifier: "CloseDate", section: "Opportunity Details" },
-      valueKind: "date"
+      valueKind: "date",
+      // With no application knowledge supplied, the binding still records
+      // honestly that the identity rests on the observation alone.
+      applicationField: { objectApiName: "Opportunity", apiName: "CloseDate", type: "string", knowledge: "observation-only" }
     });
     expect(binding.commit).toEqual({ semanticAction: { role: "button", label: "Save" } });
   });

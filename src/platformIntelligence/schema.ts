@@ -1,5 +1,6 @@
 import type { BindingEligibility } from "../binding/model";
 import type { TransportClass } from "../binding/policy";
+import type { StandardApplicationSchema } from "../applicationIntelligence/model";
 
 export const PLATFORM_INTELLIGENCE_SCHEMA_VERSION = "0.1";
 
@@ -23,6 +24,7 @@ export type KnowledgeCategory =
   | "resolution-policy"
   | "page-state-semantics"
   | "verification-semantics"
+  | "application-schema"
   | "binding-knowledge"
   | "anti-pattern"
   | "reference";
@@ -239,6 +241,30 @@ export interface VerificationSemanticsEntry extends KnowledgeEntryBase {
   };
 }
 
+/**
+ * What the vendor's application ships with in a given release — the
+ * standard business object model, not platform behaviour.
+ *
+ * The distinction is the point. "Lightning retargets events across shadow
+ * boundaries" is how the *platform* behaves and belongs to
+ * `component-framework-behavior`. "Opportunity has a picklist field
+ * `StageName` labelled Stage" is what the *application* is, and no amount
+ * of platform knowledge implies it. A live capture proved the gap: the
+ * platform layer correctly reported that a Lightning picklist host exposes
+ * no native name, and nothing could say what the field was.
+ *
+ * `release` makes this refutable: vendor application shape evolves, and
+ * knowledge that cannot be dated cannot be retired. A tenant's own
+ * configuration refines what is declared here — see
+ * `applicationIntelligence/model.ts` — but tenant knowledge is never
+ * carried in a pack, because a pack is shared across every org.
+ */
+export interface ApplicationSchemaEntry extends KnowledgeEntryBase {
+  category: "application-schema";
+  strength: "documented-fact";
+  applicationSchema: StandardApplicationSchema;
+}
+
 export type KnowledgeEntry =
   | DocumentedFactEntry
   | ObservationSemanticsEntry
@@ -251,6 +277,7 @@ export type KnowledgeEntry =
   | ResolutionPolicyEntry
   | PageStateSemanticsEntry
   | VerificationSemanticsEntry
+  | ApplicationSchemaEntry
   | BindingKnowledgeEntry
   | AntiPatternEntry
   | ReferenceEntry;

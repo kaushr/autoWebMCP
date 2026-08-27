@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { queryComposedTree } from "../src/binding/browserExecution/composedTree";
 import { executeConfirmed } from "../src/binding/browserExecution/execute";
 import { invokeSemanticAction, resolveSemanticTarget } from "../src/binding/browserExecution/engine";
 import {
@@ -289,5 +290,35 @@ describe("end-to-end through nested components", () => {
     expect(result.status).toBe("succeeded");
     expect(result.checks.map((check) => `${check.name}:${check.status}`)).toContain("editable_state:pass");
     expect(result.evidence.join("\n")).toMatch(/Resulting Salesforce page state: record-edit/);
+  });
+});
+
+describe("11 — a root that is itself a component host", () => {
+  /**
+   * The fifth instance of the same defect class, found while adding
+   * picklist execution: traversal descended into the shadow roots of a
+   * root's *descendants* but never the root's own, so any lookup starting
+   * from a resolved field host searched everything except where that
+   * component actually keeps its controls.
+   */
+  it("searches the host's own shadow root, not only its descendants'", () => {
+    const root = mount(`<lightning-combobox></lightning-combobox>`);
+    const host = root.querySelector("lightning-combobox")!;
+    const outer = shadow(host, `<lightning-base-combobox></lightning-base-combobox>`);
+    shadow(outer.querySelector("lightning-base-combobox")!, `<button role="combobox">Select an Option</button>`);
+
+    // Starting the search at the host, as every caller does once a field
+    // has been resolved.
+    expect(queryComposedTree(host, '[role="combobox"]', SF)).toHaveLength(1);
+    // The plain DOM call it replaces still finds nothing, which is the
+    // whole reason this traversal exists.
+    expect(host.querySelectorAll('[role="combobox"]')).toHaveLength(0);
+  });
+
+  it("still finds nothing when the platform's policy forbids descending", () => {
+    const root = mount(`<lightning-combobox></lightning-combobox>`);
+    const host = root.querySelector("lightning-combobox")!;
+    shadow(host, `<button role="combobox">Select an Option</button>`);
+    expect(queryComposedTree(host, '[role="combobox"]', DEFAULT_RESOLUTION_POLICY)).toHaveLength(0);
   });
 });

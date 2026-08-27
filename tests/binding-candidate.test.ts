@@ -103,7 +103,7 @@ describe("Salesforce: the observed transport is a lead, never a binding", () => 
     expect(prepared.policy.preferredBindingFamily).toBe("salesforce-record-update");
     expect(prepared.policy.warnings.join(" ")).toMatch(/never be replayed directly/i);
     expect(prepared.policy.platformIntelligence?.packId).toBe("salesforce-intelligence-pack");
-    expect(prepared.policy.platformIntelligence?.packVersion).toBe("0.4.0");
+    expect(prepared.policy.platformIntelligence?.packVersion).toBe("0.5.0");
     expect(prepared.policy.platformIntelligence?.knowledgeEntryIds).toContain("sf-aura-private-internal");
     expect(prepared.policy.platformIntelligence?.knowledgeEntryIds).toContain(
       "sf-recordui-update-record-suggests-record-update"

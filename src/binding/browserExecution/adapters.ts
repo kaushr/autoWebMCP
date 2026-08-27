@@ -1,4 +1,7 @@
 import { defaultPlatformIntelligenceProvider, type PlatformIntelligenceProvider } from "../../platformIntelligence";
+import { emptyTenantIntelligence } from "../../applicationIntelligence/tenant";
+import type { TenantIntelligenceSource } from "../../applicationIntelligence/model";
+import type { ApplicationIntelligence } from "../fieldMapping";
 import { createSalesforceResolverAdapter } from "./salesforceAdapter";
 import { DEFAULT_RESOLUTION_POLICY, type ResolutionPolicy } from "./resolutionPolicy";
 import { DEFAULT_PAGE_STATE_POLICY, type PageStatePolicy } from "./pageState";
@@ -97,6 +100,30 @@ export function resolutionProvenanceForPlatform(
     ...(verification?.provenance.knowledgeEntryIds ?? [])
   ];
   return `Resolution policy from ${packId}@${packVersion} (${entryIds.join(", ")}).`;
+}
+
+/**
+ * The application knowledge available for a platform: what the vendor
+ * ships, refined by whatever this installation knows about the tenant.
+ *
+ * The tenant source is a parameter rather than a lookup because who
+ * supplies it differs by installation — a rep's own limited access, an
+ * admin's central capture, or nothing at all. `emptyTenantIntelligence()`
+ * is the honest default: no supported metadata path is installed today, so
+ * the system says it knows nothing about this org and grounds fields from
+ * standard knowledge and observed evidence alone.
+ */
+export function applicationIntelligenceForPlatform(
+  platform: string,
+  tenant: TenantIntelligenceSource = emptyTenantIntelligence(),
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): ApplicationIntelligence {
+  const declared = intelligence.getApplicationSchema(platform);
+  return {
+    platform,
+    ...(declared ? { standard: declared.schema } : {}),
+    tenant
+  };
 }
 
 /**

@@ -38,6 +38,7 @@ export function composedDescendants(root: ParentNode, policy: ResolutionPolicy):
   const found: Element[] = [];
   const visit = (node: ParentNode, depth: number): void => {
     if (depth > MAX_SHADOW_DEPTH) return;
+    if (descends(policy)) visitOwnShadow(node, depth, visit);
     for (const element of node.querySelectorAll("*")) {
       found.push(element);
       const shadow = element.shadowRoot;
@@ -48,6 +49,26 @@ export function composedDescendants(root: ParentNode, policy: ResolutionPolicy):
   return found;
 }
 
+/**
+ * A root that is itself a component host.
+ *
+ * `querySelectorAll` on an element searches its light-DOM subtree and
+ * stops at its own shadow boundary, so a caller that passes a component —
+ * `queryComposedTree(fieldHost, …)`, which is the normal thing to do once
+ * a field has been resolved — would search everything except the shadow
+ * root where that component actually keeps its controls. A Lightning
+ * picklist keeps its combobox trigger exactly there, and the omission read
+ * as "this field has no control".
+ */
+function visitOwnShadow(
+  node: ParentNode,
+  depth: number,
+  visit: (node: ParentNode, depth: number) => void
+): void {
+  const shadow = node instanceof Element ? node.shadowRoot : null;
+  if (shadow) visit(shadow, depth + 1);
+}
+
 /** `querySelectorAll` across the composed tree, honouring the platform's traversal policy. */
 export function queryComposedTree(root: ParentNode, selector: string, policy: ResolutionPolicy): Element[] {
   const found: Element[] = [];
@@ -55,6 +76,7 @@ export function queryComposedTree(root: ParentNode, selector: string, policy: Re
     if (depth > MAX_SHADOW_DEPTH) return;
     found.push(...node.querySelectorAll(selector));
     if (!descends(policy)) return;
+    visitOwnShadow(node, depth, visit);
     for (const element of node.querySelectorAll("*")) {
       const shadow = element.shadowRoot;
       if (shadow) visit(shadow, depth + 1);

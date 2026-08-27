@@ -55,6 +55,15 @@ export function buildTestFormFields(
     if (input?.enum && input.enum.length > 0) {
       return { name: bindingInput.semanticInput, label, control: "select" as const, options: [...input.enum], required: input.required };
     }
+
+    // The value domain the application itself declared, materialized onto
+    // the binding when it was proposed. Absent means the domain is unknown,
+    // never that anything goes — so a closed-domain field with no known
+    // options renders as a plain text box and lets the application remain
+    // the authority on what it will accept, rather than showing an empty
+    // dropdown that implies there is nothing to choose.
+    const declaredOptions = bindingInput.applicationField?.options;
+
     const control: TestFieldControl =
       input?.type === "date"
         ? "date"
@@ -68,8 +77,17 @@ export function buildTestFormFields(
                 ? "number"
                 : bindingInput.valueKind === "checkbox"
                   ? "checkbox"
-                  : "text";
-    return { name: bindingInput.semanticInput, label, control, required: input?.required ?? true };
+                  : bindingInput.valueKind === "select" && declaredOptions && declaredOptions.length > 0
+                    ? "select"
+                    : "text";
+
+    return {
+      name: bindingInput.semanticInput,
+      label,
+      control,
+      ...(control === "select" && declaredOptions ? { options: [...declaredOptions] } : {}),
+      required: input?.required ?? true
+    };
   });
 }
 

@@ -61,6 +61,26 @@ const DATE_PICKER_TRIGGER_SELECTOR =
 const DATE_PICKER_SURFACE_SELECTOR = '[role="dialog"], [role="application"], [role="grid"]';
 const MONTH_NAV_MAX_CLICKS = 24;
 
+/* --------------------------- picklist controls --------------------------- */
+
+/**
+ * A Lightning picklist is not a `<select>`. It renders as a combobox
+ * trigger plus a listbox of option elements, all inside nested shadow
+ * roots, and a live capture of a Stage change exposed no `name` on any
+ * event it produced.
+ *
+ * Everything below is ARIA: `role="combobox"`, `role="listbox"`,
+ * `role="option"`, and the option's own accessible name. That is the same
+ * contract a screen-reader user relies on, which is exactly why it is
+ * allowed here — no recorded selector, no XPath, no coordinate, and no
+ * position-in-list assumption. Options are re-resolved live on every
+ * execution.
+ */
+const COMBOBOX_TRIGGER_SELECTOR =
+  '[role="combobox"], button[aria-haspopup="listbox"], input[aria-haspopup="listbox"]';
+const LISTBOX_SELECTOR = '[role="listbox"]';
+const OPTION_SELECTOR = '[role="option"]';
+
 function isCustomElement(element: Element): boolean {
   return element.tagName.includes("-");
 }
@@ -80,7 +100,14 @@ function hasMirroredValueProperty(element: Element): element is Element & { valu
  */
 function isPotentialFieldHost(element: Element, policy: ResolutionPolicy): boolean {
   if (!isCustomElement(element)) return false;
-  return hasMirroredValueProperty(element) || Boolean(nativeControlWithin(element, "input, select, textarea", policy));
+  return (
+    hasMirroredValueProperty(element) ||
+    Boolean(nativeControlWithin(element, "input, select, textarea", policy)) ||
+    // A picklist host may contain neither: its control is a combobox
+    // trigger and a listbox, which is a control by ARIA rather than by tag.
+    // Without this, a Lightning picklist is not even a candidate field.
+    Boolean(controlWithin(element, COMBOBOX_TRIGGER_SELECTOR, policy))
+  );
 }
 
 /**
@@ -102,6 +129,19 @@ function nativeControlWithin(
   if (!shadow) return undefined;
   const native = queryComposedTreeFirst(shadow, selector, policy);
   return native instanceof HTMLInputElement ? native : undefined;
+}
+
+/**
+ * Any control inside the host's shadow root, native or not.
+ *
+ * Distinct from `nativeControlWithin`, which deliberately returns only a
+ * real `<input>`: a picklist's control is a `<button role="combobox">`,
+ * which is a control by ARIA and not by tag.
+ */
+function controlWithin(host: Element, selector: string, policy: ResolutionPolicy): Element | undefined {
+  const shadow = host.shadowRoot;
+  if (!shadow) return undefined;
+  return queryComposedTreeFirst(shadow, selector, policy);
 }
 
 function nativeDateInputWithin(root: Element, policy: ResolutionPolicy): HTMLInputElement | undefined {
@@ -208,6 +248,80 @@ function setDateViaPicker(
   }
   dayButton.click();
   return { ok: true, detail: "Value set by selecting the labelled day in the date-picker calendar." };
+}
+
+/** The option's own accessible name, as a human reads it in the list. */
+function optionLabel(option: Element): string {
+  return (accessibleName(option) ?? option.textContent ?? "").trim();
+}
+
+/** What the combobox currently displays, for read-back after selecting. */
+function readComboboxDisplayValue(host: Element, policy: ResolutionPolicy): string | undefined {
+  const trigger = queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+  if (!trigger) return undefined;
+  if (trigger instanceof HTMLInputElement) return trigger.value || undefined;
+  const text = (trigger.textContent ?? "").trim();
+  return text || undefined;
+}
+
+/**
+ * Selects a picklist value by the option's visible name.
+ *
+ * Opens the combobox, finds the one option whose accessible name matches,
+ * and activates it. An option that is not offered is a refusal, not a
+ * near-miss to force: the list the application is currently rendering is
+ * the authority on what is legal for this record right now, which may be
+ * narrower than any metadata said.
+ */
+function setPicklistValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
+  const host = resolved.element;
+  const root: ParentNode = host.ownerDocument ?? host;
+
+  const trigger = queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+  if (!(trigger instanceof HTMLElement)) {
+    return { ok: false, detail: "No combobox control was found inside the field." };
+  }
+  trigger.click();
+
+  // The listbox is often portalled out of the field's own subtree, so a
+  // miss inside the host is not a failure until the document also has none.
+  const listbox =
+    queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+  if (!listbox) {
+    return { ok: false, detail: "Activating the combobox did not open a recognizable option list." };
+  }
+
+  const options = queryComposedTree(listbox, OPTION_SELECTOR, policy).filter(isVisible);
+  const wanted = normalizeLabel(value);
+  const matches = options.filter((option) => normalizeLabel(optionLabel(option)) === wanted);
+
+  if (matches.length === 0) {
+    const offered = options.map(optionLabel).filter(Boolean);
+    return {
+      ok: false,
+      detail:
+        `The option "${value}" is not offered by this picklist.` +
+        (offered.length > 0 ? ` Available: ${offered.join(", ")}.` : "")
+    };
+  }
+  if (matches.length > 1) {
+    return { ok: false, detail: `Several options are labelled "${value}"; a unique choice could not be made.` };
+  }
+  if (!(matches[0] instanceof HTMLElement)) {
+    return { ok: false, detail: `The option "${value}" is not activatable.` };
+  }
+  matches[0].click();
+
+  const shown = readComboboxDisplayValue(host, policy);
+  if (shown && normalizeLabel(shown) !== wanted) {
+    return { ok: false, detail: `The picklist still shows "${shown}" after selecting "${value}".` };
+  }
+  return {
+    ok: true,
+    detail: shown
+      ? `Selected the option labelled "${value}"; the picklist now shows "${shown}".`
+      : `Selected the option labelled "${value}".`
+  };
 }
 
 function setDateValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
@@ -683,8 +797,9 @@ export function createSalesforceResolverAdapter(
       valueKind: FieldValueKind,
       policy: ResolutionPolicy
     ): FieldWriteOutcome | undefined {
-      if (valueKind !== "date") return undefined;
-      return setDateValue(resolved, value, policy);
+      if (valueKind === "date") return setDateValue(resolved, value, policy);
+      if (valueKind === "select") return setPicklistValue(resolved, value, policy);
+      return undefined;
     },
 
     assessValidation(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment {
@@ -708,6 +823,12 @@ export function createSalesforceResolverAdapter(
       if (element) {
         const nativeDate = nativeDateInputWithin(element, policy);
         if (nativeDate) return nativeDate.value;
+        // A combobox's displayed text is the selected option's label, which
+        // is what was written and therefore what must be compared. Checked
+        // after the native date input, whose ISO value is more precise than
+        // any display string a component renders over it.
+        const combobox = readComboboxDisplayValue(element, policy);
+        if (combobox) return combobox;
         const anyNative = anyNativeInputWithin(element, policy);
         if (anyNative) return anyNative.value;
         if (hasMirroredValueProperty(element)) {
