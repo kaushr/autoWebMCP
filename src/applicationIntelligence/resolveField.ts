@@ -1,5 +1,6 @@
 import type {
   ApplicationFieldType,
+  ValueDomainState,
   EpistemicNeed,
   FieldClarification,
   FieldResolution,
@@ -102,9 +103,26 @@ function cleanLabel(value: string | undefined): string | undefined {
  * picklist's value, and by field-level permissions. When runtime context
  * arrives it narrows here, and nothing upstream changes.
  */
-function materializeOptions(field: TenantFieldSchema): Pick<ResolvedApplicationField, "options" | "optionsSource"> {
+function materializeOptions(
+  field: TenantFieldSchema
+): Pick<ResolvedApplicationField, "options" | "optionsSource" | "domain"> {
   if (!field.options || field.options.length === 0) return {};
-  return { options: [...field.options], optionsSource: "tenant" };
+  return { options: [...field.options], optionsSource: "tenant", domain: "known-tenant" };
+}
+
+/**
+ * The domain status of a resolved field.
+ *
+ * A closed-domain field whose values nobody has listed is `discoverable-live`,
+ * not `unknown`: the live control itself is authoritative about what it
+ * currently offers, and asking it is both cheaper and more correct than
+ * asking a person — record type, dependent picklists, and permissions can
+ * all narrow the set in ways no static snapshot captures.
+ */
+function domainStateFor(field: ResolvedApplicationField): ValueDomainState | undefined {
+  if (field.type !== "picklist") return undefined;
+  if (field.options && field.options.length > 0) return field.domain ?? "known-tenant";
+  return "discoverable-live";
 }
 
 function fromTenantField(field: TenantFieldSchema, objectApiName: string | undefined): ResolvedApplicationField {
@@ -574,9 +592,10 @@ function unknownDomainNeed(
     subreason: "knowledge-unavailable",
     question: `Which values are valid for "${field.label}"?`,
     reason:
-      `${field.apiName} is a picklist, but no tenant metadata is available to say which values this org allows. ` +
-      "The field still executes — the application validates the value — but the test form cannot offer a list to choose from. " +
-      "This needs metadata access, not a one-line answer.",
+      `${field.apiName} is a picklist, but no tenant metadata says which values this org allows. ` +
+      "The live control can be asked directly, which is more accurate than any snapshot — record type, dependent " +
+      "picklists, and permissions all narrow what is actually offered. Values are read from the application before " +
+      "the test form is shown; this need remains only if that inspection cannot be performed.",
     blocking: false,
     knownEvidence: {
       inputName: request.inputName,
@@ -616,11 +635,13 @@ function resolvedWith(
       : "No user clarification required."
   );
 
-  const domainNeed = unknownDomainNeed(request, identity, path);
+  const domain = domainStateFor(identity);
+  const resolved: ResolvedApplicationField = domain ? { ...identity, domain } : identity;
+  const domainNeed = unknownDomainNeed(request, resolved, path);
   return {
     status: "resolved",
     ok: true,
-    field: identity,
+    field: resolved,
     observed,
     ...(domainNeed ? { need: domainNeed } : {}),
     grounding: {

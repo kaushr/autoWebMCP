@@ -66,6 +66,18 @@ let tenantIntelligence: TenantIntelligenceSource = emptyTenantIntelligence();
  * is not the vendor documenting it.
  */
 let fieldClarifications: FieldClarification[] = [];
+
+/**
+ * Value domains read from the live application, keyed by capability input.
+ *
+ * The most accurate source there is for what a control will currently
+ * accept — record type, dependent picklists, and permissions all narrow it
+ * in ways no stored snapshot knows — so these outrank any materialized
+ * domain on the binding.
+ */
+let liveValueDomains: Record<string, string[]> = {};
+let liveDomainProblems: Record<string, string> = {};
+let liveDomainStatus = "";
 let clarificationDraft = "";
 
 export function useTenantIntelligence(source: TenantIntelligenceSource): void {
@@ -203,6 +215,9 @@ function clearExecutionState(): void {
   browserBindingCandidate = undefined;
   fieldClarifications = [];
   clarificationDraft = "";
+  liveValueDomains = {};
+  liveDomainProblems = {};
+  liveDomainStatus = "";
   browserBindingStatus = "";
   browserBindingValidation = undefined;
   browserValidationStatus = "";
@@ -713,6 +728,22 @@ function renderTestControl(field: TestFormField): string {
     case "checkbox":
       return `<input type="checkbox" data-test-input="${escapeHtml(field.name)}" ${value === "true" ? "checked" : ""} />`;
     case "select":
+      // A fixed set of choices whose contents are not established stays a
+      // disabled select, never a text box: the field is constrained whether
+      // or not anyone has enumerated it, and offering free text would invite
+      // exactly the arbitrary business value the application will refuse.
+      if (field.domainUnknown) {
+        const why = liveDomainProblems[field.name];
+        return `<select data-test-input="${escapeHtml(field.name)}" disabled>
+            <option value="">Valid values are not known</option>
+          </select>
+          <small class="domain-unknown">${escapeHtml(
+            `${field.label} is a fixed set of choices. ` +
+              (why
+                ? `The application's own list could not be read: ${why}`
+                : "No metadata supplied its values and the live control has not been read yet.")
+          )}</small>`;
+      }
       return `<select data-test-input="${escapeHtml(field.name)}">
         <option value="">Choose…</option>
         ${(field.options ?? []).map((option) => `<option value="${escapeHtml(option)}" ${value === option ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
@@ -732,9 +763,23 @@ function renderBrowserTestForm(
   capability: SemanticCapability,
   binding: NonNullable<BrowserBindingCandidateRecord["proposal"]["binding"]>
 ): string {
-  const fields = buildTestFormFields(capability, binding);
+  const fields = buildTestFormFields(capability, binding, liveValueDomains);
+  const needsLiveDomain = fields.some((field) => field.domainUnknown);
   return `<div class="test-form">
     <p class="eyebrow">Test execution</p>
+    ${
+      needsLiveDomain
+        ? `<div class="studio-actions">
+             <button type="button" id="read-live-domains" class="secondary">Read choices from the application</button>
+             <p class="semanticizer-status">${escapeHtml(
+               liveDomainStatus ||
+                 "Opens the record's edit view and reads what each fixed-choice field currently offers. Nothing is written or saved."
+             )}</p>
+           </div>`
+        : liveDomainStatus
+          ? `<p class="semanticizer-status">${escapeHtml(liveDomainStatus)}</p>`
+          : ""
+    }
     ${fields
       .map(
         (field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}
@@ -1682,11 +1727,37 @@ function render(): void {
     });
   }
 
+  // Ask the application what its fixed-choice fields currently offer. This
+  // reads only: it opens the edit view where the controls exist, opens each
+  // picklist to see the choices, and dismisses it. Nothing is written and
+  // no save is invoked, so it needs no execution confirmation.
+  document.querySelector<HTMLButtonElement>("#read-live-domains")?.addEventListener("click", async () => {
+    const binding = browserBindingCandidate?.proposal.binding;
+    if (!binding) return;
+    liveDomainStatus = "Reading the current choices from the application…";
+    render();
+    try {
+      const inspection = await extensionBridgeExecutionClient.inspectDomains(binding);
+      liveValueDomains = inspection.options;
+      liveDomainProblems = inspection.unresolved;
+      const found = Object.keys(inspection.options).length;
+      const missing = Object.keys(inspection.unresolved).length;
+      liveDomainStatus = found
+        ? `Read the current choices for ${found} field${found === 1 ? "" : "s"} from the application.` +
+          (missing ? ` ${missing} could not be read.` : "")
+        : "The application's current choices could not be read. The values remain unknown.";
+    } catch (error) {
+      liveDomainProblems = {};
+      liveDomainStatus = `Could not read the application's choices: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", async () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!candidate || !binding) return;
 
-    const fields = buildTestFormFields(candidate, binding);
+    const fields = buildTestFormFields(candidate, binding, liveValueDomains);
     const validation = validateTestInputs(fields, browserTestValues);
     if (!validation.ok) {
       // Invalid or missing required inputs block here — the target

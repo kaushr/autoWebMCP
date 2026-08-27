@@ -27,6 +27,15 @@ export interface TestFormField {
   control: TestFieldControl;
   options?: string[];
   required: boolean;
+  /**
+   * Set on a closed-domain field whose values are not known.
+   *
+   * The field stays a `select` — it is constrained whether or not anyone
+   * has enumerated it — and the form must refuse to accept a typed value
+   * rather than degrading to a text box, which would invite exactly the
+   * arbitrary business value the application will reject.
+   */
+  domainUnknown?: boolean;
 }
 
 export type TestFormValidation =
@@ -46,7 +55,9 @@ function displayLabel(label: string): string {
  */
 export function buildTestFormFields(
   capability: SemanticCapability,
-  binding: BrowserExecutionBinding
+  binding: BrowserExecutionBinding,
+  /** Values read from the live application, which outrank any stored domain. */
+  liveOptions?: Record<string, string[]>
 ): TestFormField[] {
   return binding.inputs.map((bindingInput) => {
     const input = capability.inputs.find((candidate) => candidate.name === bindingInput.semanticInput);
@@ -56,13 +67,13 @@ export function buildTestFormFields(
       return { name: bindingInput.semanticInput, label, control: "select" as const, options: [...input.enum], required: input.required };
     }
 
-    // The value domain the application itself declared, materialized onto
-    // the binding when it was proposed. Absent means the domain is unknown,
-    // never that anything goes — so a closed-domain field with no known
-    // options renders as a plain text box and lets the application remain
-    // the authority on what it will accept, rather than showing an empty
-    // dropdown that implies there is nothing to choose.
-    const declaredOptions = bindingInput.applicationField?.options;
+    // The value domain, materialized onto the binding when it was proposed
+    // or read from the live application just before the form was built.
+    // Absent means "not yet established", NEVER "unconstrained" — a live
+    // run proved the difference: a picklist that degraded to a text box let
+    // an arbitrary Stage value through to the runtime, which then had
+    // nothing sensible to do with it.
+    const declaredOptions = liveOptions?.[bindingInput.semanticInput] ?? bindingInput.applicationField?.options;
 
     const control: TestFieldControl =
       input?.type === "date"
@@ -77,15 +88,17 @@ export function buildTestFormFields(
                 ? "number"
                 : bindingInput.valueKind === "checkbox"
                   ? "checkbox"
-                  : bindingInput.valueKind === "select" && declaredOptions && declaredOptions.length > 0
+                  : bindingInput.valueKind === "select"
                     ? "select"
                     : "text";
 
+    const domainUnknown = control === "select" && !(declaredOptions && declaredOptions.length > 0);
     return {
       name: bindingInput.semanticInput,
       label,
       control,
       ...(control === "select" && declaredOptions ? { options: [...declaredOptions] } : {}),
+      ...(domainUnknown ? { domainUnknown: true } : {}),
       required: input?.required ?? true
     };
   });
@@ -111,6 +124,13 @@ export function validateTestInputs(
       continue;
     }
     if (!value) {
+      if (field.control === "select" && field.domainUnknown) {
+        errors.push(
+          `"${field.label}" is a fixed set of choices, but its valid values are not known yet. ` +
+            "The application's own list could not be read, so there is nothing to choose from."
+        );
+        continue;
+      }
       if (field.required) errors.push(`"${field.label}" is required.`);
       continue;
     }
@@ -132,6 +152,13 @@ export function validateTestInputs(
         break;
       }
       case "select":
+        if (field.domainUnknown) {
+          errors.push(
+            `"${field.label}" is a fixed set of choices, but its valid values are not known yet, so no value can be checked. ` +
+              "Nothing was sent to the application."
+          );
+          continue;
+        }
         if (!field.options?.includes(value)) {
           errors.push(`"${field.label}" must be one of: ${field.options?.join(", ") ?? ""}.`);
           continue;

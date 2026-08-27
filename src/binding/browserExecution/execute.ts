@@ -1,6 +1,7 @@
 import {
   invokeSemanticAction,
   policyFor,
+  readSemanticOptions,
   resolveSemanticTarget,
   setFieldValue,
   verifyOutcome,
@@ -138,6 +139,78 @@ async function resolveAllTargets(
  * target cannot be resolved or a value cannot be set — a half-filled form
  * left mid-edit is worse than an honest refusal to start.
  */
+/** What one read-only inspection of the live page found. */
+export interface DomainInspection {
+  /** Semantic input name → the values that control is currently offering. */
+  options: Record<string, string[]>;
+  /** Inputs whose domain could not be established, and why. */
+  unresolved: Record<string, string>;
+  evidence: string[];
+}
+
+export interface InspectOptions {
+  root: ParentNode & Node;
+  binding: BrowserExecutionBinding;
+  adapter?: PlatformResolverAdapter;
+  reaction?: { timeoutMs?: number; quietMs?: number };
+}
+
+/**
+ * Asks the live application which values its closed-domain controls
+ * currently offer. Reads only.
+ *
+ * Distinct from `executeConfirmed` and deliberately NOT gated on an
+ * execution confirmation, because it commits nothing: it brings the record
+ * into edit state — where the controls exist at all — opens each picklist
+ * to read its choices, and dismisses it. No value is written and no save is
+ * ever invoked, so there is nothing here for a person to authorize beyond
+ * the test they already asked to set up.
+ *
+ * This exists because the live control is the most accurate source of a
+ * value domain there is. Record type, dependent picklists, and permissions
+ * all narrow what is legal in ways no stored snapshot can know, and asking
+ * the application is both better and cheaper than asking a person.
+ */
+export async function inspectValueDomains(options: InspectOptions): Promise<DomainInspection> {
+  const { root, binding, adapter } = options;
+  const result: DomainInspection = { options: {}, unresolved: {}, evidence: [] };
+
+  const closedDomain = binding.inputs.filter((input) => input.valueKind === "select");
+  if (closedDomain.length === 0) return result;
+
+  const transition =
+    binding.context.pageMode === "edit-or-record"
+      ? await adapter?.ensureEditable?.(root, policyFor(adapter))
+      : undefined;
+  if (transition && !transition.ok) {
+    const why = `the record's edit state could not be established (initial: ${transition.initialState}, final: ${transition.finalState})`;
+    for (const input of closedDomain) {
+      result.unresolved[input.semanticInput] = `The live control could not be inspected because ${why}.`;
+    }
+    result.evidence.push(`Could not inspect the live controls: ${why}.`, ...transition.diagnostics);
+    return result;
+  }
+  if (transition) {
+    await waitForApplicationReaction({ root, ...options.reaction });
+    result.evidence.push(...transition.diagnostics);
+  }
+
+  for (const input of closedDomain) {
+    const offered = readSemanticOptions(root, input.semanticTarget, adapter);
+    if (offered && offered.length > 0) {
+      result.options[input.semanticInput] = offered;
+      result.evidence.push(
+        `"${input.semanticInput}" currently offers ${offered.length} values: ${offered.join(", ")}.`
+      );
+    } else {
+      result.unresolved[input.semanticInput] =
+        `The control for "${input.semanticTarget.label}" could not be inspected for its current choices.`;
+      result.evidence.push(`"${input.semanticInput}": no offered values could be read from the live control.`);
+    }
+  }
+  return result;
+}
+
 export async function executeConfirmed(options: ExecuteOptions): Promise<ExecutionResult> {
   if (options.confirmed !== true) {
     throw new Error("executeConfirmed refuses to run without an explicit confirmed: true.");

@@ -149,6 +149,30 @@ export type FieldEvidenceKind = "application-identifier" | "visible-label";
 export type FieldKnowledgeSource = "tenant" | "standard" | "human-confirmed" | "observation-only";
 
 /**
+ * Where a field's currently valid values come from — a third thing,
+ * separate from its identity and its type.
+ *
+ * These have different sources and different lifetimes. `StageName` is the
+ * identity and is stable. `picklist` is the type and changes only when an
+ * admin redefines the field. The valid VALUES can differ by record type, by
+ * a controlling field's value, and by the running user's permissions, so
+ * they are true only for a moment and a context.
+ *
+ * Collapsing the three is what produced a free-text box for a known
+ * picklist: an unknown domain was read as "no constraint", when it means
+ * "a constraint whose contents we have not established yet".
+ */
+export type ValueDomainState =
+  /** The org's own metadata listed the values. */
+  | "known-tenant"
+  /** The live application was inspected and offered these values. */
+  | "known-live"
+  /** Not known yet, but the live control can be asked. */
+  | "discoverable-live"
+  /** Not known, and not obtainable here. */
+  | "unknown";
+
+/**
  * A field the system has grounded: the application's own identity for
  * something a human demonstrably interacted with.
  */
@@ -163,7 +187,13 @@ export interface ResolvedApplicationField {
    * `TenantFieldSchema`.
    */
   options?: string[];
-  optionsSource?: FieldKnowledgeSource;
+  optionsSource?: FieldKnowledgeSource | "live-application-state";
+  /**
+   * The status of the value domain, which is NOT implied by `options`
+   * being absent: a picklist with no known values is constrained, just not
+   * yet enumerated.
+   */
+  domain?: ValueDomainState;
   custom?: boolean;
 }
 

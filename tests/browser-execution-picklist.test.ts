@@ -143,7 +143,7 @@ describe("the application stays the authority on what is legal", () => {
 
     const outcome = await setFieldValue(resolved.target, "Closed Sideways", "select", adapter());
     expect(outcome.ok).toBe(false);
-    expect(outcome.detail).toMatch(/not offered/i);
+    expect(outcome.detail).toMatch(/not currently offered/i);
     expect(outcome.detail).toMatch(/Prospecting, Closed Won/);
   });
 

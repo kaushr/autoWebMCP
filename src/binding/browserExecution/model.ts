@@ -1,4 +1,4 @@
-import type { EpistemicNeed } from "../../applicationIntelligence/model";
+import type { EpistemicNeed, ValueDomainState } from "../../applicationIntelligence/model";
 import type { SourceApplication } from "../../semantic/model";
 import type { ExecutionResult } from "./result";
 
@@ -74,8 +74,14 @@ export interface BoundApplicationField {
   type: string;
   /** The value domain as known when this binding was proposed. Absent means unknown, never unrestricted. */
   options?: string[];
-  /** Which knowledge layer supplied the options, when there are any. */
-  optionsSource?: "tenant" | "standard" | "human-confirmed" | "observation-only";
+  /** Which layer supplied the options, when there are any. */
+  optionsSource?: "tenant" | "standard" | "human-confirmed" | "observation-only" | "live-application-state";
+  /**
+   * The status of the value domain, kept separate from `options` because a
+   * closed-domain field with no listed values is constrained, not free.
+   * `discoverable-live` means the live control itself can be asked.
+   */
+  domain?: ValueDomainState;
   /** Which knowledge layer identified the field. */
   knowledge: "tenant" | "standard" | "human-confirmed" | "observation-only";
   /** The standard release consulted, when standard knowledge identified it. */

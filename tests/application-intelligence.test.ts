@@ -370,13 +370,29 @@ describe("11 & 12 & 20 — the typed test form follows the resolved contract", (
     });
   });
 
-  it("20 — without tenant intelligence the domain is unknown, so the form asks honestly", () => {
+  it("20 — without a known domain the field stays a fixed set of choices, never a text box", () => {
     const fields = fieldsFor(STANDARD_ONLY);
     const stage = fields.find((field) => field.name === "stage");
-    // Not an empty dropdown, which would imply there is nothing to choose.
-    expect(stage?.control).toBe("text");
+    // A picklist whose values nobody has listed is still constrained. The
+    // live run that motivated this let an arbitrary Stage value through.
+    expect(stage?.control).toBe("select");
+    expect(stage?.domainUnknown).toBe(true);
     expect(stage?.options).toBeUndefined();
-    expect(validateTestInputs(fields, { close_date: "2027-03-01", stage: "Closed Won" }).ok).toBe(true);
+
+    const result = validateTestInputs(fields, { close_date: "2027-03-01", stage: "Closed Won" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/valid values are not known yet/i);
+  });
+
+  it("live options read from the application take precedence over any stored domain", () => {
+    const capability = capabilityWith([CLOSE_DATE, STAGE]);
+    const proposal = proposeBrowserBinding(capability, twoFieldTrace(), withTenant(tenantSnapshot()));
+    // The org's snapshot says four stages; the live record currently offers
+    // two, because a record type narrows it. The application wins.
+    const fields = buildTestFormFields(capability, proposal.binding!, { stage: ["Qualify", "Closed Won"] });
+    const stage = fields.find((field) => field.name === "stage");
+    expect(stage?.options).toEqual(["Qualify", "Closed Won"]);
+    expect(stage?.domainUnknown).toBeUndefined();
   });
 });
 

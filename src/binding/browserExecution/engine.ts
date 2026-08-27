@@ -98,6 +98,16 @@ export interface PlatformResolverAdapter {
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /** Reads a field's current on-screen value back, for verification. `undefined` means unreadable. */
   readFieldValue?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined;
+  /**
+   * Reads the values a closed-domain control is currently offering,
+   * without changing anything.
+   *
+   * Read-only by contract: an implementation may open a popup to see the
+   * choices, but must select nothing, write nothing, and leave the control
+   * as it found it. `undefined` means the domain could not be established
+   * — which is a different thing from the control having no constraint.
+   */
+  readFieldOptions?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string[] | undefined;
 }
 
 /* --------------------------- name/label reading --------------------------- */
@@ -402,6 +412,34 @@ export async function setFieldValue(
   const fromAdapter = await adapter?.setFieldValue?.(resolved, value, valueKind, policyFor(adapter));
   if (fromAdapter) return fromAdapter;
   return writeNativeValue(resolved.element, value);
+}
+
+/**
+ * The values a control currently offers, read from the live application.
+ *
+ * The most accurate source of a value domain there is: it reflects this
+ * record's type, the current state of any controlling field, and the
+ * running user's permissions, none of which a stored snapshot can know.
+ * Generic by design — the engine knows only "closed domain", and how to
+ * open a particular platform's control belongs to its adapter.
+ */
+export function readSemanticOptions(
+  root: ParentNode,
+  target: SemanticTarget,
+  adapter?: PlatformResolverAdapter
+): string[] | undefined {
+  const fromAdapter = adapter?.readFieldOptions?.(root, target, policyFor(adapter));
+  if (fromAdapter && fromAdapter.length > 0) return fromAdapter;
+
+  // The generic case: a real `<select>` lists its own options.
+  const outcome = resolveSemanticTarget(root, target, adapter);
+  if (!outcome.ok) return undefined;
+  const element = outcome.target.element;
+  if (element instanceof HTMLSelectElement) {
+    const labels = [...element.options].map((option) => (option.textContent ?? "").trim()).filter(Boolean);
+    return labels.length > 0 ? [...new Set(labels)] : undefined;
+  }
+  return undefined;
 }
 
 /* -------------------------------- actions -------------------------------- */

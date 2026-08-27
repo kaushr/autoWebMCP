@@ -1,4 +1,5 @@
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
+import type { DomainInspection } from "../binding/browserExecution/execute";
 import type { ExecutionResult } from "../binding/browserExecution/result";
 
 /* ------------------------------------------------------------------ *
@@ -14,6 +15,12 @@ import type { ExecutionResult } from "../binding/browserExecution/result";
 
 export interface BrowserExecutionClient {
   execute(binding: BrowserExecutionBinding, inputs: Record<string, string>): Promise<ExecutionResult>;
+  /**
+   * Asks the live application which values its closed-domain controls
+   * currently offer. Reads only — nothing is written and nothing is saved —
+   * so it carries no execution confirmation.
+   */
+  inspectDomains(binding: BrowserExecutionBinding): Promise<DomainInspection>;
 }
 
 const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
@@ -28,8 +35,45 @@ const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
  */
 const RESPONSE_TIMEOUT_MS = 45_000;
 
-function newRequestId(): string {
-  return `exec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+function newRequestId(prefix = "exec"): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** One request/response round trip over the Studio bridge. */
+function bridgeRequest<T>(
+  payload: Record<string, unknown>,
+  prefix: string,
+  timeoutMs: number,
+  take: (data: Record<string, unknown>) => T | undefined
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const requestId = newRequestId(prefix);
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", onMessage);
+      reject(
+        new Error(
+          "No response from the Teach Mode extension. Confirm it is installed, enabled, and that this page was reloaded after installing it."
+        )
+      );
+    }, timeoutMs);
+
+    function onMessage(event: MessageEvent): void {
+      if (event.source !== window) return;
+      const data = event.data as Record<string, unknown> | undefined;
+      if (data?.source !== STUDIO_BRIDGE_SOURCE || data.direction !== "response" || data.requestId !== requestId) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", onMessage);
+      const value = data.ok ? take(data) : undefined;
+      if (value !== undefined) resolve(value);
+      else reject(new Error(typeof data.error === "string" ? data.error : "The request failed."));
+    }
+
+    window.addEventListener("message", onMessage);
+    window.postMessage(
+      { source: STUDIO_BRIDGE_SOURCE, direction: "request", requestId, ...payload },
+      window.location.origin
+    );
+  });
 }
 
 /**
@@ -42,38 +86,22 @@ function newRequestId(): string {
  */
 export const extensionBridgeExecutionClient: BrowserExecutionClient = {
   execute(binding, inputs) {
-    return new Promise<ExecutionResult>((resolve, reject) => {
-      const requestId = newRequestId();
-      const timeout = window.setTimeout(() => {
-        window.removeEventListener("message", onMessage);
-        reject(
-          new Error(
-            "No response from the Teach Mode extension. Confirm it is installed, enabled, and that this page was reloaded after installing it."
-          )
-        );
-      }, RESPONSE_TIMEOUT_MS);
+    return bridgeRequest<ExecutionResult>(
+      { binding, inputs, confirmed: true },
+      "exec",
+      RESPONSE_TIMEOUT_MS,
+      (data) => data.result as ExecutionResult | undefined
+    );
+  },
 
-      function onMessage(event: MessageEvent): void {
-        if (event.source !== window) return;
-        const data = event.data as Record<string, unknown> | undefined;
-        if (
-          data?.source !== STUDIO_BRIDGE_SOURCE ||
-          data.direction !== "response" ||
-          data.requestId !== requestId
-        ) {
-          return;
-        }
-        window.clearTimeout(timeout);
-        window.removeEventListener("message", onMessage);
-        if (data.ok && data.result) resolve(data.result as ExecutionResult);
-        else reject(new Error(typeof data.error === "string" ? data.error : "Execution failed."));
-      }
-
-      window.addEventListener("message", onMessage);
-      window.postMessage(
-        { source: STUDIO_BRIDGE_SOURCE, direction: "request", requestId, binding, inputs, confirmed: true },
-        window.location.origin
-      );
-    });
+  inspectDomains(binding) {
+    // Shorter budget than execution: this opens a popup, reads it, and
+    // closes it. It does not write, commit, or wait for a save.
+    return bridgeRequest<DomainInspection>(
+      { kind: "inspect", binding },
+      "inspect",
+      20_000,
+      (data) => data.inspection as DomainInspection | undefined
+    );
   }
 };

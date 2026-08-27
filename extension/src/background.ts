@@ -5,6 +5,7 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_STUDIO_ORIGIN,
   type BrowserBindingExecuteResponse,
+  type BrowserBindingInspectResponse,
   type CaptureSettings,
   type HandoffResult,
   type SessionStatus,
@@ -313,6 +314,29 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       await persistState();
       return { ok: true, captureEvents: session.count() };
     }
+    case "browser-binding:inspect": {
+      await loadState();
+      const tabId = recordingTabId ?? (await lastKnownTabId());
+      if (tabId === undefined) {
+        return {
+          ok: false,
+          error: "No target tab is known. Start a Teach Mode session on the target application first, then try again."
+        } satisfies BrowserBindingInspectResponse;
+      }
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+        return (await chrome.tabs.sendMessage(tabId, {
+          type: "inspect:domains",
+          request: message.request
+        })) as BrowserBindingInspectResponse;
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        } satisfies BrowserBindingInspectResponse;
+      }
+    }
+
     case "browser-binding:execute": {
       await loadState();
       const tabId = recordingTabId ?? (await lastKnownTabId());

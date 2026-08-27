@@ -255,9 +255,23 @@ function optionLabel(option: Element): string {
   return (accessibleName(option) ?? option.textContent ?? "").trim();
 }
 
+/**
+ * The combobox trigger for a resolved field.
+ *
+ * The resolved element may BE the trigger rather than contain one: a
+ * Lightning picklist's control is a plain `<button role="combobox">`, and
+ * the generic field search resolves it directly. A composed-tree query
+ * only ever looks at descendants, so without this the field would resolve
+ * successfully and then report having no combobox inside it.
+ */
+function comboboxTriggerFor(host: Element, policy: ResolutionPolicy): Element | undefined {
+  if (host.matches(COMBOBOX_TRIGGER_SELECTOR)) return host;
+  return queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+}
+
 /** What the combobox currently displays, for read-back after selecting. */
 function readComboboxDisplayValue(host: Element, policy: ResolutionPolicy): string | undefined {
-  const trigger = queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+  const trigger = comboboxTriggerFor(host, policy);
   if (!trigger) return undefined;
   if (trigger instanceof HTMLInputElement) return trigger.value || undefined;
   const text = (trigger.textContent ?? "").trim();
@@ -277,9 +291,9 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
   const host = resolved.element;
   const root: ParentNode = host.ownerDocument ?? host;
 
-  const trigger = queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+  const trigger = comboboxTriggerFor(host, policy);
   if (!(trigger instanceof HTMLElement)) {
-    return { ok: false, detail: "No combobox control was found inside the field." };
+    return { ok: false, detail: "No combobox control was found for this field." };
   }
   trigger.click();
 
@@ -296,12 +310,15 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
   const matches = options.filter((option) => normalizeLabel(optionLabel(option)) === wanted);
 
   if (matches.length === 0) {
+    // The live list is the authority on what is legal for this record right
+    // now, whatever any metadata claimed. A near miss is not coerced: a
+    // business value is either offered or it is not.
     const offered = options.map(optionLabel).filter(Boolean);
     return {
       ok: false,
       detail:
-        `The option "${value}" is not offered by this picklist.` +
-        (offered.length > 0 ? ` Available: ${offered.join(", ")}.` : "")
+        `The option "${value}" is not currently offered by this picklist.` +
+        (offered.length > 0 ? ` Offered values: ${offered.join(", ")}.` : "")
     };
   }
   if (matches.length > 1) {
@@ -322,6 +339,49 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
       ? `Selected the option labelled "${value}"; the picklist now shows "${shown}".`
       : `Selected the option labelled "${value}".`
   };
+}
+
+/**
+ * Reads the values a picklist is currently offering, and changes nothing.
+ *
+ * The live control is the most accurate source there is for what is legal
+ * *now*: record type, dependent picklists, and field-level permissions all
+ * narrow the set in ways no static snapshot captures. Asking the
+ * application is therefore better than asking a person, and far better
+ * than pretending an unknown domain means an unconstrained one.
+ *
+ * Read-only by construction: it opens the popup, reads accessible names,
+ * and dismisses it. No option is activated, no value is written, and
+ * nothing is committed.
+ */
+function readPicklistOptions(host: Element, policy: ResolutionPolicy): string[] | undefined {
+  const root: ParentNode = host.ownerDocument ?? host;
+  const trigger = comboboxTriggerFor(host, policy);
+  if (!(trigger instanceof HTMLElement)) return undefined;
+
+  const alreadyOpen = trigger.getAttribute("aria-expanded") === "true";
+  if (!alreadyOpen) trigger.click();
+
+  const listbox =
+    queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+  const labels = listbox
+    ? [
+        ...new Set(
+          queryComposedTree(listbox, OPTION_SELECTOR, policy)
+            .filter(isVisible)
+            .map(optionLabel)
+            .filter((label): label is string => Boolean(label))
+        )
+      ]
+    : undefined;
+
+  // Leave the control as it was found. Escape is how a human dismisses this
+  // popup, and it selects nothing.
+  if (!alreadyOpen) {
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    if (trigger.getAttribute("aria-expanded") === "true") trigger.click();
+  }
+  return labels && labels.length > 0 ? labels : undefined;
 }
 
 function setDateValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
@@ -764,6 +824,23 @@ function readRecordViewDisplayValue(
   return undefined;
 }
 
+/**
+ * The control itself, when it is not wrapped in a component host — a bare
+ * `<button role="combobox">` carrying the field's accessible name.
+ */
+function resolveFieldElement(
+  root: ParentNode,
+  target: SemanticTarget,
+  policy: ResolutionPolicy
+): Element | undefined {
+  const wanted = normalizeLabel(target.label);
+  const matches = queryComposedTree(root, COMBOBOX_TRIGGER_SELECTOR, policy).filter((element) => {
+    const name = accessibleName(element);
+    return name !== undefined && normalizeLabel(name) === wanted;
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export function createSalesforceResolverAdapter(
   pageState: PageStatePolicy = DEFAULT_PAGE_STATE_POLICY,
   verification: VerificationPolicy = DEFAULT_VERIFICATION_POLICY
@@ -812,6 +889,11 @@ export function createSalesforceResolverAdapter(
       // "still open", so a leftover unrelated dialog cannot misreport an
       // unsaved form after a successful save.
       return assessSalesforcePageState(root, policy, pageState).state !== "record-edit";
+    },
+
+    readFieldOptions(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string[] | undefined {
+      const element = findFieldHost(root, target, policy) ?? resolveFieldElement(root, target, policy);
+      return element ? readPicklistOptions(element, policy) : undefined;
     },
 
     readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {

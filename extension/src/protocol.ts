@@ -1,6 +1,7 @@
 import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/types";
 import type { ObservationTrace, RecordingMetadata } from "../../src/capture/normalize";
 import type { BrowserExecutionBinding } from "../../src/binding/browserExecution/model";
+import type { DomainInspection } from "../../src/binding/browserExecution/execute";
 import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 
 /** Where the extension hands its normalized trace to the Training Studio. */
@@ -48,6 +49,24 @@ export interface BrowserBindingExecuteRequest {
   confirmed: true;
 }
 
+/**
+ * A read-only inspection of the live page's closed-domain controls.
+ *
+ * Deliberately a separate message from execution, with no `confirmed`
+ * field, because it writes nothing: it reads what a picklist currently
+ * offers and dismisses it. Keeping it distinct means the confirmation
+ * gate on execution stays exactly as narrow as it was.
+ */
+export interface BrowserBindingInspectRequest {
+  binding: BrowserExecutionBinding;
+}
+
+export interface BrowserBindingInspectResponse {
+  ok: boolean;
+  inspection?: DomainInspection;
+  error?: string;
+}
+
 export interface BrowserBindingExecuteResponse {
   ok: boolean;
   result?: ExecutionResult;
@@ -63,13 +82,15 @@ export type ToBackgroundMessage =
   | { type: "session:trace" }
   | { type: "capture:context"; sessionId: string; application: CaptureApplicationContext }
   | { type: "capture:events"; sessionId: string; events: CaptureEvent[]; rrwebEvents: number }
-  | { type: "browser-binding:execute"; request: BrowserBindingExecuteRequest };
+  | { type: "browser-binding:execute"; request: BrowserBindingExecuteRequest }
+  | { type: "browser-binding:inspect"; request: BrowserBindingInspectRequest };
 
 /** Service worker → content script. */
 export type ToContentMessage =
   | { type: "capture:begin"; sessionId: string; startedAt: number; settings: CaptureSettings }
   | { type: "capture:end" }
-  | { type: "execute:run"; request: BrowserBindingExecuteRequest };
+  | { type: "execute:run"; request: BrowserBindingExecuteRequest }
+  | { type: "inspect:domains"; request: BrowserBindingInspectRequest };
 
 export interface CaptureFlush {
   events: CaptureEvent[];
@@ -86,6 +107,24 @@ export type TraceResponse = { trace?: ObservationTrace };
  * must echo back — a plain web page has no other way to correlate them.
  */
 export const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
+
+/** Studio page → bridge, asking the taught tab what its controls currently offer. */
+export interface StudioBridgeInspectRequest {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "request";
+  kind: "inspect";
+  requestId: string;
+  binding: BrowserExecutionBinding;
+}
+
+export interface StudioBridgeInspectResponse {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "response";
+  requestId: string;
+  ok: boolean;
+  inspection?: DomainInspection;
+  error?: string;
+}
 
 export interface StudioBridgeExecuteRequest {
   source: typeof STUDIO_BRIDGE_SOURCE;

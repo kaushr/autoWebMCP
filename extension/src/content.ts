@@ -17,12 +17,14 @@ import type {
 } from "../../src/capture/types";
 import type {
   BrowserBindingExecuteRequest,
+  BrowserBindingInspectRequest,
+  BrowserBindingInspectResponse,
   BrowserBindingExecuteResponse,
   CaptureFlush,
   CaptureSettings,
   ToContentMessage
 } from "./protocol";
-import { executeConfirmed } from "../../src/binding/browserExecution/execute";
+import { executeConfirmed, inspectValueDomains } from "../../src/binding/browserExecution/execute";
 import {
   resolutionProvenanceForPlatform,
   resolverAdapterForPlatform
@@ -468,6 +470,24 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
   }
 }
 
+/**
+ * Reads what this tab's closed-domain controls currently offer. Writes
+ * nothing and never saves, so unlike execution it carries no confirmation
+ * — there is no business change here for a person to authorize.
+ */
+async function runInspectRequest(request: BrowserBindingInspectRequest): Promise<BrowserBindingInspectResponse> {
+  try {
+    const inspection = await inspectValueDomains({
+      root: document,
+      binding: request.binding,
+      adapter: resolverAdapterForPlatform(request.binding.platform)
+    });
+    return { ok: true, inspection };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const request = message as ToContentMessage;
   if (request.type === "capture:begin") {
@@ -484,6 +504,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (request.type === "execute:run") {
     void runExecuteRequest(request.request).then(sendResponse);
+    return true;
+  }
+  if (request.type === "inspect:domains") {
+    void runInspectRequest(request.request).then(sendResponse);
     return true;
   }
   return undefined;

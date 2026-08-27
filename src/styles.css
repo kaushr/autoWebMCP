@@ -43,3 +43,5 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 .need-path { list-style: none; margin: .1rem 0; padding: 0 0 0 .8rem; border-left: 2px solid #33507d; display: grid; gap: .12rem; }
 .need-path li { color: #8fa6c8; font-size: .74rem; }
 .need-suggestions code { color: #dbe7ff; }
+.domain-unknown { display: block; margin-top: .25rem; color: #d7a841; font-size: .74rem; line-height: 1.4; }
+.test-form select:disabled { color: #8fa6c8; background: rgba(6,15,29,.6); }
