@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { controlKindFor, detectPlatform, isSensitiveField, safeValueChange } from "../src/capture/policy";
+import { controlKindFor, detectPlatform, isSensitiveField, safeValueChange, pagePath } from "../src/capture/policy";
 
 describe("capture privacy policy", () => {
   it("treats credential, contact, and payment controls as sensitive", () => {
@@ -47,5 +47,30 @@ describe("capture privacy policy", () => {
     expect(detectPlatform("localhost", { lightning: true, prospect: false })).toBe("salesforce-lightning");
     expect(detectPlatform("127.0.0.1", { lightning: false, prospect: true })).toBe("prospect-intelligence");
     expect(detectPlatform("example.com", { lightning: false, prospect: false })).toBe("generic");
+  });
+});
+
+describe("Page identity", () => {
+  it("keeps a plain path unchanged", () => {
+    expect(pagePath({ pathname: "/prospect/", hash: "" })).toBe("/prospect/");
+    expect(pagePath({ pathname: "/prospect/", hash: "#" })).toBe("/prospect/");
+  });
+
+  it("distinguishes hash routes, so a client-rendered journey is not one page", () => {
+    const routes = [
+      { pathname: "/prospect/", hash: "#/?q=Acme" },
+      { pathname: "/prospect/", hash: "#/company/acme" },
+      { pathname: "/prospect/", hash: "#/company/acme?function=Procurement&seniority=VP" },
+      { pathname: "/prospect/", hash: "#/contact/contact-acme-01" }
+    ].map(pagePath);
+
+    expect(new Set(routes).size).toBe(4);
+    expect(routes[2]).toContain("function=Procurement");
+  });
+
+  it("bounds a runaway hash", () => {
+    const long = pagePath({ pathname: "/prospect/", hash: `#/${"a".repeat(500)}` });
+    expect(long.length).toBeLessThanOrEqual(201);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

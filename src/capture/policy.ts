@@ -82,6 +82,26 @@ export function safeValueChange(
   };
 }
 
+const MAX_PATH_LENGTH = 200;
+
+/**
+ * The page identity a navigation observation is deduped on.
+ *
+ * Hash routes are real navigation: a client-rendered application can move
+ * between search, a record, and a filtered view without `pathname` ever
+ * changing. Keying page identity on the path alone makes that entire journey
+ * look like a single page and silently discards the evidence.
+ *
+ * The hash is URL data the human navigated to, and on a faceted view it names
+ * the filters they applied. It is retained under the same rule as `pathname`;
+ * field values remain governed by `safeValueChange`.
+ */
+export function pagePath(location: { pathname: string; hash: string }): string {
+  const hash = location.hash === "#" ? "" : location.hash;
+  const path = `${location.pathname}${hash}`;
+  return path.length > MAX_PATH_LENGTH ? `${path.slice(0, MAX_PATH_LENGTH)}…` : path;
+}
+
 export interface PlatformMarkers {
   /** A Salesforce Lightning host or DOM marker was present. */
   lightning: boolean;

@@ -217,3 +217,26 @@ describe("normalizeCapture", () => {
     expect(labels).toEqual(["Function", "Contact Filters", "Apply filters"]);
   });
 });
+
+describe("Client-rendered navigation", () => {
+  const route = (path: string) => ({ host: "127.0.0.1:5173", path });
+
+  it("keeps each hash route as its own navigation, and still collapses a repeat", () => {
+    const observations = normalizeCapture([
+      { id: "n1", kind: "navigate", t: 0, page: route("/prospect/") },
+      { id: "n2", kind: "navigate", t: 100, page: route("/prospect/#/?q=Acme") },
+      { id: "n3", kind: "navigate", t: 200, page: route("/prospect/#/company/acme") },
+      {
+        id: "n4",
+        kind: "navigate",
+        t: 300,
+        page: route("/prospect/#/company/acme?function=Procurement&seniority=VP")
+      },
+      { id: "n5", kind: "navigate", t: 400, page: route("/prospect/#/contact/contact-acme-01") },
+      { id: "n6", kind: "navigate", t: 500, page: route("/prospect/#/contact/contact-acme-01") }
+    ]);
+
+    expect(observations.map((observation) => observation.id)).toEqual(["n1", "n2", "n3", "n4", "n5"]);
+    expect(observations[3].page?.path).toContain("seniority=VP");
+  });
+});

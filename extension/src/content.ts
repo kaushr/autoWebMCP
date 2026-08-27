@@ -1,5 +1,11 @@
 import { record } from "@rrweb/record";
-import { controlKindFor, detectPlatform, safeValueChange, type FieldDescriptor } from "../../src/capture/policy";
+import {
+  controlKindFor,
+  detectPlatform,
+  pagePath,
+  safeValueChange,
+  type FieldDescriptor
+} from "../../src/capture/policy";
 import type {
   CaptureApplicationContext,
   CaptureEvent,
@@ -64,7 +70,7 @@ function compact(value: string | null | undefined): string | undefined {
 function page(): CapturePageContext {
   return {
     host: location.host,
-    path: location.pathname,
+    path: pagePath(location),
     ...(compact(document.title) ? { title: compact(document.title)! } : {})
   };
 }
