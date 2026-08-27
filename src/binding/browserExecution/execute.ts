@@ -1,4 +1,5 @@
 import {
+  compareObservedValue,
   invokeSemanticAction,
   policyFor,
   readSemanticOptions,
@@ -12,7 +13,7 @@ import {
 import type { BrowserBindingInput, BrowserExecutionBinding, SemanticTarget } from "./model";
 import type { PageState } from "./pageState";
 import type { ResolutionPolicy } from "./resolutionPolicy";
-import type { ExecutionCheckResult, ExecutionOutcomeStatus, ExecutionResult } from "./result";
+import type { ExecutionCheckResult, ExecutionOutcomeStatus, ExecutionResult, InputTransaction } from "./result";
 
 export type { ExecutionOutcomeStatus, ExecutionResult } from "./result";
 
@@ -151,6 +152,51 @@ export type RestorationStatus =
   | "unproven"
   /** Could not be undone at all. */
   | "failed";
+
+/** One input's four facts, in the order a reader needs them. */
+function describeTransaction(transaction: InputTransaction): string {
+  return [
+    `${transaction.name}${transaction.apiName ? ` (${transaction.apiName})` : ""}:`,
+    `current ${JSON.stringify(transaction.beforeValue ?? null)}`,
+    `requested ${JSON.stringify(transaction.requestedValue)}`,
+    `after write ${JSON.stringify(transaction.afterWriteValue ?? null)}`,
+    `verified ${transaction.verified}`,
+    `— ${transaction.detail}`
+  ].join(" ");
+}
+
+/**
+ * Leaves an edit session we opened but will not commit.
+ *
+ * The same ownership rule read-only introspection uses: we undo the
+ * transition we caused, and never cancel an edit session the user already
+ * had open. Abandoning without this leaves partial changes on screen that
+ * the user never asked for and did not make.
+ */
+async function abandonEdit(
+  root: ParentNode & Node,
+  adapter: PlatformResolverAdapter | undefined,
+  owned: boolean,
+  options: { reaction?: { timeoutMs?: number; quietMs?: number } }
+): Promise<{ evidence: string[]; warnings: string[] }> {
+  if (!owned) {
+    return {
+      evidence: ["The record was already being edited before this run, so its edit session was left open."],
+      warnings: []
+    };
+  }
+  const restore = await adapter?.restoreRecordView?.(root, policyFor(adapter));
+  if (!restore) {
+    return { evidence: [], warnings: ["The unsaved changes could not be discarded automatically; review the application tab."] };
+  }
+  await waitForApplicationReaction({ root, ...options.reaction });
+  return {
+    evidence: ["Discarding the unsaved changes AutoWebMCP made:", ...restore.diagnostics],
+    warnings: restore.ok
+      ? []
+      : ["AutoWebMCP could not prove the record returned to view mode after abandoning the edit; review the application tab."]
+  };
+}
 
 /** What one read-only inspection of the live page found, and what it changed to find it. */
 export interface DomainInspection {
@@ -424,8 +470,12 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
    * Not a data write, so it runs under the confirmation already given for
    * this call rather than needing its own.
    */
+  let ownedEditSession = false;
   if (binding.context.pageMode === "edit-or-record") {
     const transition = await adapter?.ensureEditable?.(root, policyFor(adapter));
+    // Ownership is recorded from what we DID, so an abandoned run undoes
+    // only a session it opened itself.
+    ownedEditSession = Boolean(transition?.editActionInvoked && transition.finalState === "record-edit");
     if (transition && !transition.ok) {
       // The page never reached the state the binding's targets exist in.
       // Retrying field resolution against the wrong page state would spend
@@ -492,30 +542,77 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     detail: `All ${binding.inputs.length} input target(s) resolved on the live page.`
   });
 
-  /* --- B: set every value ---------------------------------------------- */
+  /* --- B: set every value ------------------------------------------------ *
+   * Four facts per input, kept apart on purpose. A live failure was
+   * unreadable because they had been collapsed into one: the record held
+   * 4/1/2027, the test asked for 11/01/2026, and nothing said which of
+   * those the executor had seen, written, or read back.
+   */
+  const transactions: InputTransaction[] = [];
   let allSet = true;
   for (const { input, target } of resolved) {
-    const value = inputs[input.semanticInput];
-    if (value === undefined) {
+    const requestedValue = inputs[input.semanticInput];
+    if (requestedValue === undefined) {
       allSet = false;
       warnings.push(`No value was supplied for "${input.semanticInput}".`);
       continue;
     }
-    const result = await setFieldValue(target, value, input.valueKind, adapter);
-    if (!result.ok) allSet = false;
-    evidence.push(`${input.semanticInput}: ${result.detail}`);
+
+    // What the record held before we touched it — an observation, never to
+    // be confused with what was asked for.
+    const beforeValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    const transaction: InputTransaction = {
+      name: input.semanticInput,
+      ...(input.applicationField?.apiName ? { apiName: input.applicationField.apiName } : {}),
+      ...(beforeValue !== undefined ? { beforeValue } : {}),
+      requestedValue,
+      strategy: target.strategy,
+      verified: "unreadable",
+      detail: ""
+    };
+
+    const result = await setFieldValue(target, requestedValue, input.valueKind, adapter);
+    transaction.detail = result.detail;
+
+    // A write that reports success is not the same as a field that holds
+    // the value: the date strategies wrote and returned, proving nothing.
+    const afterWriteValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    if (afterWriteValue !== undefined) transaction.afterWriteValue = afterWriteValue;
+    const comparison = afterWriteValue === undefined ? "incomparable" : compareObservedValue(requestedValue, afterWriteValue);
+    transaction.verified = comparison === "match" ? "yes" : comparison === "mismatch" ? "no" : "unreadable";
+
+    if (!result.ok || transaction.verified === "no") {
+      allSet = false;
+      if (result.ok && transaction.verified === "no") {
+        transaction.detail =
+          `${result.detail} The field still reads ${JSON.stringify(afterWriteValue)} rather than ` +
+          `${JSON.stringify(requestedValue)}, so the write was not accepted.`;
+      }
+    }
+    transactions.push(transaction);
+    evidence.push(describeTransaction(transaction));
   }
+  const unapplied = transactions.filter((entry) => entry.verified === "no" || !entry.detail.startsWith("Value set"));
   checks.push({
     name: "value_set",
     status: allSet ? "pass" : "fail",
-    detail: allSet ? "Every input value was set." : "One or more input values could not be set."
+    detail: allSet
+      ? "Every requested value was applied and read back."
+      : `Could not apply: ${unapplied.map((entry) => `${entry.name} → ${JSON.stringify(entry.requestedValue)}`).join(", ")}.`
   });
   if (!allSet) {
+    // Fail closed, and say so in the terms the user asked in. Then undo the
+    // edit session we opened, using the same ownership rule as read-only
+    // introspection: a session the user already had open is not ours.
+    const blocked = unapplied.map((entry) => `${entry.name} could not be changed to ${JSON.stringify(entry.requestedValue)}`);
+    const restoration = await abandonEdit(root, adapter, ownedEditSession, options);
+    evidence.push(...restoration.evidence);
     return {
       status: "blocked",
+      transactions,
       checks,
       evidence,
-      warnings: [...warnings, "Execution stopped before committing — not every value could be set."],
+      warnings: [...warnings, `Save was not attempted because ${blocked.join("; ")}.`, ...restoration.warnings],
       executedAt: now()
     };
   }
@@ -524,7 +621,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const commit = await invokeSemanticAction(root, binding.commit.semanticAction, adapter);
   checks.push({ name: "commit_invoked", status: commit.ok ? "pass" : "fail", detail: commit.detail });
   if (!commit.ok) {
-    return { status: "failed", checks, evidence, warnings, executedAt: now() };
+    return { status: "failed", transactions, checks, evidence, warnings, executedAt: now() };
   }
   evidence.push(commit.detail);
 
@@ -535,6 +632,16 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       ? `The page settled ${reaction.elapsedMs}ms after committing.`
       : `The page did not settle within ${reaction.elapsedMs}ms; verification proceeded anyway.`
   );
+
+  // What the record holds now that the save has settled — the fourth fact,
+  // and the only one that speaks to what was actually persisted.
+  for (const transaction of transactions) {
+    const input = resolved.find(({ input: candidate }) => candidate.semanticInput === transaction.name)?.input;
+    if (!input) continue;
+    const afterSaveValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    if (afterSaveValue !== undefined) transaction.afterSaveValue = afterSaveValue;
+  }
+  evidence.push(...transactions.map(describeTransaction));
 
   /* --- E: verify ----------------------------------------------------------- */
   const verification = verifyOutcome({
@@ -548,5 +655,5 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   });
   checks.push(...verification);
 
-  return { status: deriveStatus(checks), checks, evidence, warnings, executedAt: now() };
+  return { status: deriveStatus(checks), transactions, checks, evidence, warnings, executedAt: now() };
 }

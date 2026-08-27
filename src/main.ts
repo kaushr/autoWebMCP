@@ -47,6 +47,7 @@ import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
 import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
 import type { DomainInspection } from "./binding/browserExecution/execute";
+import type { ExecutionResult } from "./binding/browserExecution/result";
 import { assessExecutionReadiness } from "./training/executionReadiness";
 import { planValueDomainAcquisition, type ValueDomainSource } from "./training/valueDomainResolution";
 import {
@@ -1051,6 +1052,32 @@ function renderBrowserTestForm(
  * supported-interface proof, so its language stays "tested" and "verified"
  * rather than "validated" against a documented interface.
  */
+/**
+ * Per-input before/requested/after-write/after-save.
+ *
+ * Four separate facts, shown separately: a result that said only "value"
+ * left a live failure unreadable, because nothing distinguished what the
+ * record held from what the test had asked for.
+ */
+function renderTransactions(result: ExecutionResult): string {
+  if (!result.transactions?.length) return "";
+  return `<ul class="reasons">${result.transactions
+    .map(
+      (transaction) => `<li><code>${escapeHtml(transaction.name)}</code>${
+        transaction.apiName ? ` <small>${escapeHtml(transaction.apiName)}</small>` : ""
+      }
+        <ul class="need-path">
+          <li>current application value: ${escapeHtml(transaction.beforeValue ?? "unreadable")}</li>
+          <li>requested test value: ${escapeHtml(transaction.requestedValue)}</li>
+          <li>after write: ${escapeHtml(transaction.afterWriteValue ?? "unreadable")}</li>
+          ${transaction.afterSaveValue !== undefined ? `<li>after save: ${escapeHtml(transaction.afterSaveValue)}</li>` : ""}
+          <li>input verified: ${escapeHtml(transaction.verified)}</li>
+        </ul>
+      </li>`
+    )
+    .join("")}</ul>`;
+}
+
 function renderBrowserValidationStage(view: StudioLifecycleView): string {
   // Nothing to show before a test has actually run — the browser-execution
   // section above already carries the "not tested yet" state via its own
@@ -1067,6 +1094,7 @@ function renderBrowserValidationStage(view: StudioLifecycleView): string {
         )}</strong> ${escapeHtml(check.name)} — ${escapeHtml(check.detail)}</li>`
     )
     .join("")}</ul>
+    ${renderTransactions(result)}
     ${result.evidence.length ? `<ul class="reasons">${result.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
     ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}`;
 

@@ -263,6 +263,22 @@ function setDateViaPicker(
   return { ok: true, detail: "Value set by selecting the labelled day in the date-picker calendar." };
 }
 
+/** A required field's label carries a leading asterisk; the value never does. */
+function stripRequiredMarker(label: string): string {
+  return label.replace(/^\*/, "").trim();
+}
+
+/**
+ * A label used inside a constructed pattern must be escaped.
+ *
+ * Without this, a required field — whose label begins with `*` — built an
+ * invalid expression and threw, which took down record-view read-back for
+ * exactly the fields most likely to be verified.
+ */
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * The option's own label, as a human reads it in the list.
  *
@@ -273,7 +289,15 @@ function setDateViaPicker(
  * business value.
  */
 function optionLabel(option: Element): string {
-  return (accessibleName(option) ?? option.textContent ?? "").replace(/\s+/g, " ").trim();
+  const aria = option.getAttribute("aria-label")?.trim();
+  if (aria) return aria.replace(/\s+/g, " ");
+  // Deliberately NOT the generic accessible name. That computation falls
+  // back to an ancestor `<label>`, which describes the FIELD — so an option
+  // rendered inside the field's label inherits it. The live capture
+  // recorded exactly that: a `lightning-base-combobox-item` whose label
+  // came back as "*Stage", and the same inheritance turns a wrapper's text
+  // into "stage completeEngage". An option's name is its own content.
+  return (option.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -1044,7 +1068,7 @@ function readRecordViewDisplayValue(
         .replace(labelText, "")
         // A record-view row carries an inline pencil control ("Edit Close
         // Date"); its text is not the field's value.
-        .replace(new RegExp(`edit\\s+${labelText.replace(/^\\*/, "")}`, "i"), "")
+        .replace(new RegExp(`edit\\s+${escapeForRegExp(stripRequiredMarker(labelText))}`, "i"), "")
         .trim();
       if (leftover && normalizeLabel(leftover) !== wanted) return leftover;
       container = container.parentElement;
@@ -1069,6 +1093,22 @@ function resolveFieldElement(
     return name !== undefined && normalizeLabel(name) === wanted;
   });
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** A native control carrying the field's own accessible name or identifier. */
+function resolveNativeControl(
+  root: ParentNode,
+  target: SemanticTarget,
+  policy: ResolutionPolicy
+): HTMLInputElement | HTMLTextAreaElement | undefined {
+  const wanted = normalizeLabel(target.label);
+  const matches = queryComposedTree(root, "input, textarea", policy).filter((element) => {
+    if (target.applicationIdentifier && element.getAttribute("name") === target.applicationIdentifier) return true;
+    const name = accessibleName(element);
+    return name !== undefined && normalizeLabel(name) === wanted;
+  });
+  const only = matches.length === 1 ? matches[0] : undefined;
+  return only instanceof HTMLInputElement || only instanceof HTMLTextAreaElement ? only : undefined;
 }
 
 export function createSalesforceResolverAdapter(
@@ -1145,6 +1185,12 @@ export function createSalesforceResolverAdapter(
     },
 
     readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {
+      // The control may not be wrapped in a component at all. Reading has
+      // the same shape problem writing had: assuming a host meant a plain
+      // input carrying the field's own name could not be read back, so a
+      // write into it could never be verified.
+      const bare = resolveNativeControl(root, target, policy);
+      if (bare) return bare.value;
       // While the edit surface is open: read through the very same
       // field-host search that wrote the value, in the same
       // native-input-first order, so a value is never read from a different

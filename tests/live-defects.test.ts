@@ -120,6 +120,49 @@ describe("1 — a container carrying the option role is not a choice", () => {
   });
 });
 
+describe("an option never inherits the field's own label", () => {
+  it("reads the option's own text even when it sits inside the field's <label>", () => {
+    // The shape the live capture recorded: `lightning-base-combobox-item`
+    // whose reported label was "*Stage" — the field's label, inherited
+    // through the generic accessible-name computation's ancestor-label
+    // fallback.
+    const root = mount(EDIT_SHELL(`<label for="s">*Stage</label><lightning-combobox id="s"></lightning-combobox>`));
+    const outer = shadow(root.querySelector("lightning-combobox")!, `<lightning-base-combobox></lightning-base-combobox>`);
+    const inner = shadow(
+      outer.querySelector("lightning-base-combobox")!,
+      `<label>*Stage
+         <button role="combobox" aria-expanded="false">Collaborate</button>
+         <div class="dd"></div>
+       </label>`
+    );
+    const trigger = inner.querySelector("button")!;
+    const dropdown = inner.querySelector(".dd")!;
+    trigger.addEventListener("click", () => {
+      if (trigger.getAttribute("aria-expanded") === "true") {
+        dropdown.innerHTML = "";
+        trigger.setAttribute("aria-expanded", "false");
+        return;
+      }
+      trigger.setAttribute("aria-expanded", "true");
+      dropdown.innerHTML = `<div role="listbox">
+        <lightning-base-combobox-item role="option">Engage</lightning-base-combobox-item>
+        <lightning-base-combobox-item role="option">Collaborate</lightning-base-combobox-item>
+        <lightning-base-combobox-item role="option">Complete</lightning-base-combobox-item>
+      </div>`;
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key === "Escape") {
+        dropdown.innerHTML = "";
+        trigger.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    const read = readSemanticOptions(root, STAGE, adapter());
+    expect(read.options).toEqual(["Engage", "Collaborate", "Complete"]);
+    expect(read.options?.some((option) => option.includes("Stage"))).toBe(false);
+  });
+});
+
 describe("the structural gate catches a blob that still escapes extraction", () => {
   it("recognizes a value that is several other options run together", () => {
     expect(suspiciousDomain(["Engage", "Collaborate", "Complete", "stage completeEngage"])).toMatch(
