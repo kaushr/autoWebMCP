@@ -78,6 +78,12 @@ function onRequestStart(details: chrome.webRequest.RequestDetails): void {
   requestStarts.set(details.requestId, details.timeStamp);
 }
 
+/**
+ * Every request the training tab makes during the session is recorded as
+ * metadata, including reads and failures. Deciding which of them look like the
+ * application executing the demonstrated action is the normalizer's job, and it
+ * cannot tell background polling from a Save without seeing both.
+ */
 function onRequestFinished(details: chrome.webRequest.RequestDetails): void {
   if (!session?.isRecording() || details.tabId !== recordingTabId) return;
   if (details.type !== "xmlhttprequest" && details.type !== "main_frame") return;
@@ -85,27 +91,42 @@ function onRequestFinished(details: chrome.webRequest.RequestDetails): void {
   const started = requestStarts.get(details.requestId);
   requestStarts.delete(details.requestId);
 
-  let host = "";
+  let origin = "";
   let path = "/";
+  let host = "";
   try {
     const url = new URL(details.url);
+    origin = url.origin;
     host = url.host;
     path = url.pathname;
   } catch {
     return;
   }
 
+  const completedAt = Math.max(0, details.timeStamp - session.startedAt);
+  const startedAt = started ? Math.max(0, started - session.startedAt) : completedAt;
+  const status = details.statusCode ?? 0;
+  const failed = Boolean(details.error) || status === 0;
+
   session.add({
     id: `net-${details.requestId}`,
     kind: "network",
-    t: Math.max(0, details.timeStamp - session.startedAt),
+    t: completedAt,
     page: { host, path },
     network: {
+      requestId: details.requestId,
       method: details.method,
+      origin,
       endpoint: normalizeEndpoint(details.url),
-      status: details.statusCode ?? 0,
+      resourceType: details.type,
+      status,
+      ok: status >= 200 && status < 400,
+      failed,
+      startedAt,
+      completedAt,
       durationMs: started ? Math.round(details.timeStamp - started) : 0,
-      category: categorizeRequest(details.method, details.type)
+      category: categorizeRequest(details.method, details.type),
+      ...(details.frameId === undefined ? {} : { frameId: details.frameId })
     }
   });
   void persistState();

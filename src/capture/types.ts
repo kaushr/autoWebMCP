@@ -90,16 +90,32 @@ export interface CaptureReaction {
 export type NetworkCategory = "read" | "mutation" | "document" | "other";
 
 /**
- * Sanitized network metadata. It never contains headers, cookies, tokens,
- * bodies, or query-string values.
+ * Sanitized network metadata.
+ *
+ * Metadata only, by design. It never contains headers, cookies, tokens,
+ * bodies, or query-string values — enough to reason about *how* an
+ * application performed something, never enough to replay it.
  */
 export interface CaptureNetworkMetadata {
+  /** Chrome's per-request id, used to pair a start with its completion. */
+  requestId: string;
   method: string;
+  /** Scheme and host only. */
+  origin: string;
   /** Path pattern with identifiers replaced, e.g. `/sobjects/Opportunity/:id`. */
   endpoint: string;
+  /** Chrome resource type, e.g. `xmlhttprequest`. */
+  resourceType: string;
+  /** HTTP status, or 0 when the request never completed. */
   status: number;
+  ok: boolean;
+  failed: boolean;
+  /** Milliseconds since session start. */
+  startedAt: number;
+  completedAt: number;
   durationMs: number;
   category: NetworkCategory;
+  frameId?: number;
 }
 
 export interface CaptureEvent {

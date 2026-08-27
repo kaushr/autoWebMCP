@@ -73,9 +73,15 @@ declare namespace chrome {
       url: string;
       method: string;
       tabId: number;
+      frameId?: number;
       type: string;
       timeStamp: number;
       statusCode?: number;
+      /** Origin of the document that triggered the request, when Chrome exposes it. */
+      initiator?: string;
+      fromCache?: boolean;
+      /** Present on onErrorOccurred only. */
+      error?: string;
     }
     type RequestListener = (details: RequestDetails) => void;
     interface RequestEvent {
