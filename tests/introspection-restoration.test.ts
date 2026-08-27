@@ -113,7 +113,17 @@ function mountRecord(
       trigger.setAttribute("aria-expanded", "false");
     };
     trigger.addEventListener("click", () => {
-      if (throwOnOpen) throw new Error("the component exploded while opening");
+      if (throwOnOpen) {
+        // A real browser never lets a listener's exception escape back to
+        // whatever called `.click()` — it reports the error to the console
+        // and event dispatch continues unaffected. jsdom does the same, but
+        // reports it as a process-level uncaught exception here instead of a
+        // console line, which failed the suite even though every assertion
+        // below was passing. Marking it handled matches what a browser
+        // actually does, rather than papering over a real gap.
+        window.addEventListener("error", (event) => event.preventDefault(), { once: true });
+        throw new Error("the component exploded while opening");
+      }
       if (trigger.getAttribute("aria-expanded") === "true") return close();
       if (!openWorks) return;
       trigger.setAttribute("aria-expanded", "true");

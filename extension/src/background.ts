@@ -40,6 +40,41 @@ let session: CaptureSession | undefined;
 let recordingTabId: number | undefined;
 const requestStarts = new Map<string, number>();
 
+/**
+ * Distinguishes "the content script never answered" from every other
+ * rejection `chrome.tabs.sendMessage` can produce, so the catch block below
+ * can name this hop specifically instead of folding it into
+ * `target-tab-unreachable`.
+ */
+class ContentScriptTimeoutError extends Error {}
+
+/**
+ * The Studio bridge already waits up to twenty seconds for this service
+ * worker to answer at all. Nothing previously bounded the wait one hop
+ * further in — for the tab's content script to answer this worker — so a
+ * slow or stuck tab exhausted the bridge's own patience before this hop
+ * ever got to say which one it was. Kept safely under the bridge's
+ * timeout so this attribution wins the race and reaches the Studio UI
+ * directly, with no console required to see it.
+ */
+const CONTENT_SCRIPT_ANSWER_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new ContentScriptTimeoutError(`No answer within ${ms}ms.`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 async function loadState(): Promise<void> {
   if (session) return;
   const stored = await chrome.storage.session.get([SESSION_KEY, TAB_KEY]);
@@ -341,10 +376,13 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         } satisfies BrowserBindingInspectResponse;
       }
       try {
-        const response = (await chrome.tabs.sendMessage(tabId, {
-          type: "inspect:domains",
-          request: message.request
-        })) as BrowserBindingInspectResponse | undefined;
+        const response = (await withTimeout(
+          chrome.tabs.sendMessage(tabId, {
+            type: "inspect:domains",
+            request: message.request
+          }),
+          CONTENT_SCRIPT_ANSWER_TIMEOUT_MS
+        )) as BrowserBindingInspectResponse | undefined;
         console.debug("[AutoWebMCP] background: target tab answered", response);
         return (
           response ?? {
@@ -354,6 +392,18 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
           }
         );
       } catch (error) {
+        if (error instanceof ContentScriptTimeoutError) {
+          console.warn("[AutoWebMCP] background: target tab accepted the inspect request but never answered it.");
+          return {
+            ok: false,
+            reason: "introspection-timeout",
+            error:
+              `The target tab accepted the inspection request but did not answer within ` +
+              `${CONTENT_SCRIPT_ANSWER_TIMEOUT_MS / 1000}s. The page may still be busy, or it may have ` +
+              `navigated away while AutoWebMCP was reading it — reloading the page and trying again is ` +
+              `usually enough; if it keeps happening, that navigation is worth reporting.`
+          } satisfies BrowserBindingInspectResponse;
+        }
         return {
           ok: false,
           reason: "target-tab-unreachable",
