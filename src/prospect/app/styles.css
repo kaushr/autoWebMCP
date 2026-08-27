@@ -1,0 +1,405 @@
+/* SignalBase — a light, compact B2B surface, deliberately distinct from the
+   dark AutoWebMCP Training Studio so the two applications read as separate
+   products in the demo. */
+
+:root {
+  --ink: #10192b;
+  --ink-soft: #4d5b73;
+  --ink-faint: #7b8798;
+  --line: #dfe4ec;
+  --line-strong: #c6cedb;
+  --surface: #ffffff;
+  --canvas: #f6f7fa;
+  --accent: #1f5fd0;
+  --accent-soft: #eaf0fd;
+  --ok: #17794a;
+
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--canvas);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ------------------------------- shell ------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem clamp(1rem, 4vw, 2.5rem);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+.brand-mark {
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.tagline {
+  flex: 1;
+  margin: 0;
+  padding-left: 1rem;
+  border-left: 1px solid var(--line);
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+}
+
+.webmcp-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.webmcp-status .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.webmcp-status[data-status="registered"] .dot {
+  background: var(--ok);
+}
+
+main {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: clamp(1.5rem, 4vw, 2.75rem) clamp(1rem, 4vw, 2.5rem) 4rem;
+}
+
+.sitefoot {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0 clamp(1rem, 4vw, 2.5rem) 3rem;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+}
+
+/* ----------------------------- typography ---------------------------- */
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: clamp(1.6rem, 3.2vw, 2.15rem);
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: -0.015em;
+}
+
+h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+}
+
+.lede {
+  margin: 0 0 1.25rem;
+  max-width: 46rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.empty {
+  margin: 1.25rem 0;
+  padding: 1.25rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  color: var(--ink-soft);
+  background: var(--surface);
+}
+
+/* ---------------------------- breadcrumb ----------------------------- */
+
+.breadcrumb {
+  margin-bottom: 1.25rem;
+}
+
+.breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+}
+
+.breadcrumb li + li::before {
+  content: "/";
+  margin-right: 0.4rem;
+  color: var(--line-strong);
+}
+
+/* ------------------------------ search ------------------------------- */
+
+.hero {
+  margin-bottom: 2rem;
+}
+
+.search-form label,
+.filter-form label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.search-row {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 34rem;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button[type="submit"] {
+  flex: 0 0 auto;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.link-button {
+  align-self: center;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+/* ------------------------------ results ------------------------------ */
+
+.results-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.count {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-list {
+  display: grid;
+  gap: 0.6rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.card:hover {
+  border-color: var(--line-strong);
+}
+
+.card h3 a {
+  text-decoration: none;
+}
+
+.card h3 a:hover {
+  text-decoration: underline;
+}
+
+.card-meta {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.card-body {
+  margin: 0.5rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.card-footer {
+  margin: 0.55rem 0 0;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+}
+
+.badge {
+  padding: 0.15rem 0.45rem;
+  border-radius: 5px;
+  background: #eef1f6;
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.badge-function {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.badge-quiet {
+  background: transparent;
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+
+/* ------------------------------ company ------------------------------ */
+
+.company-header {
+  margin-bottom: 2rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.9rem 1.5rem;
+  margin: 1.25rem 0 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.facts div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.facts dt {
+  color: var(--ink-faint);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.facts dd {
+  margin: 0;
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.filter-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.field-actions {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+/* ------------------------------ contact ------------------------------ */
+
+.contact-detail > .lede {
+  font-size: 1.02rem;
+}
+
+.contact-detail section {
+  margin-top: 1.75rem;
+}
+
+.contact-detail section p {
+  max-width: 44rem;
+  margin: 0.5rem 0 0;
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+
+  .tagline {
+    display: none;
+  }
+}

@@ -1,5 +1,6 @@
 import type { SemanticCapability } from "../semantic/model";
-import { findContacts, getContact, searchCompanies } from "./service";
+import { CONTACT_FUNCTIONS, SENIORITIES } from "./data";
+import { findContacts, getCompany, getContact, searchCompanies } from "./service";
 
 export const prospectCapabilities: SemanticCapability[] = [
   {
@@ -18,8 +19,20 @@ export const prospectCapabilities: SemanticCapability[] = [
     description: "Find contacts at a company filtered by function, seniority, and title keywords.",
     inputs: [
       { name: "company_id", description: "The company identifier returned by search_companies.", type: "string", required: true },
-      { name: "function", description: "Optional business function, such as Procurement.", type: "string", required: false },
-      { name: "seniority", description: "Optional seniority, such as VP or C-Level.", type: "string", required: false },
+      {
+        name: "function",
+        description: "Optional business function, such as Procurement.",
+        type: "string",
+        required: false,
+        enum: [...CONTACT_FUNCTIONS]
+      },
+      {
+        name: "seniority",
+        description: "Optional seniority, such as VP or C-Level.",
+        type: "string",
+        required: false,
+        enum: [...SENIORITIES]
+      },
       { name: "title_keywords", description: "Optional words that must appear in the job title.", type: "string", required: false }
     ],
     outputs: [{ name: "contacts", description: "Matching contact records.", type: "array" }],
@@ -34,6 +47,18 @@ export const prospectCapabilities: SemanticCapability[] = [
     inputs: [{ name: "contact_id", description: "The contact identifier returned by find_contacts.", type: "string", required: true }],
     outputs: [{ name: "contact", description: "The requested contact record.", type: "object" }],
     binding: { application: "prospect-intelligence", action: "get_contact" },
+    provenance: { source: "configured", observationIds: [], confirmedByHuman: false },
+    safety: { readOnly: true, requiresConfirmation: false }
+  },
+  {
+    id: "get_company",
+    name: "Get company",
+    description: "Retrieve the profile of one company, including industry, headcount, headquarters, and domain.",
+    inputs: [
+      { name: "company_id", description: "The company identifier returned by search_companies.", type: "string", required: true }
+    ],
+    outputs: [{ name: "company", description: "The requested company record.", type: "object" }],
+    binding: { application: "prospect-intelligence", action: "get_company" },
     provenance: { source: "configured", observationIds: [], confirmedByHuman: false },
     safety: { readOnly: true, requiresConfirmation: false }
   }
@@ -60,6 +85,8 @@ export function invokeProspectCapability(
       };
     case "get_contact":
       return { contact: getContact(String(input.contact_id ?? "")) ?? null };
+    case "get_company":
+      return { company: getCompany(String(input.company_id ?? "")) ?? null };
     default:
       throw new Error(`Unsupported prospect binding: ${capability.binding.action}`);
   }

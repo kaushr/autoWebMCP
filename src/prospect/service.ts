@@ -11,12 +11,18 @@ function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+/**
+ * Deterministic substring matching over name, domain, industry, and description.
+ * No ranking model, no embeddings: the demo depends on this being debuggable.
+ */
 export function searchCompanies(query: string): Company[] {
   const needle = normalize(query);
   if (!needle) return [];
 
   return companies.filter((company) =>
-    [company.name, company.industry, company.summary].some((value) => normalize(value).includes(needle))
+    [company.name, company.domain, company.industry, company.description].some((value) =>
+      normalize(value).includes(needle)
+    )
   );
 }
 
@@ -43,4 +49,13 @@ export function getContact(contactId: string): Contact | undefined {
 
 export function getCompany(companyId: string): Company | undefined {
   return companies.find((company) => company.id === companyId);
+}
+
+/** Companies shown before the visitor has searched for anything. */
+export function featuredCompanies(limit = 6): Company[] {
+  return companies.slice(0, limit);
+}
+
+export function countContacts(companyId: string): number {
+  return contacts.reduce((total, contact) => total + (contact.companyId === companyId ? 1 : 0), 0);
 }
