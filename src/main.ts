@@ -47,6 +47,17 @@ import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
 import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
 import type { DomainInspection } from "./binding/browserExecution/execute";
+import { assessExecutionReadiness } from "./training/executionReadiness";
+import {
+  beginOperation,
+  failed,
+  isCurrent,
+  isWorking,
+  succeeded,
+  type OperationKind,
+  type OperationRegistry,
+  type OperationState
+} from "./training/operationState";
 import type { EpistemicNeed, FieldClarification, TenantIntelligenceSource } from "./applicationIntelligence/model";
 
 /**
@@ -78,9 +89,79 @@ let fieldClarifications: FieldClarification[] = [];
  */
 let liveValueDomains: Record<string, string[]> = {};
 let liveDomainProblems: Record<string, string> = {};
-let liveDomainStatus = "";
 /** Drives the prominent warning: a state we changed and could not prove we put back. */
 let liveDomainRestorationFailed = false;
+
+/** One slot per async action, so every click is visibly acknowledged. */
+let operations: OperationRegistry = {};
+
+/**
+ * Runs one async Studio action with a visible busy state.
+ *
+ * The guard matters as much as the spinner: a slow response that arrives
+ * after the user has clicked again, or moved to another trace, must not
+ * overwrite what they are looking at now.
+ */
+async function runOperation(
+  kind: OperationKind,
+  workingMessage: string,
+  work: (state: OperationState) => Promise<{ message: string; warning?: boolean }>
+): Promise<void> {
+  if (isWorking(operations, kind)) return; // duplicate click while working
+  const state = beginOperation(kind, workingMessage);
+  operations = { ...operations, [kind]: state };
+  render();
+
+  try {
+    const outcome = await work(state);
+    if (!isCurrent(operations, state)) return; // superseded; do not clobber newer state
+    operations = { ...operations, [kind]: succeeded(state, outcome.message, outcome.warning) };
+  } catch (error) {
+    if (!isCurrent(operations, state)) return;
+    operations = {
+      ...operations,
+      [kind]: failed(state, error instanceof Error ? error.message : String(error))
+    };
+  }
+  render();
+}
+
+/**
+ * Marks an action busy for the duration of its work.
+ *
+ * For handlers that already report their own progress in words: this adds
+ * only the button state and the duplicate-click guard, so a click is
+ * acknowledged immediately and cannot be fired twice.
+ */
+async function withBusy(kind: OperationKind, work: () => Promise<void>): Promise<void> {
+  if (isWorking(operations, kind)) return;
+  const state = beginOperation(kind, "");
+  operations = { ...operations, [kind]: state };
+  render();
+  try {
+    await work();
+  } finally {
+    if (isCurrent(operations, state)) {
+      const next = { ...operations };
+      delete next[kind];
+      operations = next;
+    }
+    render();
+  }
+}
+
+/** The busy/result line for one action, announced to assistive technology. */
+function renderOperationStatus(kind: OperationKind, fallback = ""): string {
+  const state = operations[kind];
+  if (!state) return fallback ? `<p class="semanticizer-status">${escapeHtml(fallback)}</p>` : "";
+  const working = state.status === "working";
+  const tone = state.warning ? "ambiguity" : "semanticizer-status";
+  return `<p class="${tone}${working ? " working" : ""}" role="status" aria-live="polite" aria-busy="${working}">
+    ${working ? '<span class="spinner" aria-hidden="true"></span>' : ""}${escapeHtml(
+      state.phase ? `${state.message} — ${state.phase}` : state.message
+    )}
+  </p>`;
+}
 
 /**
  * What the inspection did, in one line the user can act on.
@@ -93,20 +174,20 @@ let liveDomainRestorationFailed = false;
 function describeInspection(inspection: DomainInspection): string {
   const found = Object.keys(inspection.options).length;
   const missing = Object.keys(inspection.unresolved).length;
+  const total = Object.values(inspection.options).reduce((sum, values) => sum + values.length, 0);
   const read = found
-    ? `Read the current choices for ${found} field${found === 1 ? "" : "s"} from the live application.` +
-      (missing ? ` ${missing} could not be read.` : "")
-    : "The application's current choices could not be read. The values remain unknown.";
+    ? `✓ ${total} valid choice${total === 1 ? "" : "s"} found.` + (missing ? ` ${missing} field could not be read.` : "")
+    : "No valid choices could be found. The values remain unknown.";
 
   if (inspection.restoration.control === "unproven") {
     return `${read} A control AutoWebMCP opened could not be proven closed — review the application tab before continuing.`;
   }
   switch (inspection.restoration.page) {
     case "proven":
-      return `${read} The record was returned to its previous state.`;
+      return `${read} The application was returned to its previous state.`;
     case "unproven":
     case "failed":
-      return `${read} AutoWebMCP could not prove the record returned to its previous state — review the application tab before continuing.`;
+      return `${read} AutoWebMCP could not prove the application returned to its previous state. Review the application tab before continuing.`;
     default:
       return inspection.initialPageState === "record-edit"
         ? `${read} Your existing edit session was left open.`
@@ -252,8 +333,8 @@ function clearExecutionState(): void {
   clarificationDraft = "";
   liveValueDomains = {};
   liveDomainProblems = {};
-  liveDomainStatus = "";
   liveDomainRestorationFailed = false;
+  operations = {};
   browserBindingStatus = "";
   browserBindingValidation = undefined;
   browserValidationStatus = "";
@@ -378,7 +459,9 @@ function renderExtensionTraces(): string {
     <ul class="trace-list">${list}</ul>
     ${detail}
     <div class="studio-actions">
-      <button id="refresh-traces" class="secondary">Refresh traces</button>
+      <button id="refresh-traces" class="secondary" ${isWorking(operations, "refresh-traces") ? "disabled" : ""}>${
+        isWorking(operations, "refresh-traces") ? "Refreshing…" : "Refresh traces"
+      }</button>
       <button id="semanticize-extension-trace" ${selectedTrace ? "" : "disabled"}>Propose capability from trace</button>
       <p class="semanticizer-status">${escapeHtml(traceStatus)}</p>
     </div>
@@ -501,7 +584,9 @@ function renderExecutionStage(capability: SemanticCapability, view: StudioLifecy
           }</button>
           ${
             view.execution.canValidate
-              ? `<button type="button" id="validate-binding">Validate this execution path</button>`
+              ? `<button type="button" id="validate-binding" ${isWorking(operations, "validate-binding") ? "disabled" : ""}>${
+                  isWorking(operations, "validate-binding") ? "Validating…" : "Validate this execution path"
+                }</button>`
               : ""
           }
           ${
@@ -607,8 +692,14 @@ function renderBrowserExecutionStage(view: StudioLifecycleView): string {
     ${renderEpistemicNeeds()}
     ${body}
     <div class="studio-actions">
-      <button type="button" id="suggest-browser-binding" class="secondary">${
-        browserBindingCandidate ? "Suggest again" : "Suggest browser execution"
+      <button type="button" id="suggest-browser-binding" class="secondary" ${
+        isWorking(operations, "suggest-binding") ? "disabled" : ""
+      }>${
+        isWorking(operations, "suggest-binding")
+          ? "Suggesting…"
+          : browserBindingCandidate
+            ? "Suggest again"
+            : "Suggest browser execution"
       }</button>
       ${
         view.browserExecution.status === "proposed" && view.browserExecution.canReject
@@ -801,20 +892,30 @@ function renderBrowserTestForm(
 ): string {
   const fields = buildTestFormFields(capability, binding, liveValueDomains);
   const needsLiveDomain = fields.some((field) => field.domainUnknown);
+  const readiness = assessExecutionReadiness(fields, binding);
+  const acquiring = isWorking(operations, "acquire-domains");
+  const testing = isWorking(operations, "run-browser-test");
   return `<div class="test-form">
     <p class="eyebrow">Test execution</p>
     ${
       needsLiveDomain
-        ? `<div class="studio-actions">
-             <button type="button" id="read-live-domains" class="secondary">Read choices from the application</button>
-             <p class="${liveDomainRestorationFailed ? "ambiguity" : "semanticizer-status"}">${escapeHtml(
-               liveDomainStatus ||
-                 "Opens the record's edit view, reads what each fixed-choice field currently offers, then closes it again. Nothing is written or saved."
+        ? `<div class="acquire-domain">
+             <p class="semanticizer-status">${escapeHtml(
+               `${fields.filter((field) => field.domainUnknown).map((field) => field.label).join(" and ")} ` +
+                 `${fields.filter((field) => field.domainUnknown).length === 1 ? "is a fixed set" : "are fixed sets"} of choices. ` +
+                 "AutoWebMCP needs the valid choices for this record before it can safely test the capability."
              )}</p>
+             <div class="studio-actions">
+               <button type="button" id="read-live-domains" class="secondary" ${acquiring ? "disabled" : ""}>${
+                 acquiring ? "Getting choices…" : "Get valid choices"
+               }</button>
+             </div>
+             ${renderOperationStatus(
+               "acquire-domains",
+               "Opens the record's edit view, reads what each fixed-choice field currently offers, then closes it again. Nothing is written or saved."
+             )}
            </div>`
-        : liveDomainStatus
-          ? `<p class="${liveDomainRestorationFailed ? "ambiguity" : "semanticizer-status"}">${escapeHtml(liveDomainStatus)}</p>`
-          : ""
+        : renderOperationStatus("acquire-domains")
     }
     ${fields
       .map(
@@ -825,7 +926,14 @@ function renderBrowserTestForm(
       .join("")}
     ${browserTestErrors.length ? `<p class="ambiguity">${browserTestErrors.map(escapeHtml).join(" · ")}</p>` : ""}
     <div class="studio-actions">
-      <button type="button" id="run-browser-test">Run test</button>
+      <button type="button" id="run-browser-test" ${readiness.canRun && !testing ? "" : "disabled"}>${
+        testing ? "Running test…" : "Run test"
+      }</button>
+      ${
+        readiness.canRun
+          ? renderOperationStatus("run-browser-test")
+          : `<p class="semanticizer-status">${escapeHtml(readiness.summary)}</p>`
+      }
     </div>
   </div>`;
 }
@@ -1422,7 +1530,8 @@ function render(): void {
       ${renderTrainingStudio()}
     </main>`;
 
-  document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", () =>
+    void withBusy("refresh-traces", async () => {
     traceStatus = "Loading extension traces…";
     connectionIssue = undefined;
     render();
@@ -1435,7 +1544,7 @@ function render(): void {
       traceStatus = describeActionFailure("Refreshing traces", error);
     }
     render();
-  });
+  }));
 
   document.querySelectorAll<HTMLButtonElement>("[data-trace-id]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1473,7 +1582,8 @@ function render(): void {
     render();
   });
 
-  document.querySelector<HTMLButtonElement>("#semanticize-extension-trace")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#semanticize-extension-trace")?.addEventListener("click", () =>
+    void withBusy("propose-capability", async () => {
     if (!selectedTrace) return;
     traceStatus = "Proposing a bounded candidate capability from extension evidence…";
     connectionIssue = undefined;
@@ -1519,7 +1629,7 @@ function render(): void {
       traceStatus = describeActionFailure("Candidate generation", error);
     }
     render();
-  });
+  }));
 
   /** One read of the editor, so changing the binding never discards typed edits. */
   function applyCandidateEdits(element: HTMLFormElement): void {
@@ -1592,7 +1702,8 @@ function render(): void {
 
   // Publication is the moment the taught site gains a capability. The Studio
   // hands the confirmed contract to the control plane; the site compiles it.
-  document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", () =>
+    void withBusy("publish-capability", async () => {
     if (!candidate) return;
     publishStatus = "Publishing…";
     connectionIssue = undefined;
@@ -1606,7 +1717,7 @@ function render(): void {
       publishStatus = describeActionFailure("Publishing", error);
     }
     render();
-  });
+  }));
 
   document.querySelector<HTMLButtonElement>("#generate-binding")?.addEventListener("click", async () => {
     if (!candidate || !selectedTrace) return;
@@ -1634,7 +1745,8 @@ function render(): void {
   // intermediate "accepted-for-validation" state as a precondition for
   // anything else, so presenting it as a separate click only added a step
   // that looked like it should mean something and did not.
-  document.querySelector<HTMLButtonElement>("#validate-binding")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#validate-binding")?.addEventListener("click", () =>
+    void withBusy("validate-binding", async () => {
     if (!candidate || !selectedTrace || !bindingCandidate) return;
     bindingCandidate = { ...bindingCandidate, state: "accepted-for-validation" };
     validationStatus = "Validating the suggested execution path…";
@@ -1668,7 +1780,7 @@ function render(): void {
       validationStatus = describeActionFailure("Validation", error);
     }
     render();
-  });
+  }));
 
   document.querySelector<HTMLButtonElement>("#accept-binding")?.addEventListener("click", () => {
     if (!candidate || !validation?.result.binding) return;
@@ -1728,13 +1840,14 @@ function render(): void {
     );
   });
 
-  document.querySelector<HTMLButtonElement>("#suggest-browser-binding")?.addEventListener("click", () => {
+  document.querySelector<HTMLButtonElement>("#suggest-browser-binding")?.addEventListener("click", () =>
+    void withBusy("suggest-binding", async () => {
     if (!candidate || !selectedTrace) return;
     browserBindingValidation = undefined;
     browserValidationStatus = "";
     runBrowserBindingProposal();
     render();
-  });
+  }));
 
   // A real write against the live page: gathers the values to test with,
   // requires an explicit confirmation beyond the click itself, then runs the
@@ -1767,29 +1880,35 @@ function render(): void {
   // reads only: it opens the edit view where the controls exist, opens each
   // picklist to see the choices, and dismisses it. Nothing is written and
   // no save is invoked, so it needs no execution confirmation.
-  document.querySelector<HTMLButtonElement>("#read-live-domains")?.addEventListener("click", async () => {
+  // Ask the application what its fixed-choice fields currently offer. This
+  // reads only: it opens the edit view where the controls exist, opens each
+  // picklist to see the choices, and closes it again. Nothing is written and
+  // no save is invoked, so it needs no execution confirmation.
+  document.querySelector<HTMLButtonElement>("#read-live-domains")?.addEventListener("click", () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!binding) return;
-    liveDomainStatus = "Reading the current choices from the application…";
-    render();
-    try {
-      const inspection = await extensionBridgeExecutionClient.inspectDomains(binding);
-      liveValueDomains = inspection.options;
-      liveDomainProblems = inspection.unresolved;
+    void runOperation("acquire-domains", "Getting valid choices from the application…", async () => {
+      const acquisition = await extensionBridgeExecutionClient.acquireDomains(binding);
+      if (!acquisition.ok) {
+        liveDomainProblems = {};
+        liveDomainRestorationFailed = false;
+        throw new Error(acquisition.detail);
+      }
+      liveValueDomains = acquisition.inspection.options;
+      liveDomainProblems = acquisition.inspection.unresolved;
       liveDomainRestorationFailed =
-        inspection.restoration.page === "unproven" ||
-        inspection.restoration.page === "failed" ||
-        inspection.restoration.control === "unproven";
-      liveDomainStatus = describeInspection(inspection);
-    } catch (error) {
-      liveDomainProblems = {};
-      liveDomainRestorationFailed = false;
-      liveDomainStatus = `Could not read the application's choices: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    render();
+        acquisition.inspection.restoration.page === "unproven" ||
+        acquisition.inspection.restoration.page === "failed" ||
+        acquisition.inspection.restoration.control === "unproven";
+      return {
+        message: describeInspection(acquisition.inspection),
+        ...(liveDomainRestorationFailed ? { warning: true } : {})
+      };
+    });
   });
 
-  document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", () =>
+    void withBusy("run-browser-test", async () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!candidate || !binding) return;
 
@@ -1835,7 +1954,7 @@ function render(): void {
       browserValidationStatus = browserBindingStatus;
     }
     render();
-  });
+  }));
 
   document.querySelector<HTMLButtonElement>("#accept-browser-binding")?.addEventListener("click", () => {
     if (!candidate || !browserBindingValidation) return;

@@ -45,3 +45,8 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 .need-suggestions code { color: #dbe7ff; }
 .domain-unknown { display: block; margin-top: .25rem; color: #d7a841; font-size: .74rem; line-height: 1.4; }
 .test-form select:disabled { color: #8fa6c8; background: rgba(6,15,29,.6); }
+.spinner { display: inline-block; width: .7rem; height: .7rem; margin-right: .45rem; vertical-align: -1px; border: 2px solid #4a6da8; border-top-color: #9dc0ff; border-radius: 50%; animation: awmcp-spin .7s linear infinite; }
+@keyframes awmcp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.acquire-domain { display: grid; gap: .45rem; margin: 0 0 .6rem; padding: .7rem .8rem; border: 1px solid #33507d; border-radius: 10px; background: rgba(10,22,41,.5); }
+button:disabled { opacity: .55; cursor: not-allowed; }

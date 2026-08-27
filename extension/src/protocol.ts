@@ -64,8 +64,26 @@ export interface BrowserBindingInspectRequest {
 export interface BrowserBindingInspectResponse {
   ok: boolean;
   inspection?: DomainInspection;
+  /** Which hop failed, so the Studio can say something actionable. */
+  reason?: AcquisitionFailureReason;
   error?: string;
 }
+
+/**
+ * Where a live acquisition stopped.
+ *
+ * A single "no response" covered all of these, which made a stale
+ * extension indistinguishable from an uninstalled one and from a missing
+ * target tab. Each hop now names itself.
+ */
+export type AcquisitionFailureReason =
+  | "extension-unavailable"
+  | "studio-bridge-outdated"
+  | "target-tab-not-registered"
+  | "target-tab-unreachable"
+  | "content-script-unavailable"
+  | "introspection-failed"
+  | "introspection-timeout";
 
 export interface BrowserBindingExecuteResponse {
   ok: boolean;
@@ -106,6 +124,19 @@ export type TraceResponse = { trace?: ObservationTrace };
  * message is tagged and every request carries the `requestId` its response
  * must echo back — a plain web page has no other way to correlate them.
  */
+/**
+ * What the Studio page and the bridge agree they can say to each other.
+ *
+ * Bumped whenever a new request kind is added. The Studio checks it before
+ * sending, because an extension that predates a request kind drops it
+ * silently — which is exactly how a stale install came to look like an
+ * uninstalled one.
+ */
+export const STUDIO_BRIDGE_PROTOCOL = 2;
+
+/** The attribute the bridge stamps on the page so its presence is detectable without a round trip. */
+export const STUDIO_BRIDGE_MARKER = "data-autowebmcp-bridge";
+
 export const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
 
 /** Studio page → bridge, asking the taught tab what its controls currently offer. */
@@ -123,7 +154,24 @@ export interface StudioBridgeInspectResponse {
   requestId: string;
   ok: boolean;
   inspection?: DomainInspection;
+  reason?: AcquisitionFailureReason;
   error?: string;
+}
+
+/** A liveness/version probe. Cheap, side-effect free, and answered by any current bridge. */
+export interface StudioBridgeHelloRequest {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "request";
+  kind: "hello";
+  requestId: string;
+}
+
+export interface StudioBridgeHelloResponse {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "response";
+  requestId: string;
+  ok: true;
+  protocol: number;
 }
 
 export interface StudioBridgeExecuteRequest {

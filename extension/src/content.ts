@@ -484,7 +484,11 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
     });
     return { ok: true, inspection };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      ok: false,
+      reason: "introspection-failed",
+      error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 

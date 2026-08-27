@@ -320,19 +320,42 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       if (tabId === undefined) {
         return {
           ok: false,
-          error: "No target tab is known. Start a Teach Mode session on the target application first, then try again."
+          reason: "target-tab-not-registered",
+          error:
+            "No target tab is known. Start a Teach Mode session on the target application first, then try again. " +
+            "Reloading the extension clears this registration."
         } satisfies BrowserBindingInspectResponse;
       }
+      // Each hop reports itself, so a failure names the thing that actually
+      // broke rather than collapsing into one unhelpful timeout.
       try {
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-        return (await chrome.tabs.sendMessage(tabId, {
-          type: "inspect:domains",
-          request: message.request
-        })) as BrowserBindingInspectResponse;
       } catch (error) {
         return {
           ok: false,
-          error: error instanceof Error ? error.message : String(error)
+          reason: "content-script-unavailable",
+          error: `The Teach Mode content script could not be injected into the target tab: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        } satisfies BrowserBindingInspectResponse;
+      }
+      try {
+        const response = (await chrome.tabs.sendMessage(tabId, {
+          type: "inspect:domains",
+          request: message.request
+        })) as BrowserBindingInspectResponse | undefined;
+        return (
+          response ?? {
+            ok: false,
+            reason: "content-script-unavailable",
+            error: "The target tab's content script returned no response."
+          }
+        );
+      } catch (error) {
+        return {
+          ok: false,
+          reason: "target-tab-unreachable",
+          error: `The target tab could not be reached: ${error instanceof Error ? error.message : String(error)}`
         } satisfies BrowserBindingInspectResponse;
       }
     }
