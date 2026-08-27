@@ -4,6 +4,7 @@ import {
   isVisible,
   normalizeLabel,
   type FieldWriteOutcome,
+  type OptionReadOutcome,
   type PlatformResolverAdapter,
   type ResolvedTarget
 } from "./engine";
@@ -11,6 +12,7 @@ import { queryComposedTree, queryComposedTreeFirst } from "./composedTree";
 import type { ResolutionPolicy } from "./resolutionPolicy";
 import {
   DEFAULT_PAGE_STATE_POLICY,
+  type EditRestoration,
   type EditableTransition,
   type PageState,
   type PageStateAssessment,
@@ -354,34 +356,145 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
  * and dismisses it. No option is activated, no value is written, and
  * nothing is committed.
  */
-function readPicklistOptions(host: Element, policy: ResolutionPolicy): string[] | undefined {
+function readPicklistOptions(host: Element, policy: ResolutionPolicy): OptionReadOutcome {
   const root: ParentNode = host.ownerDocument ?? host;
   const trigger = comboboxTriggerFor(host, policy);
-  if (!(trigger instanceof HTMLElement)) return undefined;
-
-  const alreadyOpen = trigger.getAttribute("aria-expanded") === "true";
-  if (!alreadyOpen) trigger.click();
-
-  const listbox =
-    queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
-  const labels = listbox
-    ? [
-        ...new Set(
-          queryComposedTree(listbox, OPTION_SELECTOR, policy)
-            .filter(isVisible)
-            .map(optionLabel)
-            .filter((label): label is string => Boolean(label))
-        )
-      ]
-    : undefined;
-
-  // Leave the control as it was found. Escape is how a human dismisses this
-  // popup, and it selects nothing.
-  if (!alreadyOpen) {
-    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    if (trigger.getAttribute("aria-expanded") === "true") trigger.click();
+  if (!(trigger instanceof HTMLElement)) {
+    return {
+      openedByUs: false,
+      dismissAttempted: false,
+      dismissProven: true,
+      detail: "No combobox control was found for this field."
+    };
   }
-  return labels && labels.length > 0 ? labels : undefined;
+
+  const wasOpen = isComboboxOpen(trigger, root, policy);
+  let openedByUs = false;
+  try {
+    if (!wasOpen) {
+      trigger.click();
+      openedByUs = true;
+    }
+
+    const listbox =
+      queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+    const labels = listbox
+      ? [
+          ...new Set(
+            queryComposedTree(listbox, OPTION_SELECTOR, policy)
+              .filter(isVisible)
+              .map(optionLabel)
+              .filter((label): label is string => Boolean(label))
+          )
+        ]
+      : [];
+
+    return {
+      ...(labels.length > 0 ? { options: labels } : {}),
+      openedByUs,
+      // Whatever happened above, a control WE opened must be put back.
+      ...dismissCombobox(trigger, root, policy, openedByUs),
+      detail: labels.length > 0 ? `Read ${labels.length} offered values.` : "The control opened but offered no readable values."
+    };
+  } catch (error) {
+    // A read that throws still owns whatever it opened.
+    return {
+      openedByUs,
+      ...dismissCombobox(trigger, root, policy, openedByUs),
+      detail: `Reading the offered values failed: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+}
+
+/** Whether the popup is currently showing, by the control's own ARIA state or a visible listbox. */
+function isComboboxOpen(trigger: Element, root: ParentNode, policy: ResolutionPolicy): boolean {
+  if (trigger.getAttribute("aria-expanded") === "true") return true;
+  const listbox = queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+  return Boolean(listbox && isVisible(listbox));
+}
+
+/**
+ * Closes a popup this operation opened, and proves it closed.
+ *
+ * Escape is how a human dismisses this control and selects nothing, which
+ * is exactly the property that matters: dismissal must never be achieved
+ * by choosing an option. A second activation of the trigger is the
+ * fallback, and it is a toggle, not a selection.
+ */
+function dismissCombobox(
+  trigger: HTMLElement,
+  root: ParentNode,
+  policy: ResolutionPolicy,
+  openedByUs: boolean
+): Pick<OptionReadOutcome, "dismissAttempted" | "dismissProven"> {
+  // A control the user already had open is theirs; leaving it as found is
+  // the correct restoration.
+  if (!openedByUs) return { dismissAttempted: false, dismissProven: true };
+
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  if (isComboboxOpen(trigger, root, policy)) trigger.click();
+  return { dismissAttempted: true, dismissProven: !isComboboxOpen(trigger, root, policy) };
+}
+
+/**
+ * Leaves record-edit mode the way a human would: by activating the
+ * platform's own dismiss action, resolved semantically from the labels the
+ * pack declares, and then proving the page actually returned to
+ * record-view rather than assuming the click worked.
+ *
+ * Only ever invoked for an edit transition AutoWebMCP itself caused.
+ */
+async function restoreSalesforceRecordView(
+  root: ParentNode,
+  resolution: ResolutionPolicy,
+  pageState: PageStatePolicy,
+  timeoutMs = EDIT_WAIT_TIMEOUT_MS
+): Promise<EditRestoration> {
+  const diagnostics: string[] = [];
+  const dismiss = findActionLabelled(root, pageState.dismissActionLabels, resolution);
+  diagnostics.push(`Dismiss action resolved: ${dismiss ? "yes" : "no"}`);
+  if (!dismiss) {
+    const state = assessSalesforcePageState(root, resolution, pageState).state;
+    diagnostics.push(`Final Salesforce page state: ${state}`);
+    return {
+      ok: state !== "record-edit",
+      dismissActionResolved: false,
+      dismissActionInvoked: false,
+      finalState: state,
+      diagnostics
+    };
+  }
+
+  dismiss.click();
+  diagnostics.push("Dismiss action invoked: yes");
+
+  const deadline = Date.now() + timeoutMs;
+  let state = assessSalesforcePageState(root, resolution, pageState).state;
+  while (state === "record-edit" && Date.now() < deadline) {
+    await sleep(EDIT_WAIT_POLL_MS);
+    state = assessSalesforcePageState(root, resolution, pageState).state;
+  }
+  diagnostics.push(`Final Salesforce page state: ${state}`);
+  return {
+    ok: state !== "record-edit",
+    dismissActionResolved: true,
+    dismissActionInvoked: true,
+    finalState: state,
+    diagnostics
+  };
+}
+
+/** The visible action carrying one of these accessible names, e.g. the pack's dismiss labels. */
+function findActionLabelled(
+  root: ParentNode,
+  labels: readonly string[],
+  resolution: ResolutionPolicy
+): HTMLElement | undefined {
+  const wanted = new Set(labels.map((label) => label.toLowerCase()));
+  const action = queryComposedTree(root, SURFACE_ACTION_SELECTOR, resolution)
+    .filter(isVisible)
+    .find((element) => wanted.has(normalizeLabel(accessibleName(element) ?? "")));
+  return action instanceof HTMLElement ? action : undefined;
 }
 
 function setDateValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
@@ -891,9 +1004,25 @@ export function createSalesforceResolverAdapter(
       return assessSalesforcePageState(root, policy, pageState).state !== "record-edit";
     },
 
-    readFieldOptions(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string[] | undefined {
+    readFieldOptions(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): OptionReadOutcome {
       const element = findFieldHost(root, target, policy) ?? resolveFieldElement(root, target, policy);
-      return element ? readPicklistOptions(element, policy) : undefined;
+      if (!element) {
+        return {
+          openedByUs: false,
+          dismissAttempted: false,
+          dismissProven: true,
+          detail: `No control labelled "${target.label}" could be resolved on the page.`
+        };
+      }
+      return readPicklistOptions(element, policy);
+    },
+
+    restoreRecordView(root: ParentNode, policy: ResolutionPolicy, timeoutMs?: number): Promise<EditRestoration> {
+      return restoreSalesforceRecordView(root, policy, pageState, timeoutMs);
+    },
+
+    assessPageState(root: ParentNode, policy: ResolutionPolicy): PageStateAssessment {
+      return assessSalesforcePageState(root, policy, pageState);
     },
 
     readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {

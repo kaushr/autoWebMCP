@@ -46,6 +46,7 @@ import type { CapabilityInputValues, SemanticCapability } from "./semantic/model
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
 import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
+import type { DomainInspection } from "./binding/browserExecution/execute";
 import type { EpistemicNeed, FieldClarification, TenantIntelligenceSource } from "./applicationIntelligence/model";
 
 /**
@@ -78,6 +79,40 @@ let fieldClarifications: FieldClarification[] = [];
 let liveValueDomains: Record<string, string[]> = {};
 let liveDomainProblems: Record<string, string> = {};
 let liveDomainStatus = "";
+/** Drives the prominent warning: a state we changed and could not prove we put back. */
+let liveDomainRestorationFailed = false;
+
+/**
+ * What the inspection did, in one line the user can act on.
+ *
+ * Restoration failure is deliberately not buried in Admin/Debug: if
+ * AutoWebMCP opened the user's record for editing and cannot prove it
+ * closed it again, the user's own application is in a state they did not
+ * ask for and should look at.
+ */
+function describeInspection(inspection: DomainInspection): string {
+  const found = Object.keys(inspection.options).length;
+  const missing = Object.keys(inspection.unresolved).length;
+  const read = found
+    ? `Read the current choices for ${found} field${found === 1 ? "" : "s"} from the live application.` +
+      (missing ? ` ${missing} could not be read.` : "")
+    : "The application's current choices could not be read. The values remain unknown.";
+
+  if (inspection.restoration.control === "unproven") {
+    return `${read} A control AutoWebMCP opened could not be proven closed — review the application tab before continuing.`;
+  }
+  switch (inspection.restoration.page) {
+    case "proven":
+      return `${read} The record was returned to its previous state.`;
+    case "unproven":
+    case "failed":
+      return `${read} AutoWebMCP could not prove the record returned to its previous state — review the application tab before continuing.`;
+    default:
+      return inspection.initialPageState === "record-edit"
+        ? `${read} Your existing edit session was left open.`
+        : read;
+  }
+}
 let clarificationDraft = "";
 
 export function useTenantIntelligence(source: TenantIntelligenceSource): void {
@@ -218,6 +253,7 @@ function clearExecutionState(): void {
   liveValueDomains = {};
   liveDomainProblems = {};
   liveDomainStatus = "";
+  liveDomainRestorationFailed = false;
   browserBindingStatus = "";
   browserBindingValidation = undefined;
   browserValidationStatus = "";
@@ -771,13 +807,13 @@ function renderBrowserTestForm(
       needsLiveDomain
         ? `<div class="studio-actions">
              <button type="button" id="read-live-domains" class="secondary">Read choices from the application</button>
-             <p class="semanticizer-status">${escapeHtml(
+             <p class="${liveDomainRestorationFailed ? "ambiguity" : "semanticizer-status"}">${escapeHtml(
                liveDomainStatus ||
-                 "Opens the record's edit view and reads what each fixed-choice field currently offers. Nothing is written or saved."
+                 "Opens the record's edit view, reads what each fixed-choice field currently offers, then closes it again. Nothing is written or saved."
              )}</p>
            </div>`
         : liveDomainStatus
-          ? `<p class="semanticizer-status">${escapeHtml(liveDomainStatus)}</p>`
+          ? `<p class="${liveDomainRestorationFailed ? "ambiguity" : "semanticizer-status"}">${escapeHtml(liveDomainStatus)}</p>`
           : ""
     }
     ${fields
@@ -1740,14 +1776,14 @@ function render(): void {
       const inspection = await extensionBridgeExecutionClient.inspectDomains(binding);
       liveValueDomains = inspection.options;
       liveDomainProblems = inspection.unresolved;
-      const found = Object.keys(inspection.options).length;
-      const missing = Object.keys(inspection.unresolved).length;
-      liveDomainStatus = found
-        ? `Read the current choices for ${found} field${found === 1 ? "" : "s"} from the application.` +
-          (missing ? ` ${missing} could not be read.` : "")
-        : "The application's current choices could not be read. The values remain unknown.";
+      liveDomainRestorationFailed =
+        inspection.restoration.page === "unproven" ||
+        inspection.restoration.page === "failed" ||
+        inspection.restoration.control === "unproven";
+      liveDomainStatus = describeInspection(inspection);
     } catch (error) {
       liveDomainProblems = {};
+      liveDomainRestorationFailed = false;
       liveDomainStatus = `Could not read the application's choices: ${error instanceof Error ? error.message : String(error)}`;
     }
     render();

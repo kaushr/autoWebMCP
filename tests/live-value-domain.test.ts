@@ -200,7 +200,7 @@ describe("C — neither source: constrained, and honest about it", () => {
 describe("F & H — reading the live domain through nested shadow roots", () => {
   it("F — reads the offered values across two shadow boundaries", () => {
     const page = mountPicklist(["Prospecting", "Negotiation/Review", "Closed Won"]);
-    expect(readSemanticOptions(page.root, STAGE, adapter())).toEqual([
+    expect(readSemanticOptions(page.root, STAGE, adapter()).options).toEqual([
       "Prospecting",
       "Negotiation/Review",
       "Closed Won"
@@ -223,12 +223,12 @@ describe("F & H — reading the live domain through nested shadow roots", () => 
 
   it("G — duplicate option labels collapse rather than producing a repeated choice", () => {
     const page = mountPicklist(["Closed Won", "Closed Won", "Prospecting"]);
-    expect(readSemanticOptions(page.root, STAGE, adapter())).toEqual(["Closed Won", "Prospecting"]);
+    expect(readSemanticOptions(page.root, STAGE, adapter()).options).toEqual(["Closed Won", "Prospecting"]);
   });
 
   it("reports nothing rather than an empty domain when the control cannot be read", () => {
     const root = mount(`<records-record-edit><label for="s">*Stage</label><input id="s" /></records-record-edit>`);
-    expect(readSemanticOptions(root, STAGE, adapter())).toBeUndefined();
+    expect(readSemanticOptions(root, STAGE, adapter()).options).toBeUndefined();
   });
 });
 
@@ -260,7 +260,7 @@ describe("the whole-binding inspection", () => {
       reaction: { quietMs: 10, timeoutMs: 200 }
     });
     expect(inspection.options).toEqual({});
-    expect(inspection.unresolved.stage).toMatch(/could not be inspected/i);
+    expect(inspection.unresolved.stage).toMatch(/No control labelled/i);
   });
 });
 
@@ -359,7 +359,7 @@ describe("7 — the DOM element's tag never overrides the field's semantic type"
       }
     });
 
-    expect(readSemanticOptions(root, STAGE, adapter())).toEqual(["Qualify", "Closed Won"]);
+    expect(readSemanticOptions(root, STAGE, adapter()).options).toEqual(["Qualify", "Closed Won"]);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
 });

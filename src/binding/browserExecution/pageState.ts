@@ -90,3 +90,21 @@ export const DEFAULT_PAGE_STATE_POLICY: PageStatePolicy = {
   commitActionLabels: ["save"],
   dismissActionLabels: ["cancel"]
 };
+
+/**
+ * Undoing a page-state transition AutoWebMCP itself caused.
+ *
+ * The counterpart to `EditableTransition`: that type records that we
+ * entered edit mode, this one records putting the page back. Ownership is
+ * why both exist — a read-only operation compensates only for state it
+ * introduced, and a record the user was already editing is not ours to
+ * cancel.
+ */
+export interface EditRestoration {
+  /** Proven: the page is back in the state we found it in. */
+  ok: boolean;
+  dismissActionResolved: boolean;
+  dismissActionInvoked: boolean;
+  finalState: PageState;
+  diagnostics: string[];
+}

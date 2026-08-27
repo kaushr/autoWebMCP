@@ -9,7 +9,9 @@ import {
   type PlatformResolverAdapter,
   type ResolvedTarget
 } from "./engine";
-import type { BrowserBindingInput, BrowserExecutionBinding } from "./model";
+import type { BrowserBindingInput, BrowserExecutionBinding, SemanticTarget } from "./model";
+import type { PageState } from "./pageState";
+import type { ResolutionPolicy } from "./resolutionPolicy";
 import type { ExecutionCheckResult, ExecutionOutcomeStatus, ExecutionResult } from "./result";
 
 export type { ExecutionOutcomeStatus, ExecutionResult } from "./result";
@@ -139,13 +141,91 @@ async function resolveAllTargets(
  * target cannot be resolved or a value cannot be set — a half-filled form
  * left mid-edit is worse than an honest refusal to start.
  */
-/** What one read-only inspection of the live page found. */
+/** How a temporary state change AutoWebMCP made was put back. */
+export type RestorationStatus =
+  /** Nothing to undo: we never made this transition. */
+  | "not-required"
+  /** Undone, and the resulting state was verified. */
+  | "proven"
+  /** Undone as far as we could, but the result could not be verified. */
+  | "unproven"
+  /** Could not be undone at all. */
+  | "failed";
+
+/** What one read-only inspection of the live page found, and what it changed to find it. */
 export interface DomainInspection {
   /** Semantic input name → the values that control is currently offering. */
   options: Record<string, string[]>;
   /** Inputs whose domain could not be established, and why. */
   unresolved: Record<string, string>;
+  initialPageState: PageState;
+  finalPageState: PageState;
+  /**
+   * What THIS operation changed. Restoration is driven by ownership, never
+   * by the final state: a record the user was already editing must not be
+   * cancelled just because introspection happened to end in edit mode.
+   */
+  ownership: {
+    enteredEditMode: boolean;
+    openedControls: string[];
+  };
+  restoration: {
+    control: RestorationStatus;
+    page: RestorationStatus;
+    /** Why page restoration was skipped or could not be proven. */
+    reason?: string;
+  };
   evidence: string[];
+}
+
+/**
+ * The narrow view of a platform adapter that read-only introspection is
+ * given.
+ *
+ * Deliberately a projection, not the whole adapter: `setFieldValue` is not
+ * on it, so no code in this path can write a value even by mistake. The
+ * binding's commit action is likewise never passed in — see
+ * `inspectFieldDomains`, whose input has no commit field to reach for.
+ */
+export interface ReadOnlyIntrospector {
+  id: string;
+  resolutionPolicy?: PlatformResolverAdapter["resolutionPolicy"];
+  assessPageState?: PlatformResolverAdapter["assessPageState"];
+  ensureEditable?: PlatformResolverAdapter["ensureEditable"];
+  restoreRecordView?: PlatformResolverAdapter["restoreRecordView"];
+  readFieldOptions?: PlatformResolverAdapter["readFieldOptions"];
+  resolveTarget?: PlatformResolverAdapter["resolveTarget"];
+}
+
+/** Projects a full adapter down to what a read-only operation may touch. */
+export function readOnlyIntrospector(adapter?: PlatformResolverAdapter): ReadOnlyIntrospector | undefined {
+  if (!adapter) return undefined;
+  return {
+    id: adapter.id,
+    ...(adapter.resolutionPolicy ? { resolutionPolicy: adapter.resolutionPolicy } : {}),
+    ...(adapter.assessPageState ? { assessPageState: adapter.assessPageState.bind(adapter) } : {}),
+    ...(adapter.ensureEditable ? { ensureEditable: adapter.ensureEditable.bind(adapter) } : {}),
+    ...(adapter.restoreRecordView ? { restoreRecordView: adapter.restoreRecordView.bind(adapter) } : {}),
+    ...(adapter.readFieldOptions ? { readFieldOptions: adapter.readFieldOptions.bind(adapter) } : {}),
+    ...(adapter.resolveTarget ? { resolveTarget: adapter.resolveTarget.bind(adapter) } : {})
+  };
+}
+
+/** One closed-domain field to inspect. Carries no commit action, by construction. */
+export interface InspectableField {
+  name: string;
+  target: SemanticTarget;
+}
+
+export interface InspectFieldsOptions {
+  root: ParentNode & Node;
+  fields: readonly InspectableField[];
+  /** True when the platform's records have a separate edit state to enter. */
+  mayEnterEditMode: boolean;
+  introspector?: ReadOnlyIntrospector;
+  reaction?: { timeoutMs?: number; quietMs?: number };
+  /** How long restoration waits for the page to leave edit mode. Tests override it to stay fast. */
+  restoreTimeoutMs?: number;
 }
 
 export interface InspectOptions {
@@ -153,62 +233,179 @@ export interface InspectOptions {
   binding: BrowserExecutionBinding;
   adapter?: PlatformResolverAdapter;
   reaction?: { timeoutMs?: number; quietMs?: number };
+  restoreTimeoutMs?: number;
 }
 
 /**
  * Asks the live application which values its closed-domain controls
- * currently offer. Reads only.
+ * currently offer, and puts back whatever it had to disturb to find out.
  *
- * Distinct from `executeConfirmed` and deliberately NOT gated on an
- * execution confirmation, because it commits nothing: it brings the record
- * into edit state — where the controls exist at all — opens each picklist
- * to read its choices, and dismisses it. No value is written and no save is
- * ever invoked, so there is nothing here for a person to authorize beyond
- * the test they already asked to set up.
+ * Three kinds of operation are worth telling apart, and this is the middle
+ * one:
  *
- * This exists because the live control is the most accurate source of a
- * value domain there is. Record type, dependent picklists, and permissions
- * all narrow what is legal in ways no stored snapshot can know, and asking
- * the application is both better and cheaper than asking a person.
+ *   pure observation      reads the page, changes nothing
+ *   READ-ONLY ACQUISITION changes transient UI to read something, then
+ *                         restores what it changed
+ *   business mutation     changes the record, and requires confirmation
+ *
+ * Being the middle kind is what makes the restoration contract part of the
+ * operation rather than a cleanup afterthought: an inspection that opens a
+ * record for editing and walks away has changed the user's application,
+ * even though it saved nothing.
+ *
+ * Ownership decides what gets restored. If the record was already being
+ * edited when we arrived, that edit session is the user's — we close only
+ * the control we opened, and we never touch Cancel. If we entered edit
+ * mode ourselves, we leave it again, and we prove we did.
+ *
+ * Nothing here can write: the introspector is a narrowed projection with
+ * no `setFieldValue`, and the fields it receives carry no commit action.
  */
-export async function inspectValueDomains(options: InspectOptions): Promise<DomainInspection> {
-  const { root, binding, adapter } = options;
-  const result: DomainInspection = { options: {}, unresolved: {}, evidence: [] };
+export async function inspectFieldDomains(options: InspectFieldsOptions): Promise<DomainInspection> {
+  const { root, fields, introspector } = options;
+  const policy = policyFor(introspector);
+  const assess = (): PageState => introspector?.assessPageState?.(root, policy)?.state ?? "unknown";
 
-  const closedDomain = binding.inputs.filter((input) => input.valueKind === "select");
-  if (closedDomain.length === 0) return result;
-
-  const transition =
-    binding.context.pageMode === "edit-or-record"
-      ? await adapter?.ensureEditable?.(root, policyFor(adapter))
-      : undefined;
-  if (transition && !transition.ok) {
-    const why = `the record's edit state could not be established (initial: ${transition.initialState}, final: ${transition.finalState})`;
-    for (const input of closedDomain) {
-      result.unresolved[input.semanticInput] = `The live control could not be inspected because ${why}.`;
-    }
-    result.evidence.push(`Could not inspect the live controls: ${why}.`, ...transition.diagnostics);
+  const result: DomainInspection = {
+    options: {},
+    unresolved: {},
+    initialPageState: assess(),
+    finalPageState: "unknown",
+    ownership: { enteredEditMode: false, openedControls: [] },
+    restoration: { control: "not-required", page: "not-required" },
+    evidence: []
+  };
+  if (fields.length === 0) {
+    result.finalPageState = result.initialPageState;
     return result;
   }
-  if (transition) {
-    await waitForApplicationReaction({ root, ...options.reaction });
-    result.evidence.push(...transition.diagnostics);
+  result.evidence.push(`Initial page state: ${result.initialPageState}`);
+
+  /* --- page state: enter edit only when we can own the transition ------- */
+  if (result.initialPageState === "record-view" && options.mayEnterEditMode) {
+    const transition = await introspector?.ensureEditable?.(root, policy);
+    if (transition) {
+      result.evidence.push(...transition.diagnostics);
+      // Ownership is recorded from what we DID, not from where we ended up.
+      result.ownership.enteredEditMode = transition.editActionInvoked && transition.finalState === "record-edit";
+      if (!transition.ok) {
+        const why = `the record's edit state could not be established (initial: ${transition.initialState}, final: ${transition.finalState})`;
+        for (const field of fields) {
+          result.unresolved[field.name] = `The live control could not be inspected because ${why}.`;
+        }
+        result.evidence.push(`Could not inspect the live controls: ${why}.`);
+        return finish(result, assess, root, policy, introspector, options);
+      }
+      await waitForApplicationReaction({ root, ...options.reaction });
+    }
+  } else if (result.initialPageState === "unknown") {
+    // Conservative by design: a transition made from an unknown baseline
+    // cannot later be attributed, so we would not know whether restoring
+    // it is our business. Read in place instead, and say so.
+    result.evidence.push(
+      "Page state could not be established, so no page-level transition was made. Controls were read in place."
+    );
+  } else if (result.initialPageState === "record-edit") {
+    result.evidence.push("The record was already being edited; that session belongs to the user and is left open.");
   }
 
-  for (const input of closedDomain) {
-    const offered = readSemanticOptions(root, input.semanticTarget, adapter);
-    if (offered && offered.length > 0) {
-      result.options[input.semanticInput] = offered;
-      result.evidence.push(
-        `"${input.semanticInput}" currently offers ${offered.length} values: ${offered.join(", ")}.`
-      );
-    } else {
-      result.unresolved[input.semanticInput] =
-        `The control for "${input.semanticTarget.label}" could not be inspected for its current choices.`;
-      result.evidence.push(`"${input.semanticInput}": no offered values could be read from the live control.`);
+  /* --- the read itself, control state owned per field -------------------- */
+  try {
+    for (const field of fields) {
+      const read = readSemanticOptions(root, field.target, introspector);
+      if (read.openedByUs) result.ownership.openedControls.push(field.name);
+      if (read.dismissAttempted && !read.dismissProven) {
+        result.restoration.control = "unproven";
+        result.evidence.push(`"${field.name}": the control could not be proven closed again.`);
+      } else if (read.openedByUs && result.restoration.control === "not-required") {
+        result.restoration.control = "proven";
+      }
+
+      if (read.options && read.options.length > 0) {
+        result.options[field.name] = read.options;
+        result.evidence.push(`"${field.name}" currently offers ${read.options.length} values: ${read.options.join(", ")}.`);
+      } else {
+        result.unresolved[field.name] = read.detail;
+        result.evidence.push(`"${field.name}": ${read.detail}`);
+      }
+    }
+  } catch (error) {
+    // Restoration is part of the operation, so a failure mid-read does not
+    // get to skip it.
+    const detail = error instanceof Error ? error.message : String(error);
+    for (const field of fields) {
+      if (!result.options[field.name]) result.unresolved[field.name] ??= `Inspection failed: ${detail}`;
+    }
+    result.evidence.push(`Inspection failed: ${detail}`);
+  }
+
+  return finish(result, assess, root, policy, introspector, options);
+}
+
+/**
+ * Undoes the page-level transition, when it was ours, and records the
+ * outcome as part of the result.
+ *
+ * Never fire-and-forget: a discovery that cannot prove it put the
+ * application back is not reported as a clean success, though its findings
+ * are still returned — the options were genuinely read.
+ */
+async function finish(
+  result: DomainInspection,
+  assess: () => PageState,
+  root: ParentNode & Node,
+  policy: ResolutionPolicy,
+  introspector: ReadOnlyIntrospector | undefined,
+  options: InspectFieldsOptions
+): Promise<DomainInspection> {
+  if (!result.ownership.enteredEditMode) {
+    result.restoration.page = "not-required";
+    result.restoration.reason =
+      result.initialPageState === "record-edit"
+        ? "The record was already in edit mode before introspection, so its state was intentionally preserved."
+        : "No page-level transition was made by AutoWebMCP.";
+    result.finalPageState = assess();
+    result.evidence.push(`Final page state: ${result.finalPageState}`);
+    return result;
+  }
+
+  const restore = await introspector?.restoreRecordView?.(root, policy, options.restoreTimeoutMs);
+  if (!restore) {
+    result.restoration.page = "failed";
+    result.restoration.reason = "This platform offers no way to leave edit mode, so the record was left as it was.";
+  } else {
+    result.evidence.push(...restore.diagnostics);
+    result.restoration.page = restore.ok ? "proven" : restore.dismissActionInvoked ? "unproven" : "failed";
+    if (!restore.ok) {
+      result.restoration.reason = restore.dismissActionResolved
+        ? "The dismiss action was invoked but the record was not observed returning to view mode."
+        : "No dismiss action could be resolved, so the record could not be returned to view mode.";
     }
   }
+  await waitForApplicationReaction({ root, ...options.reaction });
+  result.finalPageState = assess();
+  result.evidence.push(`Final page state: ${result.finalPageState}`);
   return result;
+}
+
+/**
+ * The binding-shaped entry point. Projects the binding down to its
+ * closed-domain fields and the adapter down to its read-only surface, so
+ * the operation below never sees a commit action or a way to write.
+ */
+export function inspectValueDomains(options: InspectOptions): Promise<DomainInspection> {
+  const fields: InspectableField[] = options.binding.inputs
+    .filter((input) => input.valueKind === "select")
+    .map((input) => ({ name: input.semanticInput, target: input.semanticTarget }));
+
+  return inspectFieldDomains({
+    root: options.root,
+    fields,
+    mayEnterEditMode: options.binding.context.pageMode === "edit-or-record",
+    ...(readOnlyIntrospector(options.adapter) ? { introspector: readOnlyIntrospector(options.adapter) } : {}),
+    ...(options.reaction ? { reaction: options.reaction } : {}),
+    ...(options.restoreTimeoutMs !== undefined ? { restoreTimeoutMs: options.restoreTimeoutMs } : {})
+  });
 }
 
 export async function executeConfirmed(options: ExecuteOptions): Promise<ExecutionResult> {

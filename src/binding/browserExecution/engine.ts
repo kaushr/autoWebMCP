@@ -1,7 +1,7 @@
 import type { FieldValueKind, SemanticTarget, VerificationCheck } from "./model";
 import type { ExecutionCheckResult } from "./result";
 import { DEFAULT_RESOLUTION_POLICY, type IdentitySignal, type ResolutionPolicy } from "./resolutionPolicy";
-import type { EditableTransition } from "./pageState";
+import type { EditRestoration, EditableTransition, PageStateAssessment } from "./pageState";
 import type { ValidationAssessment } from "./verificationPolicy";
 import {
   composedClosest,
@@ -11,7 +11,7 @@ import {
 } from "./composedTree";
 
 export type { ResolutionPolicy } from "./resolutionPolicy";
-export type { EditableTransition, PageState, PageStateAssessment, PageStatePolicy } from "./pageState";
+export type { EditRestoration, EditableTransition, PageState, PageStateAssessment, PageStatePolicy } from "./pageState";
 export type { ValidationAssessment, VerificationPolicy } from "./verificationPolicy";
 
 /* ------------------------------------------------------------------ *
@@ -104,10 +104,45 @@ export interface PlatformResolverAdapter {
    *
    * Read-only by contract: an implementation may open a popup to see the
    * choices, but must select nothing, write nothing, and leave the control
-   * as it found it. `undefined` means the domain could not be established
-   * — which is a different thing from the control having no constraint.
+   * as it found it. It reports whether it opened the control and whether
+   * it could PROVE the control was dismissed again, because a read that
+   * silently leaves a popup hanging is not the same as a clean one.
    */
-  readFieldOptions?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string[] | undefined;
+  readFieldOptions?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): OptionReadOutcome | undefined;
+  /**
+   * Returns the page to its non-editing state, undoing an edit-mode
+   * transition AutoWebMCP itself caused.
+   *
+   * Only ever called when we own that transition. It resolves the
+   * platform's own dismiss action semantically — never a recorded selector
+   * — and proves the resulting state rather than assuming it.
+   */
+  restoreRecordView?(
+    root: ParentNode,
+    policy: ResolutionPolicy,
+    /** How long to wait for the page to leave edit mode before calling it unproven. */
+    timeoutMs?: number
+  ): Promise<EditRestoration> | EditRestoration;
+  /** The platform's reading of the current page state, for ownership decisions. */
+  assessPageState?(root: ParentNode, policy: ResolutionPolicy): PageStateAssessment | undefined;
+}
+
+/**
+ * What one read of a closed-domain control found, and what it had to do to
+ * find it.
+ *
+ * The bookkeeping matters as much as the values: an operation that opens a
+ * control owns that transient state, and must be able to say whether it
+ * put it back.
+ */
+export interface OptionReadOutcome {
+  options?: string[];
+  /** True when this read opened the control; false when it was already open. */
+  openedByUs: boolean;
+  dismissAttempted: boolean;
+  /** Proven closed afterwards, not merely asked to close. */
+  dismissProven: boolean;
+  detail: string;
 }
 
 /* --------------------------- name/label reading --------------------------- */
@@ -426,20 +461,34 @@ export async function setFieldValue(
 export function readSemanticOptions(
   root: ParentNode,
   target: SemanticTarget,
-  adapter?: PlatformResolverAdapter
-): string[] | undefined {
+  adapter?: Pick<PlatformResolverAdapter, "id" | "resolutionPolicy" | "readFieldOptions" | "resolveTarget">
+): OptionReadOutcome {
   const fromAdapter = adapter?.readFieldOptions?.(root, target, policyFor(adapter));
-  if (fromAdapter && fromAdapter.length > 0) return fromAdapter;
+  if (fromAdapter) return fromAdapter;
 
-  // The generic case: a real `<select>` lists its own options.
+  // The generic case: a real `<select>` lists its own options and needs no
+  // interaction at all, so there is nothing to restore.
   const outcome = resolveSemanticTarget(root, target, adapter);
-  if (!outcome.ok) return undefined;
+  if (!outcome.ok) {
+    return { openedByUs: false, dismissAttempted: false, dismissProven: true, detail: outcome.reason };
+  }
   const element = outcome.target.element;
   if (element instanceof HTMLSelectElement) {
-    const labels = [...element.options].map((option) => (option.textContent ?? "").trim()).filter(Boolean);
-    return labels.length > 0 ? [...new Set(labels)] : undefined;
+    const labels = [...new Set([...element.options].map((option) => (option.textContent ?? "").trim()).filter(Boolean))];
+    return {
+      ...(labels.length > 0 ? { options: labels } : {}),
+      openedByUs: false,
+      dismissAttempted: false,
+      dismissProven: true,
+      detail: labels.length > 0 ? `Read ${labels.length} options from the native select.` : "The native select offers no options."
+    };
   }
-  return undefined;
+  return {
+    openedByUs: false,
+    dismissAttempted: false,
+    dismissProven: true,
+    detail: "This control exposes no readable set of choices."
+  };
 }
 
 /* -------------------------------- actions -------------------------------- */
