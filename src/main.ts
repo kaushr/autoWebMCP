@@ -39,6 +39,9 @@ let selectedTrace: ObservationTrace | undefined;
 let traceStatus = "Record a session with the Teach Mode extension, then refresh.";
 /** Every semanticizer invocation this session made, oldest first. Ephemeral. */
 let semanticizerRuns: SemanticizerRun[] = [];
+/** Traces loaded side by side for the comparison table. Ephemeral. */
+let comparisonTraces: ObservationTrace[] = [];
+let comparisonStatus = "Load the captures to compare what each workflow did.";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 
@@ -78,7 +81,7 @@ function renderExecutionEvidence(trace: ObservationTrace): string {
 
   const entries = evidence
     .map((entry) => {
-      const requests = entry.networkEffects
+      const requests = (entry.networkEffects ?? [])
         .map(
           (effect) => `<li class="effect-${escapeHtml(effect.confidence)}">
             <span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code>
@@ -94,8 +97,8 @@ function renderExecutionEvidence(trace: ObservationTrace): string {
         <strong>${escapeHtml(entry.actionLabel ?? entry.action)}</strong>
         <ul class="network-effects">${requests}</ul>
         ${
-          entry.applicationEffects.length
-            ? `<small>Application: ${entry.applicationEffects.map(escapeHtml).join(" · ")}</small>`
+          (entry.applicationEffects ?? []).length
+            ? `<small>Application: ${(entry.applicationEffects ?? []).map(escapeHtml).join(" · ")}</small>`
             : ""
         }
       </li>`;
@@ -271,6 +274,18 @@ function describeCaptureEvent(event: CaptureEvent): string {
   return parts.join(" ");
 }
 
+function renderTraceIdentity(trace: ObservationTrace): string {
+  const label = sourceApplicationFor(trace.application.platform, trace.application.host).label;
+  return `<dl class="trace-identity">
+    <div><dt>Source application</dt><dd><strong>${escapeHtml(label)}</strong></dd></div>
+    <div><dt>Session</dt><dd><code>${escapeHtml(trace.sessionId)}</code></dd></div>
+    <div><dt>Captured</dt><dd>${escapeHtml(trace.startedAt)}</dd></div>
+    <div><dt>Host</dt><dd>${escapeHtml(trace.application.host)}</dd></div>
+    <div><dt>Pipeline</dt><dd>${trace.stats.captureEvents} raw → ${trace.observations.length} observations →
+      ${(trace.executionEvidence ?? []).length} evidence groups</dd></div>
+  </dl>`;
+}
+
 function renderCaptureStream(trace: ObservationTrace): string {
   const events = trace.captureEvents ?? [];
   if (events.length === 0) {
@@ -313,19 +328,45 @@ function renderNormalizedPanel(trace: ObservationTrace): string {
 
 function renderEvidencePanel(trace: ObservationTrace): string {
   const evidence = trace.executionEvidence ?? [];
+  const scored = evidence
+    .map(
+      (entry) => `<li><strong>${escapeHtml(entry.actionLabel ?? entry.action)}</strong>
+        <ul class="network-effects">${(entry.networkEffects ?? [])
+          .map(
+            (effect) => `<li class="effect-${escapeHtml(effect.confidence)}">
+              <span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code>
+              <em>${effect.failed ? "failed" : String(effect.status)}</em>
+              <strong>${escapeHtml(effect.confidence.toUpperCase())}</strong>
+              <ul class="reasons">${(effect.reasons ?? [])
+                .map((reason) => `<li>${escapeHtml(reason)}</li>`)
+                .join("")}</ul>
+              <small>binding eligibility: ${escapeHtml(effect.bindingEligibility ?? "unresolved")}</small>
+            </li>`
+          )
+          .join("")}</ul>
+        ${
+          (entry.applicationEffects ?? []).length
+            ? `<small>Application: ${(entry.applicationEffects ?? []).map(escapeHtml).join(" · ")}</small>`
+            : ""
+        }
+      </li>`
+    )
+    .join("");
+
   return panel(
     "Execution evidence",
     evidence.length ? `${evidence.length} correlated` : "none observed",
-    `<p class="semanticizer-status">Observed evidence only. No execution binding is inferred from any of this;
-      a binding exists only where a human selected one.</p>
-     ${evidence.length ? json(evidence) : "<p class=empty>No network activity was correlated with this session.</p>"}`
+    `<p class="semanticizer-status">Observed correlation only. Confidence says how strongly the evidence
+      associates a mechanism with an action; it says nothing about whether that mechanism may be called.
+      Binding eligibility is a separate axis and is unresolved for everything until platform knowledge exists.</p>
+     ${evidence.length ? `<ul class="evidence-list">${scored}</ul>${json(evidence)}` : "<p class=empty>No network activity was correlated with this session.</p>"}`
   );
 }
 
 function renderSemanticizerRuns(): string {
   if (semanticizerRuns.length === 0) {
     return panel(
-      "Semanticizer runs",
+      "Semantic inference runs",
       "none yet",
       `<p class="semanticizer-status">Propose a capability from a trace to record a run.</p>`
     );
@@ -365,7 +406,13 @@ function renderSemanticizerRuns(): string {
     })
     .join("");
 
-  return panel("Semanticizer runs", `${semanticizerRuns.length}`, runs);
+  return panel(
+    "Semantic inference runs",
+    `${semanticizerRuns.length}`,
+    `<p class="semanticizer-status">The model answers one question: what business capability did this workflow
+      represent? It is never asked what API should execute it — execution binding is chosen by a human from the
+      taught application's advertised actions.</p>${runs}`
+  );
 }
 
 function safeJsonParse(value: string): unknown {
@@ -376,11 +423,79 @@ function safeJsonParse(value: string): unknown {
   }
 }
 
+/**
+ * Several recordings side by side. The question it exists to answer is whether
+ * different field updates converge on one underlying transport — which would
+ * make that transport a generic record-save mechanism rather than a
+ * business-specific capability. The table shows the evidence; it draws no such
+ * conclusion, because that is a judgement about a platform, not about timing.
+ */
+function renderComparison(): string {
+  if (comparisonTraces.length === 0) {
+    return panel(
+      "Compare captures",
+      "not loaded",
+      `<p class="semanticizer-status">${escapeHtml(comparisonStatus)}</p>
+       <div class="studio-actions"><button id="load-comparison" class="secondary">Load all captures</button></div>`
+    );
+  }
+
+  const rows = comparisonTraces
+    .flatMap((trace) => {
+      const label = sourceApplicationFor(trace.application.platform, trace.application.host).label;
+      const evidence = trace.executionEvidence ?? [];
+      const runs = semanticizerRuns.filter((run) => run.traceSessionId === trace.sessionId);
+      const candidate = runs[runs.length - 1]?.candidate;
+
+      if (evidence.length === 0) {
+        return [
+          `<tr><td>${escapeHtml(label)}</td><td><code>${escapeHtml(trace.sessionId)}</code></td>
+           <td colspan="5" class="empty">no network evidence</td>
+           <td>${candidate ? escapeHtml(candidate.name) : "—"}</td></tr>`
+        ];
+      }
+
+      return evidence.flatMap((entry) =>
+        (entry.networkEffects ?? []).map(
+          (effect) => `<tr>
+            <td>${escapeHtml(label)}</td>
+            <td><code>${escapeHtml(trace.sessionId)}</code></td>
+            <td>${escapeHtml(entry.actionLabel ?? entry.action)}</td>
+            <td><span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code></td>
+            <td>${effect.failed ? "failed" : effect.status} · +${effect.startedAfterMs}ms</td>
+            <td class="effect-${escapeHtml(effect.confidence)}">${escapeHtml(effect.confidence)}${
+              effect.backgroundLikely ? " · background" : ""
+            }</td>
+            <td>${(entry.applicationEffects ?? []).length ? escapeHtml((entry.applicationEffects ?? []).join(", ")) : "—"}</td>
+            <td>${
+              candidate
+                ? `${escapeHtml(candidate.name)} <small>(${candidate.inputs.map((input) => escapeHtml(input.name)).join(", ")})</small>`
+                : "—"
+            }</td>
+          </tr>`
+        )
+      );
+    })
+    .join("");
+
+  return panel(
+    "Compare captures",
+    `${comparisonTraces.length} loaded`,
+    `<p class="semanticizer-status">${escapeHtml(comparisonStatus)}</p>
+     <div class="table-scroll"><table class="comparison">
+       <thead><tr><th>Application</th><th>Session</th><th>Action</th><th>Request</th><th>Result</th>
+         <th>Confidence</th><th>Application reaction</th><th>Proposed capability</th></tr></thead>
+       <tbody>${rows}</tbody>
+     </table></div>
+     <div class="studio-actions"><button id="load-comparison" class="secondary">Reload captures</button></div>`
+  );
+}
+
 function renderAdminDebug(): string {
   const body = selectedTrace
-    ? `${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}`
+    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderComparison()}`
     : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
-       ${renderSemanticizerRuns()}`;
+       ${renderSemanticizerRuns()}${renderComparison()}`;
 
   return `<details class="admin-debug">
     <summary>Admin / Debug</summary>
@@ -604,6 +719,20 @@ function render(): void {
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
       publishStatus = error instanceof Error ? error.message : "Publishing failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#load-comparison")?.addEventListener("click", async () => {
+    comparisonStatus = "Loading captures…";
+    render();
+    try {
+      const summaries = await listTraces();
+      const loaded = await Promise.all(summaries.map((summary) => getTrace(summary.sessionId)));
+      comparisonTraces = loaded;
+      comparisonStatus = `${loaded.length} captures loaded. Compare the request each Save produced.`;
+    } catch (error) {
+      comparisonStatus = error instanceof Error ? error.message : "Could not load captures.";
     }
     render();
   });

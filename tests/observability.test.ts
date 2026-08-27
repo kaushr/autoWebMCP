@@ -156,6 +156,61 @@ describe("Backward compatibility", () => {
   });
 });
 
+describe("Trace identity", () => {
+  it("identifies the source application without exposing record identifiers", () => {
+    const trace = sessionWithSaveWorkflow().toTrace();
+    expect(trace.application.platform).toBe("salesforce-lightning");
+    expect(trace.application.host).toBe("acme.lightning.force.com");
+    // The identity block is built from these fields only; the record path is
+    // never part of it, and endpoints stay generalized.
+    expect(Object.keys(trace.application).sort()).toEqual(["host", "platform", "title"]);
+    expect(trace.application.title).not.toMatch(/006[A-Za-z0-9]{12,}/);
+  });
+});
+
+describe("Evidence recorded by an earlier build", () => {
+  /** Evidence captured before `reasons` and `bindingEligibility` existed. */
+  const legacyEvidence = {
+    actionObservationId: "click-save",
+    action: "save",
+    actionLabel: "Save",
+    networkEffects: [
+      {
+        requestId: "save-1",
+        method: "POST",
+        origin: "https://acme.lightning.force.com",
+        pathPattern: "/aura",
+        resourceType: "xmlhttprequest",
+        category: "mutation",
+        startedAfterMs: 241,
+        durationMs: 204,
+        status: 200,
+        ok: true,
+        failed: false,
+        backgroundLikely: false,
+        confidence: "high"
+      }
+    ],
+    applicationEffects: ["confirmation toast shown"],
+    confidence: "high"
+  };
+
+  it("still parses, so an older capture stays inspectable", () => {
+    const trace = {
+      ...sessionWithSaveWorkflow().toTrace(),
+      executionEvidence: [legacyEvidence]
+    };
+    const parsed = parseObservationTrace(trace);
+    expect(parsed.executionEvidence).toHaveLength(1);
+    expect(parsed.executionEvidence[0].networkEffects[0].pathPattern).toBe("/aura");
+  });
+
+  it("has no reasons or eligibility, which is what the Studio must tolerate", () => {
+    expect("reasons" in legacyEvidence.networkEffects[0]).toBe(false);
+    expect("bindingEligibility" in legacyEvidence.networkEffects[0]).toBe(false);
+  });
+});
+
 describe("Semanticizer run records", () => {
   it("retains what was asked, what came back, and what was read out, separately", () => {
     const record = run();
