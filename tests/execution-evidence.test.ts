@@ -182,7 +182,8 @@ describe("Separating background noise from execution evidence", () => {
       polling("p2", 5_200),
       click("click-save", 10_000, "Save"),
       polling("p3", 10_100),
-      network("save", 10_040, { method: "POST", endpoint: "/aura" })
+      network("save", 10_040, { method: "POST", endpoint: "/aura" }),
+      toast("reaction-save", 10_400, "click-save")
     ];
 
     const effects = evidenceFor(events)[0].networkEffects;

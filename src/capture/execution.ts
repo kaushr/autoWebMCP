@@ -22,8 +22,25 @@ export const CAUSAL_WINDOW_MS = 1_500;
 export const ATTRIBUTION_WINDOW_MS = 5_000;
 /** How many times an endpoint must repeat before it can look like background traffic. */
 export const BACKGROUND_REPEAT_THRESHOLD = 3;
+/** Two actions closer together than this make attribution by timing ambiguous. */
+export const AMBIGUITY_WINDOW_MS = 400;
 
 export type EvidenceConfidence = "high" | "medium" | "low";
+
+/**
+ * Whether an observed mechanism is fit to become an agent execution binding.
+ *
+ * A separate axis from confidence, and deliberately so. We can be certain that
+ * `POST /aura?...RecordUi.saveRecord` carried a Save and still be certain it
+ * must never be called: it is private, unversioned, and undocumented. High
+ * correlation is a statement about evidence; eligibility is a statement about
+ * whether an interface is supported, and no generic timing rule can decide it.
+ *
+ * Every observed mechanism is therefore `unresolved` here. Platform knowledge
+ * is what resolves it, and that lives in adapters that do not exist yet — not
+ * in this engine, which must stay free of any one vendor's specifics.
+ */
+export type BindingEligibility = "unresolved";
 
 /** One observed request, attributed to the action it followed. */
 export interface NetworkEffect {
@@ -41,7 +58,16 @@ export interface NetworkEffect {
   failed: boolean;
   /** Traffic that repeats independently of what the human did. */
   backgroundLikely: boolean;
+  /** Another action happened just before the one this was attributed to. */
+  ambiguousAttribution: boolean;
   confidence: EvidenceConfidence;
+  /** Why it scored that way, in the order the signals were considered. */
+  reasons: string[];
+  /**
+   * Never derived from confidence. Correlating strongly with an action says
+   * nothing about whether an interface is safe or supported to call.
+   */
+  bindingEligibility: BindingEligibility;
 }
 
 /**
@@ -101,17 +127,113 @@ function backgroundEndpoints(
   return background;
 }
 
-function confidenceFor(
+/**
+ * The second background signal, and the one that matters in a busy application.
+ *
+ * Polling that happens to fire shortly after whatever the human was doing looks
+ * attributable every single time, so the "fires with no action before it" rule
+ * misses it entirely. An endpoint that attaches to several *different* actions
+ * is not executing any of them.
+ */
+function endpointsSpanningManyActions(attributions: readonly Attribution[]): Set<string> {
+  const owners = new Map<string, Set<string>>();
+  for (const { request, owner } of attributions) {
+    const key = `${request.method} ${request.endpoint}`;
+    owners.set(key, (owners.get(key) ?? new Set()).add(owner.id));
+  }
+
+  const background = new Set<string>();
+  for (const [key, actions] of owners) {
+    if (actions.size >= BACKGROUND_REPEAT_THRESHOLD) background.add(key);
+  }
+  return background;
+}
+
+interface Attribution {
+  request: CaptureNetworkMetadata;
+  owner: NormalizedObservation;
+  previous?: NormalizedObservation;
+  startedAfterMs: number;
+}
+
+/**
+ * When each action's visible reaction landed. A reaction that arrives *after* a
+ * request completed is much better evidence than the action merely having had
+ * some effect at some point.
+ */
+function reactionTimesByAction(events: readonly CaptureEvent[]): Map<string, number[]> {
+  const times = new Map<string, number[]>();
+  for (const event of events) {
+    if (event.kind !== "reaction" || !event.correlatesWith) continue;
+    times.set(event.correlatesWith, [...(times.get(event.correlatesWith) ?? []), event.t]);
+  }
+  return times;
+}
+
+interface Signals {
+  startedAfterMs: number;
+  backgroundLikely: boolean;
+  ambiguousAttribution: boolean;
+  reactedAfterRequest: boolean;
+}
+
+/**
+ * Deterministic and explainable, not probabilistic. Each signal is recorded as
+ * a reason so the Studio can show why a request scored the way it did rather
+ * than asking anyone to trust a number.
+ *
+ * `high` needs every supporting signal at once: a mutation-shaped XHR that
+ * started inside the causal window, succeeded, was followed by a visible
+ * application reaction, is not background chatter, and had no competing action
+ * next to it. Anything less is `medium`; anything disqualifying is `low`.
+ */
+function scoreRequest(
   request: CaptureNetworkMetadata,
-  startedAfterMs: number,
-  backgroundLikely: boolean,
-  hasApplicationEffect: boolean
-): EvidenceConfidence {
-  if (backgroundLikely) return "low";
-  if (request.resourceType !== "xmlhttprequest") return "low";
-  if (request.category !== "mutation") return "low";
-  if (startedAfterMs > CAUSAL_WINDOW_MS) return "medium";
-  return hasApplicationEffect ? "high" : "medium";
+  signals: Signals
+): { confidence: EvidenceConfidence; reasons: string[] } {
+  const reasons: string[] = [];
+
+  if (signals.backgroundLikely) {
+    reasons.push("− repeats independently of user actions");
+    return { confidence: "low", reasons };
+  }
+  if (request.resourceType !== "xmlhttprequest") {
+    reasons.push(`− ${request.resourceType} request, not an application call`);
+    return { confidence: "low", reasons };
+  }
+  if (request.category !== "mutation") {
+    reasons.push(`− ${request.category}-shaped request, carries no state change`);
+    return { confidence: "low", reasons };
+  }
+
+  reasons.push(`+ mutation request (${request.method})`);
+
+  let confidence: EvidenceConfidence = "medium";
+  if (signals.startedAfterMs <= CAUSAL_WINDOW_MS) {
+    reasons.push(`+ started ${signals.startedAfterMs}ms after the action`);
+    confidence = "high";
+  } else {
+    reasons.push(`− started ${signals.startedAfterMs}ms after the action, outside the causal window`);
+  }
+
+  if (request.ok) reasons.push(`+ HTTP ${request.status}`);
+  else {
+    reasons.push(request.failed ? "− request failed" : `− HTTP ${request.status}`);
+    confidence = "medium";
+  }
+
+  if (signals.reactedAfterRequest) reasons.push("+ application reacted after it completed");
+  else {
+    reasons.push("− no application reaction followed it");
+    confidence = "medium";
+  }
+
+  if (signals.ambiguousAttribution) {
+    reasons.push("− another action occurred just before this one");
+    confidence = "medium";
+  }
+
+  return { confidence, reasons };
 }
 
 /**
@@ -132,21 +254,49 @@ export function correlateExecutionEvidence(
   const actions = observations.filter(isHumanAction).sort((left, right) => left.t - right.t);
   if (actions.length === 0) return [];
 
-  const background = backgroundEndpoints(requests, actions.map((action) => action.t));
-  const byAction = new Map<string, NetworkEffect[]>();
+  const reactionTimes = reactionTimesByAction(events);
 
+  // First pass: decide what each request belongs to. Scoring needs the whole
+  // picture, because whether an endpoint is background depends on how it
+  // behaved across the entire session rather than on any single occurrence.
+  const attributions: Attribution[] = [];
   for (const request of requests) {
+    // Latest action wins: a request cannot have been caused by something that
+    // had not happened yet. Attribution follows the request's *start*, which is
+    // what keeps an intermediate operation on the action that triggered it
+    // rather than on whatever the human did next.
     let owner: NormalizedObservation | undefined;
+    let previous: NormalizedObservation | undefined;
     for (const action of actions) {
-      if (action.t <= request.startedAt) owner = action;
-      else break;
+      if (action.t <= request.startedAt) {
+        previous = owner;
+        owner = action;
+      } else break;
     }
     if (!owner) continue;
 
     const startedAfterMs = Math.round(request.startedAt - owner.t);
     if (startedAfterMs > ATTRIBUTION_WINDOW_MS) continue;
 
-    const backgroundLikely = background.has(`${request.method} ${request.endpoint}`);
+    attributions.push({ request, owner, ...(previous ? { previous } : {}), startedAfterMs });
+  }
+
+  const unprompted = backgroundEndpoints(requests, actions.map((action) => action.t));
+  const spanning = endpointsSpanningManyActions(attributions);
+  const byAction = new Map<string, NetworkEffect[]>();
+
+  // Second pass: score each attribution now that background traffic is known.
+  for (const { request, owner, previous, startedAfterMs } of attributions) {
+    const key = `${request.method} ${request.endpoint}`;
+    const backgroundLikely = unprompted.has(key) || spanning.has(key);
+    const ambiguousAttribution = previous !== undefined && owner.t - previous.t <= AMBIGUITY_WINDOW_MS;
+    const scored = scoreRequest(request, {
+      startedAfterMs,
+      backgroundLikely,
+      ambiguousAttribution,
+      reactedAfterRequest: (reactionTimes.get(owner.id) ?? []).some((t) => t >= request.completedAt)
+    });
+
     const effect: NetworkEffect = {
       requestId: request.requestId,
       method: request.method,
@@ -160,12 +310,10 @@ export function correlateExecutionEvidence(
       ok: request.ok,
       failed: request.failed,
       backgroundLikely,
-      confidence: confidenceFor(
-        request,
-        startedAfterMs,
-        backgroundLikely,
-        (owner.effects?.length ?? 0) > 0
-      )
+      ambiguousAttribution,
+      confidence: scored.confidence,
+      reasons: scored.reasons,
+      bindingEligibility: "unresolved"
     };
 
     byAction.set(owner.id, [...(byAction.get(owner.id) ?? []), effect]);
@@ -178,7 +326,10 @@ export function correlateExecutionEvidence(
       return {
         actionObservationId: action.id,
         action: action.action,
-        ...(action.target ? { actionLabel: action.target } : {}),
+        // A field change has no actuated control label; the field is its identity.
+        ...(action.target ?? action.field?.label
+          ? { actionLabel: (action.target ?? action.field?.label) as string }
+          : {}),
         networkEffects,
         applicationEffects: [...(action.effects ?? [])],
         confidence: strongest(networkEffects.map((effect) => effect.confidence))
