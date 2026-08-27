@@ -1,3 +1,4 @@
+import type { EpistemicNeed } from "../../applicationIntelligence/model";
 import type { SourceApplication } from "../../semantic/model";
 import type { ExecutionResult } from "./result";
 
@@ -74,9 +75,9 @@ export interface BoundApplicationField {
   /** The value domain as known when this binding was proposed. Absent means unknown, never unrestricted. */
   options?: string[];
   /** Which knowledge layer supplied the options, when there are any. */
-  optionsSource?: "tenant" | "standard" | "observation-only";
+  optionsSource?: "tenant" | "standard" | "human-confirmed" | "observation-only";
   /** Which knowledge layer identified the field. */
-  knowledge: "tenant" | "standard" | "observation-only";
+  knowledge: "tenant" | "standard" | "human-confirmed" | "observation-only";
   /** The standard release consulted, when standard knowledge identified it. */
   release?: string;
 }
@@ -161,6 +162,15 @@ export interface BrowserBindingProposal {
   binding: BrowserExecutionBinding | null;
   /** Plain-language reasons no binding could be proposed, when `binding` is null. */
   warnings: string[];
+  /**
+   * Specific facts the system knows it is missing.
+   *
+   * A proposal with a blocking need is not a failure — it is a question,
+   * and answering it lets the same deterministic proposal run again. Needs
+   * marked non-blocking accompany a perfectly usable binding and simply
+   * record a gap, such as a picklist whose value domain is unknown.
+   */
+  needs?: EpistemicNeed[];
 }
 
 export interface BrowserBindingCandidateRecord {

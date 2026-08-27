@@ -46,7 +46,7 @@ import type { CapabilityInputValues, SemanticCapability } from "./semantic/model
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
 import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
-import type { TenantIntelligenceSource } from "./applicationIntelligence/model";
+import type { EpistemicNeed, FieldClarification, TenantIntelligenceSource } from "./applicationIntelligence/model";
 
 /**
  * What this installation knows about the customer's own org.
@@ -58,6 +58,15 @@ import type { TenantIntelligenceSource } from "./applicationIntelligence/model";
  * same seam, so nothing else changes when one arrives.
  */
 let tenantIntelligence: TenantIntelligenceSource = emptyTenantIntelligence();
+
+/**
+ * Facts a human supplied when neither tenant nor standard knowledge could
+ * name a field. Kept for this capability only and never promoted into
+ * application knowledge: a person telling us what their org calls a field
+ * is not the vendor documenting it.
+ */
+let fieldClarifications: FieldClarification[] = [];
+let clarificationDraft = "";
 
 export function useTenantIntelligence(source: TenantIntelligenceSource): void {
   tenantIntelligence = source;
@@ -192,6 +201,8 @@ function clearExecutionState(): void {
   validation = undefined;
   validationStatus = "";
   browserBindingCandidate = undefined;
+  fieldClarifications = [];
+  clarificationDraft = "";
   browserBindingStatus = "";
   browserBindingValidation = undefined;
   browserValidationStatus = "";
@@ -542,6 +553,7 @@ function renderBrowserExecutionStage(view: StudioLifecycleView): string {
 
   return `<div class="lifecycle-section">
     <p class="eyebrow">Semantic browser execution</p>
+    ${renderEpistemicNeeds()}
     ${body}
     <div class="studio-actions">
       <button type="button" id="suggest-browser-binding" class="secondary">${
@@ -556,6 +568,131 @@ function renderBrowserExecutionStage(view: StudioLifecycleView): string {
     </div>
     ${view.browserExecution.canTest && candidate && binding ? renderBrowserTestForm(candidate, binding) : ""}
   </div>`;
+}
+
+
+
+/**
+ * Runs the deterministic proposal with whatever is currently known.
+ *
+ * Deliberately re-runnable: answering an epistemic need calls this again
+ * and nothing else. Semantic inference is not repeated — the capability's
+ * meaning was already confirmed by a human, and only the grounding of its
+ * fields was ever in question.
+ */
+function runBrowserBindingProposal(): void {
+  if (!candidate || !selectedTrace) return;
+  const intelligence = {
+    ...applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence),
+    clarifications: fieldClarifications
+  };
+  const proposal = proposeBrowserBinding(candidate, selectedTrace, intelligence);
+  browserBindingCandidate = { state: "proposed", proposal };
+
+  const blocking = (proposal.needs ?? []).filter((need) => need.blocking);
+  browserBindingStatus = proposal.binding
+    ? "Browser execution path suggested from the captured evidence. Test it before accepting."
+    : blocking.length > 0
+      ? `${blocking.length === 1 ? "One fact is" : `${blocking.length} facts are`} missing before a binding can be built.`
+      : `No safe browser execution path was found: ${proposal.warnings.join(" ")}`;
+}
+
+/**
+ * Records a human answer and immediately retries resolution.
+ *
+ * The answer is kept as what it is — human-supplied, scoped to this
+ * capability — so a later metadata source can confirm it, strengthen its
+ * provenance, or contradict it, rather than finding it already promoted
+ * into application truth.
+ */
+function recordClarification(observedLabel: string, objectApiName: string, apiName: string): void {
+  const trimmed = apiName.trim();
+  if (!trimmed || !observedLabel || !selectedTrace) return;
+
+  fieldClarifications = [
+    ...fieldClarifications.filter(
+      (entry) => entry.observedLabel.toLowerCase() !== observedLabel.toLowerCase()
+    ),
+    {
+      platform: selectedTrace.application.platform,
+      ...(objectApiName ? { objectApiName } : {}),
+      observedLabel,
+      apiName: trimmed,
+      source: "human-confirmed",
+      answeredAt: new Date().toISOString(),
+      scope: "capability"
+    }
+  ];
+  clarificationDraft = "";
+  runBrowserBindingProposal();
+  render();
+}
+
+/**
+ * An epistemic need, rendered as the question it is.
+ *
+ * The alternative — burying "could not ground stage" in a warning string —
+ * throws away the most useful thing the system worked out: exactly which
+ * fact would unblock it. Suggestions are shown as suggestions, with where
+ * each came from, and confirming one is a deliberate act.
+ */
+function renderEpistemicNeed(need: EpistemicNeed): string {
+  const heading =
+    need.status === "needs-information"
+      ? "Needs information"
+      : need.status === "needs-setup"
+        ? "Needs setup"
+        : need.status === "ambiguous"
+          ? "Needs a decision"
+          : "Blocked";
+
+  const known = [
+    need.knownEvidence.objectApiName ? `object <code>${escapeHtml(need.knownEvidence.objectApiName)}</code>` : undefined,
+    need.knownEvidence.observedLabel ? `observed label "${escapeHtml(need.knownEvidence.observedLabel)}"` : undefined,
+    need.knownEvidence.observedIdentifier
+      ? `observed identifier <code>${escapeHtml(need.knownEvidence.observedIdentifier)}</code>`
+      : undefined
+  ].filter(Boolean);
+
+  const suggestions = (need.suggestedAnswers ?? [])
+    .map(
+      (suggestion, index) =>
+        `<li><code>${escapeHtml(suggestion.value)}</code>
+           <small>${escapeHtml(suggestion.detail)} (${escapeHtml(suggestion.source)})</small>
+           <button type="button" class="secondary" data-accept-suggestion="${index}"
+             data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
+             data-need-object="${escapeHtml(need.knownEvidence.objectApiName ?? "")}"
+           >Confirm ${escapeHtml(suggestion.value)}</button></li>`
+    )
+    .join("");
+
+  const answerBox =
+    need.blocking && need.kind === "field-api-name"
+      ? `<div class="need-answer">
+          <label>Field API name
+            <input id="clarification-answer" value="${escapeHtml(clarificationDraft)}"
+              placeholder="e.g. Implementation_Region__c"
+              data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
+              data-need-object="${escapeHtml(need.knownEvidence.objectApiName ?? "")}" />
+          </label>
+          <button type="button" id="submit-clarification" class="secondary">Use this API name</button>
+        </div>`
+      : "";
+
+  return `<div class="epistemic-need ${need.blocking ? "blocking" : "advisory"}">
+    <p class="eyebrow">${escapeHtml(heading)}</p>
+    <p>${escapeHtml(need.question)}</p>
+    <p class="semanticizer-status">${escapeHtml(need.reason)}</p>
+    ${known.length ? `<p class="semanticizer-status">Already known: ${known.join(", ")}. You are not being asked for these.</p>` : ""}
+    ${suggestions ? `<ul class="need-suggestions">${suggestions}</ul>` : ""}
+    ${answerBox}
+  </div>`;
+}
+
+function renderEpistemicNeeds(): string {
+  const needs = browserBindingCandidate?.proposal.needs ?? [];
+  if (needs.length === 0) return "";
+  return needs.map(renderEpistemicNeed).join("");
 }
 
 /** One typed control per field, per the canonical input contract. */
@@ -1474,19 +1611,42 @@ function render(): void {
   // Deterministic — built entirely from evidence the capture already
   // recorded, the same evidence `fieldMapping.ts` reads. No model call, so
   // there is nothing to wait on and nothing that can time out here.
+  // Answering an epistemic need. Both paths go through the same recording
+  // step, so a confirmed suggestion and a typed answer carry identical
+  // human provenance — a suggestion the system offered is still only a
+  // suggestion until a person accepts it.
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-accept-suggestion]")) {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.acceptSuggestion);
+      const need = (browserBindingCandidate?.proposal.needs ?? []).find(
+        (candidateNeed) => (candidateNeed.suggestedAnswers?.length ?? 0) > index
+      );
+      const suggestion = need?.suggestedAnswers?.[index];
+      if (!suggestion) return;
+      recordClarification(button.dataset.needLabel ?? "", button.dataset.needObject ?? "", suggestion.value);
+    });
+  }
+
+  const clarificationInput = document.querySelector<HTMLInputElement>("#clarification-answer");
+  clarificationInput?.addEventListener("input", () => {
+    // Held without re-rendering: render() rebuilds innerHTML and would take
+    // the focus out of the field mid-answer.
+    clarificationDraft = clarificationInput.value;
+  });
+  document.querySelector<HTMLButtonElement>("#submit-clarification")?.addEventListener("click", () => {
+    if (!clarificationInput) return;
+    recordClarification(
+      clarificationInput.dataset.needLabel ?? "",
+      clarificationInput.dataset.needObject ?? "",
+      clarificationInput.value
+    );
+  });
+
   document.querySelector<HTMLButtonElement>("#suggest-browser-binding")?.addEventListener("click", () => {
     if (!candidate || !selectedTrace) return;
     browserBindingValidation = undefined;
     browserValidationStatus = "";
-    const proposal = proposeBrowserBinding(
-      candidate,
-      selectedTrace,
-      applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence)
-    );
-    browserBindingCandidate = { state: "proposed", proposal };
-    browserBindingStatus = proposal.binding
-      ? "Browser execution path suggested from the captured evidence. Test it before accepting."
-      : `No safe browser execution path was found: ${proposal.warnings.join(" ")}`;
+    runBrowserBindingProposal();
     render();
   });
 

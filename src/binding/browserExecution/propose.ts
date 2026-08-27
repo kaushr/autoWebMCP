@@ -127,12 +127,16 @@ export function proposeBrowserBinding(
     fieldMapping.ambiguities.length > 0 ||
     Object.keys(fieldMapping.mapping).length !== capability.inputs.length
   ) {
+    // The needs travel with the refusal: where the system can name the
+    // fact it is missing, this is a question awaiting an answer rather
+    // than the end of the road, and the Studio renders it as one.
     return {
       binding: null,
       warnings: [
         "Not every capability input could be grounded in the application's own model.",
         ...fieldMapping.ambiguities
-      ]
+      ],
+      ...(fieldMapping.needs.length > 0 ? { needs: fieldMapping.needs } : {})
     };
   }
 
@@ -234,5 +238,11 @@ export function proposeBrowserBinding(
     ]
   };
 
-  return { binding, warnings: [] };
+  // A binding was produced; any remaining needs are non-blocking notes —
+  // an unknown picklist domain, say — and must not be silently dropped.
+  return {
+    binding,
+    warnings: [],
+    ...(fieldMapping.needs.length > 0 ? { needs: fieldMapping.needs } : {})
+  };
 }

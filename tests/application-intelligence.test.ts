@@ -227,10 +227,12 @@ describe("5 & 7 — a custom field binds only when tenant intelligence describes
     expect(result.fields.contract_start_date.custom).toBe(true);
   });
 
-  it("7 — fails honestly without tenant intelligence, naming what is missing", () => {
+  it("7 — without tenant intelligence it does not bind, and says precisely what it needs", () => {
     const result = resolveFieldMapping(capability, customTrace, STANDARD_ONLY);
     expect(result.mapping).toEqual({});
-    expect(result.ambiguities.join(" ")).toMatch(/needs tenant metadata/i);
+    // Not a dead end: the system knows exactly which fact would unblock it.
+    expect(result.statuses.contract_start_date).toBe("needs-information");
+    expect(result.needs[0].question).toMatch(/API name.*Contract Start Date/i);
   });
 });
 

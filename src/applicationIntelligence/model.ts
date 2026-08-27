@@ -138,8 +138,15 @@ export interface TenantIntelligenceSource {
 /** Which observed signal identified the field. Evidence, not knowledge. */
 export type FieldEvidenceKind = "application-identifier" | "visible-label";
 
-/** Which knowledge layer explained what the observed signal meant. */
-export type FieldKnowledgeSource = "tenant" | "standard" | "observation-only";
+/**
+ * Which knowledge layer explained what the observed signal meant.
+ *
+ * `human-confirmed` sits deliberately below both metadata layers: a person
+ * telling us their org's field is `Region__c` is scoped local knowledge,
+ * not the vendor documenting it, and it is only ever consulted once tenant
+ * and standard knowledge have both declined.
+ */
+export type FieldKnowledgeSource = "tenant" | "standard" | "human-confirmed" | "observation-only";
 
 /**
  * A field the system has grounded: the application's own identity for
@@ -172,11 +179,104 @@ export interface FieldGrounding {
   detail: string;
 }
 
+/* --------------------------- epistemic need --------------------------- */
+
+/**
+ * What happened when the system tried to understand an observed field.
+ *
+ * `resolved` or `null` was too coarse. When Stage could not be grounded,
+ * the system was not simply defeated — it knew precisely what it was
+ * missing ("the underlying Salesforce field identity") and could have
+ * asked. Collapsing that into failure threw away the most useful thing it
+ * knew.
+ *
+ *   resolved           enough grounded evidence to proceed safely
+ *   needs-information  a specific missing fact would let this continue
+ *   needs-setup        the gap needs configuration, not a one-line answer
+ *   ambiguous          several readings survive; a human must choose
+ *   blocked            no safe path exists under current constraints
+ *
+ * `blocked` is deliberately not an epistemic need: learning another field
+ * name does not make a prohibited execution mechanism safe.
+ */
+export type ResolutionStatus = "resolved" | "needs-information" | "needs-setup" | "ambiguous" | "blocked";
+
+/** Where an answer could legitimately come from, cheapest-authority-first. */
+export type ResolutionSource =
+  | "tenant-metadata"
+  | "standard-application-knowledge"
+  | "runtime-context"
+  | "human";
+
+/** One candidate answer, and where it came from. A suggestion is never a fact. */
+export interface SuggestedAnswer {
+  value: string;
+  label?: string;
+  source: FieldKnowledgeSource;
+  detail: string;
+}
+
+/**
+ * A specific thing the system does not know, stated well enough to act on.
+ *
+ * Generated from the unresolved fact itself, never improvised: the
+ * question names only the residual unknown, and `knownEvidence` carries
+ * everything already established so nothing is asked twice.
+ */
+export interface EpistemicNeed {
+  status: Exclude<ResolutionStatus, "resolved">;
+  /** What kind of fact is missing. */
+  kind: "field-api-name" | "field-choice" | "tenant-metadata";
+  /** The question, as a human would be asked it. */
+  question: string;
+  /** Why it matters — what cannot happen until it is answered. */
+  reason: string;
+  /** Whether resolution is stuck without it. A non-blocking need is a note, not a gate. */
+  blocking: boolean;
+  /** Already known. Never ask for any of this. */
+  knownEvidence: {
+    inputName: string;
+    platform?: string;
+    objectApiName?: string;
+    observedLabel?: string;
+    observedIdentifier?: string;
+  };
+  suggestedAnswers?: SuggestedAnswer[];
+  /** Who or what could settle this. */
+  resolutionSources: ResolutionSource[];
+}
+
+/**
+ * A fact a human supplied, kept as what it is.
+ *
+ * Scoped to this tenant and object, never promoted into standard vendor
+ * knowledge: a person telling us their org's field is `Region__c` is not
+ * Salesforce documenting it. If application knowledge later confirms the
+ * same identity the fact gains stronger provenance; if it contradicts,
+ * the contradiction is surfaced rather than silently resolved either way.
+ */
+export interface FieldClarification {
+  platform: string;
+  objectApiName?: string;
+  /** The observed label this answers for. */
+  observedLabel: string;
+  /** The application field identity the human supplied. */
+  apiName: string;
+  type?: ApplicationFieldType;
+  source: "human-confirmed";
+  answeredAt?: string;
+  /** Never "platform" or "vendor" — a human answer is tenant-local at best. */
+  scope: "capability" | "tenant";
+}
+
 export type FieldResolution =
   | {
+      status: "resolved";
       ok: true;
       field: ResolvedApplicationField;
       grounding: FieldGrounding;
+      /** A non-blocking gap noticed while resolving, e.g. an unknown value domain. */
+      need?: EpistemicNeed;
       /**
        * The observed signal this resolution rests on. The caller resolves
        * the control at runtime by what is actually on screen, so the
@@ -186,7 +286,13 @@ export type FieldResolution =
        */
       observed: ObservedFieldSignal;
     }
-  | { ok: false; reason: string };
+  | {
+      status: Exclude<ResolutionStatus, "resolved">;
+      ok: false;
+      reason: string;
+      /** Present whenever the system can name what it is missing. */
+      need?: EpistemicNeed;
+    };
 
 /** One field the capture observed a human interact with. */
 export interface ObservedFieldSignal {

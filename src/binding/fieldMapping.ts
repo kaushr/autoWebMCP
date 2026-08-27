@@ -1,8 +1,11 @@
 import type { ObservationTrace } from "../capture/normalize";
 import type { SemanticCapability } from "../semantic/model";
 import type {
+  EpistemicNeed,
+  FieldClarification,
   FieldGrounding,
   ObservedFieldSignal,
+  ResolutionStatus,
   ResolvedApplicationField,
   StandardApplicationSchema,
   TenantIntelligenceSource
@@ -36,6 +39,8 @@ export interface ApplicationIntelligence {
   platform?: string;
   standard?: StandardApplicationSchema;
   tenant?: TenantIntelligenceSource;
+  /** Answers a human has already given for this capability. Consulted last, by design. */
+  clarifications?: readonly FieldClarification[];
 }
 
 export interface FieldMappingResult {
@@ -54,6 +59,17 @@ export interface FieldMappingResult {
   observed: Record<string, ObservedFieldSignal>;
   /** Inputs that matched more than one field, or none. Never guessed. */
   ambiguities: string[];
+  /**
+   * What the system knows it is missing, per input.
+   *
+   * The difference between "this failed" and "this needs one specific
+   * fact": a need names the gap precisely enough to act on, so an
+   * unresolved field becomes a question rather than a dead end. Includes
+   * non-blocking needs, which record a gap without stopping anything.
+   */
+  needs: EpistemicNeed[];
+  /** The outcome per input, so a caller can tell a question from a refusal. */
+  statuses: Record<string, ResolutionStatus>;
   evidence: string[];
 }
 
@@ -109,6 +125,8 @@ export function resolveFieldMapping(
   const grounding: Record<string, FieldGrounding> = {};
   const observedByInput: Record<string, ObservedFieldSignal> = {};
   const ambiguities: string[] = [];
+  const needs: EpistemicNeed[] = [];
+  const statuses: Record<string, ResolutionStatus> = {};
   const evidence: string[] = [];
 
   if (observed.length === 0) {
@@ -117,6 +135,8 @@ export function resolveFieldMapping(
       fields,
       grounding,
       observed: observedByInput,
+      needs,
+      statuses,
       ambiguities: capability.inputs.map(
         (input) => `No application field identifier or visible label was observed for "${input.name}".`
       ),
@@ -131,9 +151,12 @@ export function resolveFieldMapping(
       observed,
       ...(intelligence.platform ? { platform: intelligence.platform } : {}),
       ...(intelligence.standard ? { standard: intelligence.standard } : {}),
-      ...(intelligence.tenant ? { tenant: intelligence.tenant } : {})
+      ...(intelligence.tenant ? { tenant: intelligence.tenant } : {}),
+      ...(intelligence.clarifications ? { clarifications: intelligence.clarifications } : {})
     });
 
+    statuses[input.name] = resolution.status;
+    if (resolution.need) needs.push(resolution.need);
     if (!resolution.ok) {
       ambiguities.push(resolution.reason);
       continue;
@@ -145,7 +168,7 @@ export function resolveFieldMapping(
     evidence.push(resolution.grounding.detail);
   }
 
-  return { mapping, fields, grounding, observed: observedByInput, ambiguities, evidence };
+  return { mapping, fields, grounding, observed: observedByInput, needs, statuses, ambiguities, evidence };
 }
 
 /** The record type the capture happened on, when the path revealed one. */
