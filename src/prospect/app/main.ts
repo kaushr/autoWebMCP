@@ -1,7 +1,9 @@
 import "./styles.css";
-import { invokeProspectCapability, prospectCapabilities } from "../capabilities";
+import { bindingActionFor, invokeProspectBinding } from "../bindings";
 import { getCompany, getContact } from "../service";
 import { registerCapability } from "../../webmcp/compiler";
+import { listPublishedCapabilities } from "../../webmcp/publication";
+import { describeReadiness, type AgentReadiness } from "./agentReadiness";
 import { companyHref, parseRoute, searchHref, type ContactFilters, type Route } from "./router";
 import { APP_NAME, renderRoute, renderShell } from "./views";
 
@@ -10,15 +12,47 @@ if (!root) throw new Error("SignalBase root element not found.");
 const appRoot: HTMLDivElement = root;
 
 /**
- * The same deterministic compiler the Training Studio uses. These capabilities
- * are configured rather than taught; a capability learned from a Teach Mode
- * session is published through the identical path.
+ * This site registers nothing of its own.
+ *
+ * It is an ordinary human website until someone teaches a capability from it,
+ * confirms that capability, and publishes it. Only then does this page compile
+ * the published capability against a binding it already has and hand the result
+ * to WebMCP.
  */
-const webmcpStatus = prospectCapabilities
-  .map((capability) => registerCapability(capability, invokeProspectCapability))
-  .every((result) => result === "registered")
-  ? "registered"
-  : "unavailable";
+const registeredCapabilities = new Map<string, string>();
+let readiness: AgentReadiness = { webmcpAvailable: Boolean(document.modelContext), publishedNames: [] };
+
+async function syncPublishedCapabilities(): Promise<void> {
+  let published: Awaited<ReturnType<typeof listPublishedCapabilities>> = [];
+  try {
+    published = await listPublishedCapabilities();
+  } catch {
+    // No control plane reachable: the site is simply a website. That is a
+    // legitimate state, not an error worth showing a visitor.
+    published = [];
+  }
+
+  for (const record of published) {
+    // A capability taught somewhere else can be published without this site
+    // being able to run it. It is registered not at all, and claimed nowhere.
+    if (!bindingActionFor(record.capability)) continue;
+    if (registeredCapabilities.has(record.capability.id)) continue;
+
+    if (registerCapability(record.capability, invokeProspectBinding) === "registered") {
+      registeredCapabilities.set(record.capability.id, record.capability.name);
+    }
+  }
+
+  // The header describes what this document actually exposes, not what the
+  // control plane lists. WebMCP has no unregister, so an unpublished capability
+  // stays callable here until the page is reloaded, and saying otherwise
+  // would misreport the tool surface an agent can still see.
+  readiness = {
+    webmcpAvailable: Boolean(document.modelContext),
+    publishedNames: [...registeredCapabilities.values()]
+  };
+  render();
+}
 
 function documentTitle(route: Route): string {
   switch (route.view) {
@@ -50,7 +84,7 @@ function filtersFromForm(form: HTMLFormElement): ContactFilters {
 
 function render(): void {
   const route = parseRoute(location.hash);
-  appRoot.innerHTML = renderShell(renderRoute(route), webmcpStatus);
+  appRoot.innerHTML = renderShell(renderRoute(route), describeReadiness(readiness));
   document.title = documentTitle(route);
 }
 
@@ -95,4 +129,10 @@ window.addEventListener("hashchange", () => {
   window.scrollTo({ top: 0 });
 });
 
+// Publishing happens in another tab, so re-check on return rather than polling.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void syncPublishedCapabilities();
+});
+
 render();
+void syncPublishedCapabilities();

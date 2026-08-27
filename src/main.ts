@@ -1,12 +1,16 @@
 import "./styles.css";
 import { formatEmployeeCount, type Company, type Contact } from "./prospect/data";
-import { invokeProspectCapability, prospectCapabilities } from "./prospect/capabilities";
 import { findContacts, getCompany, searchCompanies } from "./prospect/service";
 import { TrainingSession } from "./training/events";
 import { confirmCandidate, semanticizeTrace, type SemanticizationResponse } from "./training/semanticizer";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
-import { registerCapability } from "./webmcp/compiler";
+import {
+  listPublishedCapabilities,
+  publishCapability,
+  unpublishAll,
+  type PublicationRecord
+} from "./webmcp/publication";
 import { registerHelloControl } from "./webmcp/hello";
 import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
 import type { SemanticCapability } from "./semantic/model";
@@ -17,11 +21,11 @@ const appRoot: HTMLDivElement = app;
 
 const controlMode = new URLSearchParams(window.location.search).get("control") === "1";
 const captureMode = new URLSearchParams(window.location.search).get("capture") === "1";
-const registration = controlMode
-  ? registerHelloControl()
-  : prospectCapabilities.map((capability) => registerCapability(capability, invokeProspectCapability)).every((result) => result === "registered")
-    ? "registered"
-    : "unavailable";
+/**
+ * The Studio publishes capabilities to the control plane; it never hosts them.
+ * The only tool it can register is the browser-support control on `?control=1`.
+ */
+const registration = controlMode ? registerHelloControl() : document.modelContext ? "available" : "unavailable";
 
 let companyResults: Company[] = searchCompanies("Acme");
 let selectedCompany: Company | undefined = companyResults[0];
@@ -37,7 +41,9 @@ let ambiguities: string[] = [];
 let semanticizerStatus = "Demonstrate a session, then request a candidate capability.";
 let extensionTraces: TraceSummary[] = [];
 let selectedTrace: ObservationTrace | undefined;
-let traceStatus = "Record a session with the AutoWebMCP extension, then refresh.";
+let traceStatus = "Record a session with the Teach Mode extension, then refresh.";
+let publications: PublicationRecord[] = [];
+let publishStatus = "Nothing has been published yet.";
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -107,8 +113,32 @@ function renderExtensionTraces(): string {
   </section>`;
 }
 
+function renderPublications(): string {
+  const list = publications.length
+    ? `<ul class="trace-list">${publications
+        .map(
+          (record) => `<li><div class="trace-option"><strong>${escapeHtml(record.capability.name)}</strong>
+            <span><code>${escapeHtml(record.capability.id)}</code> · ${record.capability.inputs.length} inputs · published ${escapeHtml(
+              record.publishedAt.slice(11, 19)
+            )}</span></div></li>`
+        )
+        .join("")}</ul>`
+    : "<p class=empty>No capability has been published. Cooperative sites expose nothing until one is.</p>";
+
+  return `<section class="extension-traces" aria-label="Published capabilities">
+    <div class="panel-heading"><div><p class="eyebrow">Control plane</p><h2>Published capabilities</h2></div><span>${publications.length}</span></div>
+    ${list}
+    <div class="studio-actions">
+      <button id="refresh-publications" class="secondary">Refresh</button>
+      <button id="unpublish-all" class="secondary" ${publications.length ? "" : "disabled"}>Unpublish all</button>
+      <p class="semanticizer-status">${escapeHtml(publishStatus)}</p>
+    </div>
+  </section>`;
+}
+
 function renderTrainingStudio(): string {
   const events = trainingSession.list();
+  const confirmed = Boolean(candidate?.provenance.confirmedByHuman);
   const candidateEditor = candidate
     ? `<form id="candidate-editor" class="candidate-editor">
         <div class="panel-heading"><div><p class="eyebrow">Candidate capability</p><h2>Review before publication</h2></div><span>Human confirmation required</span></div>
@@ -120,7 +150,11 @@ function renderTrainingStudio(): string {
           )
           .join("")}</div>
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
-        <div class="studio-actions"><button type="submit">Save candidate edits</button><button type="button" id="confirm-capability">Confirm &amp; publish WebMCP tool</button></div>
+        <div class="studio-actions">
+          <button type="submit">Save candidate edits</button>
+          <button type="button" id="confirm-capability" ${confirmed ? "disabled" : ""}>${confirmed ? "Confirmed" : "Confirm capability"}</button>
+          <button type="button" id="publish-capability" class="${confirmed ? "" : "secondary"}" ${confirmed ? "" : "disabled"}>Publish to WebMCP</button>
+        </div>
       </form>`
     : "";
 
@@ -130,6 +164,7 @@ function renderTrainingStudio(): string {
     <div class="studio-actions"><button id="semanticize-trace" ${events.length < 2 ? "disabled" : ""}>Propose capability</button><button id="clear-training" class="secondary">Clear session</button><p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p></div>
     ${renderExtensionTraces()}
     ${candidateEditor}
+    ${renderPublications()}
   </section>`;
 }
 
@@ -153,18 +188,20 @@ function render(): void {
   appRoot.innerHTML = `
     <header class="topbar">
       <a class="brand" href="/">Auto<span>WebMCP</span></a>
-      <div class="runtime-status ${registration}">
-        <span></span> WebMCP ${registration === "registered" ? "tools registered" : "unavailable in this browser"}
+      <div class="runtime-status ${registration === "unavailable" ? "" : "registered"}">
+        <span></span> WebMCP ${registration === "unavailable" ? "unavailable in this browser" : "available in this browser"}
       </div>
     </header>
     <main>
       <section class="hero">
-        <p class="eyebrow">Prospect Intelligence</p>
-        <h1>Find the people who move a deal forward.</h1>
-        <p>Controlled synthetic data for the Teach → Publish → Use WebMCP demonstration.</p>
+        <p class="eyebrow">Training Studio</p>
+        <h1>Teach a workflow. Publish a capability.</h1>
+        <p>The control plane for Teach → Understand → Confirm → Publish → Use. The panels below are an
+        in-page rehearsal of the SignalBase workflow, kept only until the extension path replaces them;
+        the real evidence arrives from the Teach Mode extension as a captured trace.</p>
         ${captureMode ? `<p id="capture-probe-status" class="runtime-status registered">rrweb probe active · raw events remain in memory and inputs are masked</p>` : ""}
       </section>
-      <section class="workspace" aria-label="Prospect research workspace">
+      <section class="workspace" aria-label="Rehearsal harness for the SignalBase workflow">
         <aside class="panel companies-panel">
           <div class="panel-heading"><div><p class="eyebrow">01 · Companies</p><h2>Search accounts</h2></div><span>${companyResults.length}</span></div>
           <form id="company-search"><label class="sr-only" for="company-query">Search companies</label><input id="company-query" name="query" value="Acme" placeholder="Search company or industry" /><button type="submit">Search</button></form>
@@ -183,7 +220,7 @@ function render(): void {
         </section>
         <aside class="panel detail-panel">
           <p class="eyebrow">03 · Contact detail</p>
-          ${selectedContact ? `<h2>${escapeHtml(selectedContact.name)}</h2><p class="title">${escapeHtml(selectedContact.title)}</p><dl class="contact-detail"><div><dt>Function</dt><dd>${escapeHtml(selectedContact.function)}</dd></div><div><dt>Seniority</dt><dd>${escapeHtml(selectedContact.seniority)}</dd></div><div><dt>Email</dt><dd>${escapeHtml(selectedContact.email)}</dd></div></dl><p>${escapeHtml(selectedContact.responsibilitySummary)}</p>` : "<h2>Inspect a contact</h2><p class=empty>Choose a result to see the information an agent can retrieve through <code>get_contact</code>.</p>"}
+          ${selectedContact ? `<h2>${escapeHtml(selectedContact.name)}</h2><p class="title">${escapeHtml(selectedContact.title)}</p><dl class="contact-detail"><div><dt>Function</dt><dd>${escapeHtml(selectedContact.function)}</dd></div><div><dt>Seniority</dt><dd>${escapeHtml(selectedContact.seniority)}</dd></div><div><dt>Email</dt><dd>${escapeHtml(selectedContact.email)}</dd></div></dl><p>${escapeHtml(selectedContact.responsibilitySummary)}</p>` : "<h2>Inspect a contact</h2><p class=empty>Choose a result to finish the rehearsal. Nothing here is exposed to an agent until a capability is taught, confirmed, and published.</p>"}
         </aside>
       </section>
       ${renderTrainingStudio()}
@@ -330,24 +367,64 @@ function render(): void {
     render();
   });
 
+  // Confirmation is its own step. It records that a human accepted the contract
+  // and unlocks publication; it does not put a tool on any site.
   document.querySelector<HTMLButtonElement>("#confirm-capability")?.addEventListener("click", () => {
     if (!candidate) return;
     candidate = confirmCandidate(candidate);
+    semanticizerStatus = "Capability confirmed. Publish it to make the taught site agent-ready.";
+    render();
+  });
 
-    // A capability taught on another application is confirmed here but has no
-    // execution binding to compile against yet; live execution is a separate milestone.
-    if (candidate.binding?.application !== "prospect-intelligence") {
-      semanticizerStatus = "Capability confirmed. It has no execution binding in this application yet, so it is not published to WebMCP.";
-      render();
-      return;
+  // Publication is the moment the taught site gains a capability. The Studio
+  // hands the confirmed contract to the control plane; the site compiles it.
+  document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", async () => {
+    if (!candidate) return;
+    publishStatus = "Publishing…";
+    render();
+    try {
+      const record = await publishCapability(candidate);
+      publications = await listPublishedCapabilities();
+      publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
+    } catch (error) {
+      publishStatus = error instanceof Error ? error.message : "Publishing failed.";
     }
+    render();
+  });
 
-    const publishResult = registerCapability(candidate, invokeProspectCapability);
-    semanticizerStatus = publishResult === "registered" ? "Confirmed capability published to WebMCP." : "Confirmed capability is ready, but WebMCP is unavailable in this browser.";
+  document.querySelector<HTMLButtonElement>("#refresh-publications")?.addEventListener("click", async () => {
+    try {
+      publications = await listPublishedCapabilities();
+      publishStatus = publications.length ? "Published capabilities loaded." : "Nothing has been published yet.";
+    } catch (error) {
+      publishStatus = error instanceof Error ? error.message : "Could not reach the control plane.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#unpublish-all")?.addEventListener("click", async () => {
+    try {
+      const removed = await unpublishAll();
+      publications = [];
+      publishStatus = `Unpublished ${removed}. WebMCP has no unregister, so reload the taught site to clear its tool surface.`;
+    } catch (error) {
+      publishStatus = error instanceof Error ? error.message : "Could not reach the control plane.";
+    }
     render();
   });
 }
 
 render();
+
+void listPublishedCapabilities()
+  .then((records) => {
+    publications = records;
+    if (records.length) publishStatus = "Published capabilities loaded.";
+    render();
+  })
+  .catch(() => {
+    publishStatus = "Control plane unreachable. Run `npm run dev:semanticizer` to publish.";
+    render();
+  });
 
 window.addEventListener("beforeunload", () => stopCaptureProbe?.(), { once: true });

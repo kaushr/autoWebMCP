@@ -83,7 +83,7 @@ a {
   font-size: 0.82rem;
 }
 
-.webmcp-status {
+.agent-status {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -93,15 +93,25 @@ a {
   white-space: nowrap;
 }
 
-.webmcp-status .dot {
+.agent-status .dot {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
   background: var(--line-strong);
 }
 
-.webmcp-status[data-status="registered"] .dot {
+.agent-status[data-state="published"] {
+  color: var(--ok);
+}
+
+.agent-status[data-state="published"] .dot {
   background: var(--ok);
+}
+
+.agent-detail {
+  padding-left: 0.4rem;
+  border-left: 1px solid var(--line);
+  color: var(--ink-faint);
 }
 
 main {

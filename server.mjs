@@ -54,7 +54,10 @@ const capabilitySchema = {
           required: ["application", "action"],
           properties: {
             application: { type: "string", enum: ["prospect-intelligence"] },
-            action: { type: "string", enum: ["search_companies", "find_contacts", "get_contact"] }
+            action: {
+              type: "string",
+              enum: ["find_relevant_contacts", "search_companies", "find_contacts", "get_contact"]
+            }
           }
         },
         provenance: {
@@ -96,13 +99,22 @@ extensionCapabilitySchema.properties.candidate.properties.binding = {
 const traces = new Map();
 const MAX_TRACES = 20;
 
+/**
+ * Capabilities a human has confirmed and then deliberately published.
+ *
+ * This is the control plane the cooperative site reads on load: a site holds no
+ * generated capability until one is published here, and everything is lost on
+ * restart, which is exactly the reset the demo wants.
+ */
+const publications = new Map();
+
 function corsHeaders(request) {
   const origin = request.headers.origin ?? "";
   const allowed = /^chrome-extension:\/\//.test(origin) || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
   return allowed
     ? {
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       }
     : {};
@@ -154,6 +166,33 @@ async function ingestTrace(request, response) {
   send(response, 201, { sessionId: trace.sessionId, observations: trace.observations.length }, corsHeaders(request));
 }
 
+/** The publication boundary. Confirmation is the gate, so it is checked here too. */
+function capabilityProblem(capability) {
+  if (!capability || typeof capability !== "object") return "A capability object is required.";
+  if (!/^[a-z][a-z0-9_]*$/.test(capability.id ?? "")) return "Capability id must be lower snake case.";
+  if (typeof capability.name !== "string" || capability.name === "") return "Capability name is required.";
+  if (!Array.isArray(capability.inputs)) return "Capability inputs must be an array.";
+  if (capability.provenance?.source !== "confirmed" || capability.provenance?.confirmedByHuman !== true) {
+    return "Only a human-confirmed capability can be published.";
+  }
+  return undefined;
+}
+
+async function publishCapability(request, response) {
+  const body = await readJson(request, 200_000);
+  const capability = body?.capability;
+  const problem = capabilityProblem(capability);
+  if (problem) {
+    send(response, 400, { error: problem }, corsHeaders(request));
+    return;
+  }
+
+  const record = { capability, publishedAt: new Date().toISOString() };
+  publications.set(capability.id, record);
+  console.log(`published capability ${capability.id}`);
+  send(response, 201, record, corsHeaders(request));
+}
+
 async function semanticize(request, response) {
   if (!openai) {
     send(response, 503, { error: "OPENAI_API_KEY is not configured on this server." });
@@ -168,7 +207,9 @@ async function semanticize(request, response) {
   }
 
   const sharedInstructions = [
-    "Infer only a lightweight candidate business capability from observed evidence.",
+    "Infer exactly ONE lightweight candidate business capability from the observed evidence.",
+    "Move up an abstraction level: the whole demonstration is one capability, never one capability per UI step.",
+    "Never propose per-step primitives such as opening a record, setting a filter, or clicking a result.",
     "Do not invent application truth, selectors, APIs, workflows, or validation rules.",
     "Name the capability for the business outcome, never for the sequence of UI steps.",
     "Generalize: the specific values the human chose become inputs, never part of the capability name.",
@@ -187,7 +228,8 @@ async function semanticize(request, response) {
     : [
         ...sharedInstructions,
         "Choose an action from the supplied allowlist only when it is directly supported by the trace.",
-        "For find_contacts, use company_id as the required company reference; optional inputs are function, seniority, and title_keywords."
+        "A search, then a company, then facet filters, then opening a person is one capability: finding relevant contacts.",
+        "For find_relevant_contacts, the inputs are company, function, and seniority; only company is required."
       ];
 
   const modelResponse = await openai.responses.create({
@@ -228,6 +270,21 @@ createServer(async (request, response) => {
     }
     if (request.method === "POST" && request.url === "/api/traces") {
       await ingestTrace(request, response);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/capabilities") {
+      await publishCapability(request, response);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/capabilities") {
+      send(response, 200, { publications: [...publications.values()] }, corsHeaders(request));
+      return;
+    }
+    if (request.method === "DELETE" && request.url === "/api/capabilities") {
+      const removed = publications.size;
+      publications.clear();
+      console.log(`unpublished ${removed} capabilities`);
+      send(response, 200, { removed }, corsHeaders(request));
       return;
     }
     if (request.method === "GET" && request.url === "/api/traces") {

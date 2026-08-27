@@ -2,7 +2,16 @@
 
 An open-source WebMCP hackathon reference implementation for a narrow idea: observe a human-oriented workflow, propose a small semantic business capability, require human confirmation, and deterministically compile that capability into WebMCP.
 
-The controlled demo is **Prospect Intelligence**, with synthetic company and contact data. Salesforce remains a documented enterprise/platform constraint and compatibility spike, not a product integration.
+AutoWebMCP is the product. **SignalBase** is a small synthetic website it is taught
+from: a stand-in for any ordinary business site a customer would want to make
+agent-ready. SignalBase starts with no agent capabilities at all, and gains one
+only after a human has taught, confirmed, and published it.
+
+```text
+TEACH → UNDERSTAND → CONFIRM → PUBLISH → USE
+```
+
+Salesforce remains a documented enterprise/platform constraint and compatibility spike, not a product integration.
 
 ## Run locally
 
@@ -23,8 +32,8 @@ Two documents are served:
 
 | Path | What it is |
 | --- | --- |
-| `/` | **AutoWebMCP Training Studio** — the operator console: Teach Mode captures, semanticizer, candidate review, confirmation. |
-| `/prospect/` | **SignalBase** — a standalone prospect-intelligence application with synthetic data. This is the application Teach Mode trains on. |
+| `/` | **AutoWebMCP Training Studio** — the control plane: Teach Mode captures, semanticizer, confirmation, publication. |
+| `/prospect/` | **SignalBase** — the taught site. An ordinary prospect-intelligence website with synthetic data. |
 
 The controlled WebMCP check is `/?control=1`.
 
@@ -47,9 +56,30 @@ never reloads, which is what lets a Teach Mode session survive a whole workflow:
 #/contact/contact-acme-01             contact detail
 ```
 
-The same four capabilities are registered as WebMCP tools on page load through
-the shared deterministic compiler: `search_companies`, `find_contacts`,
-`get_contact`, `get_company`. They are business capabilities, not DOM actions.
+### SignalBase starts with no WebMCP tools
+
+This is the point of the demo, so it is worth stating plainly: opening SignalBase
+and running `await document.modelContext.getTools()` returns none of its business
+capabilities. The header says `Agent capabilities: Not published`.
+
+A capability appears only after the full lifecycle:
+
+```text
+Teach Mode records the Acme workflow on SignalBase
+  → Studio receives the normalized trace
+  → semanticizer proposes Find Relevant Contacts
+  → a human confirms the contract
+  → a human presses Publish
+  → SignalBase registers find_relevant_contacts and the header turns green
+```
+
+`npm run dev:semanticizer` must be running to publish; the store is in memory, so
+restarting it returns SignalBase to a plain website. The Studio's **Unpublish
+all** does the same without a restart.
+
+The published tool binds to the functions the pages already use — see
+`src/prospect/bindings.ts` — so an agent and a human get the same answers from
+the same code.
 
 ## Browser extension
 

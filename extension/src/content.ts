@@ -173,7 +173,7 @@ function applicationContext(): CaptureApplicationContext {
   );
   const prospect = Boolean(
     document.querySelector(
-      "[data-app='prospect-intelligence'], .training-studio, [aria-label='Prospect research workspace']"
+      "[data-app='prospect-intelligence'], .training-studio, [aria-label^='Rehearsal harness']"
     )
   );
   return {

@@ -9,6 +9,7 @@ import {
 } from "../data";
 import { countContacts, featuredCompanies, findContacts, getCompany, getContact, searchCompanies } from "../service";
 import { companyHref, contactHref, hasActiveFilters, searchHref, type ContactFilters, type Route } from "./router";
+import type { ReadinessDescription } from "./agentReadiness";
 
 /** One constant so the working name is trivial to change. */
 export const APP_NAME = "SignalBase";
@@ -257,7 +258,7 @@ export function renderRoute(route: Route): string {
   }
 }
 
-export function renderShell(body: string, webmcpStatus: string): string {
+export function renderShell(body: string, readiness: ReadinessDescription): string {
   return `
     <header class="topbar">
       <a class="brand" href="${searchHref("")}" aria-label="${escapeHtml(APP_NAME)} home">
@@ -265,9 +266,10 @@ export function renderShell(body: string, webmcpStatus: string): string {
         <span class="brand-name">${escapeHtml(APP_NAME)}</span>
       </a>
       <p class="tagline">${escapeHtml(APP_TAGLINE)}</p>
-      <p class="webmcp-status" data-status="${escapeHtml(webmcpStatus)}">
+      <p class="agent-status" data-state="${readiness.state}" aria-live="polite">
         <span class="dot" aria-hidden="true"></span>
-        WebMCP ${webmcpStatus === "registered" ? "tools registered" : "unavailable in this browser"}
+        <span>${escapeHtml(readiness.label)}</span>
+        ${readiness.detail ? `<span class="agent-detail">${escapeHtml(readiness.detail)}</span>` : ""}
       </p>
     </header>
     <main id="content">${body}</main>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { companyHref, contactHref, parseRoute, searchHref } from "../src/prospect/app/router";
 import { renderRoute, renderShell } from "../src/prospect/app/views";
+import { describeReadiness } from "../src/prospect/app/agentReadiness";
 
 describe("SignalBase routing", () => {
   it("treats an empty hash as company search", () => {
@@ -109,8 +110,19 @@ describe("SignalBase views", () => {
     expect(html).toContain("&lt;img");
   });
 
-  it("shows WebMCP registration state in the shell", () => {
-    expect(renderShell("<p></p>", "registered")).toContain("WebMCP tools registered");
-    expect(renderShell("<p></p>", "unavailable")).toContain("WebMCP unavailable in this browser");
+  it("shows agent readiness in the shell", () => {
+    expect(renderShell("<p></p>", describeReadiness({ webmcpAvailable: false, publishedNames: [] }))).toContain(
+      "WebMCP unavailable in this browser"
+    );
+    expect(renderShell("<p></p>", describeReadiness({ webmcpAvailable: true, publishedNames: [] }))).toContain(
+      "Agent capabilities: Not published"
+    );
+
+    const published = renderShell(
+      "<p></p>",
+      describeReadiness({ webmcpAvailable: true, publishedNames: ["Find Relevant Contacts"] })
+    );
+    expect(published).toContain("Agent capabilities: 1 published");
+    expect(published).toContain("Find Relevant Contacts");
   });
 });

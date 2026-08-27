@@ -1,8 +1,18 @@
 import type { SemanticCapability } from "../semantic/model";
 import { CONTACT_FUNCTIONS, SENIORITIES } from "./data";
-import { findContacts, getCompany, getContact, searchCompanies } from "./service";
 
-export const prospectCapabilities: SemanticCapability[] = [
+/**
+ * Reference capability contracts.
+ *
+ * None of these are registered by the application. They are kept as the shape a
+ * confirmed capability is expected to take once it has been taught: fixtures for
+ * the deterministic compiler's tests, and a reference for what each execution
+ * binding in `bindings.ts` expects to be handed.
+ *
+ * The site starts with no agent capability at all; publication is what creates
+ * one. See docs/ARCHITECTURE.md.
+ */
+export const referenceCapabilities: SemanticCapability[] = [
   {
     id: "search_companies",
     name: "Search companies",
@@ -15,8 +25,8 @@ export const prospectCapabilities: SemanticCapability[] = [
   },
   {
     id: "find_contacts",
-    name: "Find relevant contacts",
-    description: "Find contacts at a company filtered by function, seniority, and title keywords.",
+    name: "Find contacts",
+    description: "Find contacts at a known company identifier, filtered by function, seniority, and title keywords.",
     inputs: [
       { name: "company_id", description: "The company identifier returned by search_companies.", type: "string", required: true },
       {
@@ -64,30 +74,24 @@ export const prospectCapabilities: SemanticCapability[] = [
   }
 ];
 
-export function invokeProspectCapability(
-  capability: SemanticCapability,
-  input: Record<string, string | number | boolean | undefined>
-): unknown {
-  if (!capability.binding) {
-    throw new Error(`No execution binding has been established for capability: ${capability.id}`);
-  }
-  switch (capability.binding.action) {
-    case "search_companies":
-      return { companies: searchCompanies(String(input.query ?? "")) };
-    case "find_contacts":
-      return {
-        contacts: findContacts({
-          company_id: String(input.company_id ?? ""),
-          function: typeof input.function === "string" ? input.function : undefined,
-          seniority: typeof input.seniority === "string" ? input.seniority : undefined,
-          title_keywords: typeof input.title_keywords === "string" ? input.title_keywords : undefined
-        })
-      };
-    case "get_contact":
-      return { contact: getContact(String(input.contact_id ?? "")) ?? null };
-    case "get_company":
-      return { company: getCompany(String(input.company_id ?? "")) ?? null };
-    default:
-      throw new Error(`Unsupported prospect binding: ${capability.binding.action}`);
-  }
-}
+/**
+ * What the semanticizer is expected to propose from the canonical training
+ * session: search Acme, open it, filter by function and seniority, open a
+ * person. One business outcome, not four UI primitives.
+ *
+ * This is a test fixture and a review reference. The recorder must never emit
+ * it, and the site must never register it without a human publishing it.
+ */
+export const findRelevantContactsProposal: SemanticCapability = {
+  id: "find_relevant_contacts",
+  name: "Find Relevant Contacts",
+  description: "Find relevant contacts at a company by business function and seniority.",
+  inputs: [
+    { name: "company", description: "The company to research.", type: "string", required: true },
+    { name: "function", description: "Business function, such as Procurement.", type: "string", required: false },
+    { name: "seniority", description: "Seniority, such as VP.", type: "string", required: false }
+  ],
+  outputs: [{ name: "contacts", description: "The matching contacts at that company.", type: "array" }],
+  provenance: { source: "inferred", observationIds: [], confirmedByHuman: false },
+  safety: { readOnly: true, requiresConfirmation: false }
+};

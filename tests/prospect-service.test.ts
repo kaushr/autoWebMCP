@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { CONTACT_FUNCTIONS, SENIORITIES, companies, contacts, formatEmployeeCount } from "../src/prospect/data";
 import { countContacts, findContacts, getCompany, getContact, searchCompanies } from "../src/prospect/service";
-import { invokeProspectCapability, prospectCapabilities } from "../src/prospect/capabilities";
+import { referenceCapabilities } from "../src/prospect/capabilities";
+import { invokeProspectBinding } from "../src/prospect/bindings";
 import { compileCapability } from "../src/webmcp/compiler";
 
 describe("Prospect Intelligence dataset", () => {
@@ -107,47 +108,49 @@ describe("Contact filtering at Acme", () => {
   });
 });
 
-describe("Prospect capabilities", () => {
-  it("exposes the four business capabilities the agent composes with", () => {
-    expect(prospectCapabilities.map((capability) => capability.id)).toEqual([
+describe("Reference capability contracts", () => {
+  it("describes the bindings this application already has", () => {
+    expect(referenceCapabilities.map((capability) => capability.id)).toEqual([
       "search_companies",
       "find_contacts",
       "get_contact",
       "get_company"
     ]);
-    expect(prospectCapabilities.every((capability) => capability.safety.readOnly)).toBe(true);
+    expect(referenceCapabilities.every((capability) => capability.safety.readOnly)).toBe(true);
+    // Configured, not confirmed: none of these may be published as they stand.
+    expect(referenceCapabilities.every((capability) => !capability.provenance.confirmedByHuman)).toBe(true);
   });
 
-  it("runs the demo path end to end through the capability bindings", () => {
-    const byId = (id: string) => prospectCapabilities.find((capability) => capability.id === id)!;
+  it("runs the demo path end to end through the execution bindings", () => {
+    const byId = (id: string) => referenceCapabilities.find((capability) => capability.id === id)!;
 
-    const found = invokeProspectCapability(byId("search_companies"), { query: "Acme" }) as {
+    const found = invokeProspectBinding(byId("search_companies"), { query: "Acme" }) as {
       companies: Array<{ id: string }>;
     };
     expect(found.companies.map((company) => company.id)).toEqual(["acme"]);
 
-    const candidates = invokeProspectCapability(byId("find_contacts"), {
+    const candidates = invokeProspectBinding(byId("find_contacts"), {
       company_id: "acme",
       function: "Procurement",
       seniority: "VP"
     }) as { contacts: Array<{ id: string }> };
     expect(candidates.contacts).toHaveLength(1);
 
-    const contact = invokeProspectCapability(byId("get_contact"), {
+    const contact = invokeProspectBinding(byId("get_contact"), {
       contact_id: candidates.contacts[0].id
     }) as { contact: { name: string; email: string } | null };
     expect(contact.contact?.name).toBe("Maya Chen");
     expect(contact.contact?.email).toBe("maya.chen@acmeindustrial.example");
 
-    const company = invokeProspectCapability(byId("get_company"), { company_id: "acme" }) as {
+    const company = invokeProspectBinding(byId("get_company"), { company_id: "acme" }) as {
       company: { headquarters: string } | null;
     };
     expect(company.company?.headquarters).toBe("Columbus, OH");
   });
 
-  it("compiles every capability into a valid read-only WebMCP tool", async () => {
-    for (const capability of prospectCapabilities) {
-      const tool = compileCapability(capability, invokeProspectCapability);
+  it("compiles every reference capability into a valid read-only WebMCP tool", async () => {
+    for (const capability of referenceCapabilities) {
+      const tool = compileCapability(capability, invokeProspectBinding);
       expect(tool.name).toBe(capability.id);
       expect(tool.annotations.readOnlyHint).toBe(true);
       expect(tool.inputSchema.additionalProperties).toBe(false);
@@ -157,8 +160,8 @@ describe("Prospect capabilities", () => {
     }
 
     const findContactsTool = compileCapability(
-      prospectCapabilities.find((capability) => capability.id === "find_contacts")!,
-      invokeProspectCapability
+      referenceCapabilities.find((capability) => capability.id === "find_contacts")!,
+      invokeProspectBinding
     );
     expect(findContactsTool.inputSchema.required).toEqual(["company_id"]);
     expect(findContactsTool.inputSchema.properties.seniority?.enum).toContain("VP");
@@ -168,8 +171,8 @@ describe("Prospect capabilities", () => {
   });
 
   it("returns null rather than throwing for unknown identifiers", () => {
-    const byId = (id: string) => prospectCapabilities.find((capability) => capability.id === id)!;
-    expect(invokeProspectCapability(byId("get_contact"), { contact_id: "nope" })).toEqual({ contact: null });
-    expect(invokeProspectCapability(byId("get_company"), { company_id: "nope" })).toEqual({ company: null });
+    const byId = (id: string) => referenceCapabilities.find((capability) => capability.id === id)!;
+    expect(invokeProspectBinding(byId("get_contact"), { contact_id: "nope" })).toEqual({ contact: null });
+    expect(invokeProspectBinding(byId("get_company"), { company_id: "nope" })).toEqual({ company: null });
   });
 });
