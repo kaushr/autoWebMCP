@@ -482,10 +482,17 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
  */
 async function runInspectRequest(request: BrowserBindingInspectRequest): Promise<BrowserBindingInspectResponse> {
   try {
+    // Bounded on purpose. Left to their defaults these waits add up to
+    // roughly twenty seconds — edit-state poll, settle, read, cancel poll,
+    // settle again — which is close enough to the caller's patience that a
+    // slow-but-working inspection gets reported as an unresponsive
+    // extension. The work must always finish before the caller gives up.
     const inspection = await inspectValueDomains({
       root: document,
       binding: request.binding,
-      adapter: resolverAdapterForPlatform(request.binding.platform)
+      adapter: resolverAdapterForPlatform(request.binding.platform),
+      reaction: { quietMs: 200, timeoutMs: 1_500 },
+      restoreTimeoutMs: 3_000
     });
     return { ok: true, inspection };
   } catch (error) {

@@ -1034,7 +1034,11 @@ function renderBrowserTestForm(
       .map(
         (field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}
           ${renderTestControl(field)}
-        </label>`
+        </label>${
+          field.domainUnknown && !isWorking(operations, "acquire-domains")
+            ? `<div class="studio-actions"><button type="button" class="secondary" data-acquire-domains="retry">Try again</button></div>`
+            : ""
+        }`
       )
       .join("")}
     ${browserTestErrors.length ? `<p class="ambiguity">${browserTestErrors.map(escapeHtml).join(" · ")}</p>` : ""}

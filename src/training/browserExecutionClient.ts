@@ -35,7 +35,15 @@ export type DomainAcquisition =
 
 /** How long to wait for the presence probe. It is answered synchronously by any current bridge. */
 const PROBE_TIMEOUT_MS = 1_500;
-const ACQUIRE_TIMEOUT_MS = 25_000;
+/**
+ * Deliberately longer than the work it waits on.
+ *
+ * The inspection's own budget is bounded in the content script; this must
+ * stay above it, or a slow-but-working operation is reported as an
+ * unresponsive extension — which is exactly the misdiagnosis this whole
+ * path has produced twice.
+ */
+const ACQUIRE_TIMEOUT_MS = 35_000;
 
 /** What the bridge must speak for the Studio's current requests to be understood. */
 const REQUIRED_PROTOCOL = 3;
