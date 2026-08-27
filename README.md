@@ -94,6 +94,20 @@ Start training, perform the workflow, stop training, and the normalized trace
 appears in the Training Studio's **Teach Mode captures** panel. See
 [docs/EXTENSION.md](docs/EXTENSION.md).
 
+The session also records sanitized network metadata for the recording tab and
+correlates it with the actions, so a trace can show *how* the application
+carried a step out:
+
+```text
+Save  →  POST /aura  ·  200  ·  +37ms  ·  high confidence
+         application: confirmation toast shown
+```
+
+Metadata only — no headers, cookies, tokens, bodies, or query values, and no
+URL to replay. This is evidence about an application's behaviour, never an
+execution binding: nothing here is published to an agent. An application with no
+network traffic, like SignalBase, honestly reports none.
+
 ## Verify
 
 ```bash

@@ -61,6 +61,52 @@ function describeObservation(observation: ObservationTrace["observations"][numbe
   return parts.join(" ");
 }
 
+/**
+ * "How did the application do it", shown next to the trace and never folded
+ * into the capability. Correlation, not causation, so the wording stays
+ * observational.
+ */
+function renderExecutionEvidence(trace: ObservationTrace): string {
+  const evidence = trace.executionEvidence ?? [];
+  if (evidence.length === 0) {
+    return `<p class="semanticizer-status">No network execution evidence was observed. The application
+      appears to perform this workflow in-process rather than over the network.</p>`;
+  }
+
+  const entries = evidence
+    .map((entry) => {
+      const requests = entry.networkEffects
+        .map(
+          (effect) => `<li class="effect-${escapeHtml(effect.confidence)}">
+            <span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code>
+            <em>${effect.failed ? "failed" : String(effect.status)}</em>
+            <small>+${effect.startedAfterMs}ms · ${effect.durationMs}ms · ${escapeHtml(effect.confidence)} confidence${
+              effect.backgroundLikely ? " · background traffic" : ""
+            }</small>
+          </li>`
+        )
+        .join("");
+
+      return `<li>
+        <strong>${escapeHtml(entry.actionLabel ?? entry.action)}</strong>
+        <ul class="network-effects">${requests}</ul>
+        ${
+          entry.applicationEffects.length
+            ? `<small>Application: ${entry.applicationEffects.map(escapeHtml).join(" · ")}</small>`
+            : ""
+        }
+      </li>`;
+    })
+    .join("");
+
+  return `<details class="execution-evidence">
+    <summary>Execution evidence · ${evidence.length} correlated ${evidence.length === 1 ? "action" : "actions"}</summary>
+    <p class="semanticizer-status">Requests observed after each action, by timing alone. This is evidence of
+      how the application behaved, not an execution binding, and nothing here is replayable.</p>
+    <ul class="evidence-list">${entries}</ul>
+  </details>`;
+}
+
 function renderExtensionTraces(): string {
   const list = extensionTraces.length
     ? extensionTraces
@@ -77,7 +123,8 @@ function renderExtensionTraces(): string {
     ? `<ol class="event-trace">${selectedTrace.observations
         .map((observation) => `<li><span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`)
         .join("")}</ol>
-       <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events and ${selectedTrace.stats.rrwebEvents} rrweb events reduced to ${selectedTrace.observations.length} observations.</p>`
+       <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events and ${selectedTrace.stats.rrwebEvents} rrweb events reduced to ${selectedTrace.observations.length} observations.</p>
+       ${renderExecutionEvidence(selectedTrace)}`
     : "";
 
   return `<section class="extension-traces" aria-label="Extension traces">
