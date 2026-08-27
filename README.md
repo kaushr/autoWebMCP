@@ -19,6 +19,19 @@ npm run dev:semanticizer
 
 The Vite app is available at `http://127.0.0.1:5173`. The controlled WebMCP check is `/?control=1`.
 
+## Browser extension
+
+The Teach Mode extension is the local capture agent. Build it, then load
+`dist-extension/` as an unpacked extension in Chrome:
+
+```bash
+npm run build:extension
+```
+
+Start training, perform the workflow, stop training, and the normalized trace
+appears in the Training Studio's **Teach Mode captures** panel. See
+[docs/EXTENSION.md](docs/EXTENSION.md).
+
 ## Verify
 
 ```bash
@@ -40,4 +53,4 @@ Live cooperative site: semantic capability → existing application binding → 
 Live constrained site: semantic capability → generic MCP/browser runtime → existing application binding
 ```
 
-The browser extension and generic MCP fallback are future runtime direction, not implemented here. Salesforce is the example showing why a constrained site may need that fallback. This repository intentionally excludes browser replay, commercial Salesforce packaging, real data, external prospecting APIs, and direct cross-system connectors.
+The browser extension implements the Teach path above. The generic MCP fallback and Runtime Mode remain future direction, not implemented here. Salesforce is the example showing why a constrained site may need that fallback. This repository intentionally excludes browser replay, commercial Salesforce packaging, real data, external prospecting APIs, and direct cross-system connectors.
