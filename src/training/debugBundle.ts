@@ -4,6 +4,11 @@ import type { PublicationRecord } from "../webmcp/publication";
 import type { SemanticizerRun } from "./semanticizer";
 import type { BindingCandidateRecord, BindingInferenceRun } from "./bindingInference";
 import type { BindingValidationRecord } from "../binding/validation";
+import type {
+  BrowserBindingCandidateRecord,
+  BrowserBindingValidationRecord
+} from "../binding/browserExecution/model";
+import type { FieldClarification } from "../applicationIntelligence/model";
 import { resolveAdvertisedBinding } from "./bindingProvider";
 import { sourceApplicationFor } from "./sourceApplication";
 
@@ -11,7 +16,7 @@ import { sourceApplicationFor } from "./sourceApplication";
  * Bumped when the shape changes. Deliberately a plain string with no migration
  * machinery: the format will move, and a reader can branch on it.
  */
-export const DEBUG_BUNDLE_VERSION = "3";
+export const DEBUG_BUNDLE_VERSION = "4";
 
 export interface DebugBundleInput {
   trace: ObservationTrace;
@@ -23,6 +28,24 @@ export interface DebugBundleInput {
   bindingCandidate?: BindingCandidateRecord;
   validationRuns?: readonly BindingValidationRecord[];
   validation?: BindingValidationRecord;
+  /**
+   * The browser execution route.
+   *
+   * Absent from the export until now, which is why a bundle sent to
+   * diagnose a failing browser run contained everything except the browser
+   * run: the proposed binding, the test result with its per-input
+   * transactions, and how any constrained value domain was established.
+   */
+  browserBindingCandidate?: BrowserBindingCandidateRecord;
+  browserValidation?: BrowserBindingValidationRecord;
+  valueDomains?: {
+    resolved: Record<string, string[]>;
+    sources: Record<string, string>;
+    unresolved: Record<string, string>;
+    trail: readonly string[];
+  };
+  /** Facts a human supplied when no metadata could name a field. */
+  clarifications?: readonly FieldClarification[];
   exportedAt: string;
 }
 
@@ -53,6 +76,13 @@ export interface DebugBundle {
   bindingValidationRuns: BindingValidationRecord["result"][];
   validatedBinding: NonNullable<BindingValidationRecord["result"]["binding"]> | null;
   bindingValidationState: BindingValidationRecord["state"];
+  browserBinding: BrowserBindingCandidateRecord["proposal"] | null;
+  browserBindingState: BrowserBindingCandidateRecord["state"] | "none";
+  /** The Browser execution test result, including per-input transactions. */
+  browserExecutionTest: BrowserBindingValidationRecord["result"] | null;
+  browserExecutionTestState: BrowserBindingValidationRecord["state"];
+  valueDomains: DebugBundleInput["valueDomains"] | null;
+  clarifications: FieldClarification[];
   capabilityLifecycle: {
     candidate: SemanticCapability | null;
     ambiguities: string[];
@@ -150,6 +180,26 @@ export function buildDebugBundle(input: DebugBundleInput): DebugBundle {
       ownCandidate && input.validation?.result.capabilityId === ownCandidate.id
         ? input.validation.state
         : "none",
+    // The browser route, scoped to this session's capability the same way
+    // the supported-API route is.
+    browserBinding:
+      ownCandidate && input.browserBindingCandidate?.proposal.binding?.capabilityId === ownCandidate.id
+        ? input.browserBindingCandidate.proposal
+        : null,
+    browserBindingState:
+      ownCandidate && input.browserBindingCandidate?.proposal.binding?.capabilityId === ownCandidate.id
+        ? input.browserBindingCandidate.state
+        : "none",
+    browserExecutionTest:
+      ownCandidate && input.browserValidation?.binding.capabilityId === ownCandidate.id
+        ? input.browserValidation.result
+        : null,
+    browserExecutionTestState:
+      ownCandidate && input.browserValidation?.binding.capabilityId === ownCandidate.id
+        ? input.browserValidation.state
+        : "none",
+    valueDomains: input.valueDomains ?? null,
+    clarifications: [...(input.clarifications ?? [])],
     capabilityLifecycle: {
       candidate: ownCandidate ?? null,
       ambiguities: [...(input.ambiguities ?? [])],

@@ -506,30 +506,34 @@ function renderTraceCard(trace: TraceSummary): string {
  * inspection did to the application.
  */
 function renderDomainProvenance(): string {
-  if (domainAcquisitionTrail.length === 0) return "";
+  const values = Object.entries(liveValueDomains);
+  if (domainAcquisitionTrail.length === 0 && values.length === 0) {
+    return panel(
+      "Value-domain acquisition",
+      "none yet",
+      `<p class="semanticizer-status">No constrained field has needed its valid values resolved yet.</p>`
+    );
+  }
+
   // The values themselves, not merely their provenance: inspecting what
   // AutoWebMCP believes the domain to be must not require running a test.
-  const sources = Object.entries(liveDomainSources)
+  const sources = values
     .map(
-      ([name, source]) =>
-        `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(source)}` +
-        `${
-          liveValueDomains[name]?.length
-            ? `<ul class="reasons">${liveValueDomains[name]
-                .map((value) => `<li><code>${escapeHtml(value)}</code></li>`)
-                .join("")}</ul>`
-            : ""
-        }</li>`
+      ([name, options]) =>
+        `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(liveDomainSources[name] ?? "unknown source")}` +
+        `<ul class="reasons">${options.map((value) => `<li><code>${escapeHtml(value)}</code></li>`).join("")}</ul></li>`
     )
     .join("");
-  return `<details class="admin-raw">
-    <summary>Value-domain acquisition</summary>
-    ${sources ? `<ul class="reasons">${sources}</ul>` : ""}
-    <ul class="need-path">${domainAcquisitionTrail.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>
-    <div class="studio-actions">
-      <button type="button" class="secondary" data-acquire-domains="debug">Read choices from application</button>
-    </div>
-  </details>`;
+
+  return panel(
+    "Value-domain acquisition",
+    values.length ? `${values.length} resolved` : "unresolved",
+    `${sources ? `<ul class="reasons">${sources}</ul>` : ""}
+     <ul class="need-path">${domainAcquisitionTrail.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>
+     <div class="studio-actions">
+       <button type="button" class="secondary" data-acquire-domains="debug">Read choices from application</button>
+     </div>`
+  );
 }
 
 function renderTraceDetailsEditor(): string {
@@ -1348,6 +1352,18 @@ function currentDebugBundle(): DebugBundle | undefined {
     bindingCandidate,
     validationRuns,
     validation,
+    // The browser execution route: the proposed binding, the test result
+    // with its per-input transactions, how any constrained domain was
+    // established, and any human answers behind a grounding.
+    ...(browserBindingCandidate ? { browserBindingCandidate } : {}),
+    ...(browserBindingValidation ? { browserValidation: browserBindingValidation } : {}),
+    valueDomains: {
+      resolved: liveValueDomains,
+      sources: liveDomainSources,
+      unresolved: liveDomainProblems,
+      trail: domainAcquisitionTrail
+    },
+    clarifications: fieldClarifications,
     exportedAt: new Date().toISOString()
   });
 }

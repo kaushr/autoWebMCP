@@ -61,7 +61,7 @@ describe("Control-plane reset", () => {
   });
 });
 
-describe("Debug bundle version 3", () => {
+describe("Debug bundle version 4", () => {
   function trace(): ObservationTrace {
     const session = new CaptureSession("sess-binding", 0, {
       host: "acme.lightning.force.com",
@@ -97,7 +97,7 @@ describe("Debug bundle version 3", () => {
     rawResponse: '{"candidate":{"bindingFamily":"salesforce-record-update"}}'
   };
 
-  it("is versioned 2 and carries the new binding fields", () => {
+  it("is versioned 4 and carries both execution routes", () => {
     const bundle = buildDebugBundle({
       trace: trace(),
       runs: [],
@@ -105,8 +105,8 @@ describe("Debug bundle version 3", () => {
       exportedAt: "2026-08-27T05:01:00.000Z"
     });
 
-    expect(DEBUG_BUNDLE_VERSION).toBe("3");
-    expect(bundle.exportVersion).toBe("3");
+    expect(DEBUG_BUNDLE_VERSION).toBe("4");
+    expect(bundle.exportVersion).toBe("4");
     expect(bundle.bindingValidationRuns).toEqual([]);
     expect(bundle.validatedBinding).toBeNull();
     expect(bundle.bindingValidationState).toBe("none");

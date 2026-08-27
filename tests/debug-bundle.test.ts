@@ -366,3 +366,40 @@ describe("Export filename", () => {
     expect(debugBundleFilename("")).toBe("autowebmcp-session-unknown.json");
   });
 });
+
+describe("the export carries the browser execution route", () => {
+  it("includes the test result, its transactions, and how the value domain was established", () => {
+    // A bundle sent to diagnose a failing browser run used to contain
+    // everything except the browser run: the supported-API route was
+    // exported and the browser route was not.
+    const bundle = buildDebugBundle({
+      trace: salesforceTrace(),
+      runs: [],
+      valueDomains: {
+        resolved: { stage: ["Engage", "Complete"] },
+        sources: { stage: "live-application-state" },
+        unresolved: {},
+        trail: ["Need: valid value domain for Opportunity.StageName."]
+      },
+      clarifications: [],
+      exportedAt: "2026-08-27T23:00:00.000Z"
+    });
+
+    // Present as keys even when empty, so a reader can tell "nothing ran"
+    // from "this export cannot describe it".
+    expect(Object.keys(bundle)).toEqual(
+      expect.arrayContaining([
+        "browserBinding",
+        "browserBindingState",
+        "browserExecutionTest",
+        "browserExecutionTestState",
+        "valueDomains",
+        "clarifications"
+      ])
+    );
+    expect(bundle.valueDomains?.resolved.stage).toEqual(["Engage", "Complete"]);
+    expect(bundle.valueDomains?.sources.stage).toBe("live-application-state");
+    expect(bundle.browserExecutionTest).toBeNull();
+    expect(bundle.browserExecutionTestState).toBe("none");
+  });
+});
