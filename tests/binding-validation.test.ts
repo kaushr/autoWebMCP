@@ -169,6 +169,11 @@ describe("Salesforce validation stops at the reach gate", () => {
 
     expect(result.status).toBe("requires-setup");
     expect(result.binding).toBeUndefined();
+    expect(result.platformIntelligence?.packId).toBe("salesforce-intelligence-pack");
+    expect(result.platformIntelligence?.knowledgeEntryIds).toEqual([
+      "sf-lds-ui-api-supported",
+      "sf-rest-record-api-supported"
+    ]);
 
     const byName = Object.fromEntries(result.checks.map((check) => [check.name, check.status]));
     expect(byName["Record type observed"]).toBe("pass");

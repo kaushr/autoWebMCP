@@ -1,4 +1,5 @@
 import type { SourceApplication } from "../semantic/model";
+import type { PlatformIntelligenceTrace } from "../platformIntelligence";
 import type { BindingCandidateProposal } from "./model";
 
 /* ------------------------------------------------------------------ *
@@ -66,6 +67,8 @@ export interface BindingValidationResult {
   warnings: string[];
   /** What a human would have to arrange before validation could proceed. */
   requirements: string[];
+  /** Which platform intelligence entries informed the adapter's decision, if any. */
+  platformIntelligence?: PlatformIntelligenceTrace;
   validatedAt: string;
 }
 
