@@ -481,6 +481,7 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
  * — there is no business change here for a person to authorize.
  */
 async function runInspectRequest(request: BrowserBindingInspectRequest): Promise<BrowserBindingInspectResponse> {
+  console.debug("[AutoWebMCP] content: inspecting value domains on", window.location.href);
   try {
     // Bounded on purpose. Left to their defaults these waits add up to
     // roughly twenty seconds — edit-state poll, settle, read, cancel poll,
@@ -494,6 +495,7 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
       reaction: { quietMs: 200, timeoutMs: 1_500 },
       restoreTimeoutMs: 3_000
     });
+    console.debug("[AutoWebMCP] content: inspection finished", inspection);
     return { ok: true, inspection };
   } catch (error) {
     return {

@@ -317,6 +317,7 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
     case "browser-binding:inspect": {
       await loadState();
       const tabId = recordingTabId ?? (await lastKnownTabId());
+      console.debug("[AutoWebMCP] background: inspect request; target tab =", tabId);
       if (tabId === undefined) {
         return {
           ok: false,
@@ -344,6 +345,7 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
           type: "inspect:domains",
           request: message.request
         })) as BrowserBindingInspectResponse | undefined;
+        console.debug("[AutoWebMCP] background: target tab answered", response);
         return (
           response ?? {
             ok: false,

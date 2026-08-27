@@ -3,12 +3,10 @@ import {
   STUDIO_BRIDGE_PROTOCOL,
   STUDIO_BRIDGE_SOURCE,
   type BrowserBindingExecuteResponse,
-  type BrowserBindingInspectResponse,
   type StudioBridgeExecuteRequest,
   type StudioBridgeExecuteResponse,
   type StudioBridgeHelloResponse,
-  type StudioBridgeInspectRequest,
-  type StudioBridgeInspectResponse
+  type StudioBridgeInspectRequest
 } from "./protocol";
 
 /**
@@ -35,6 +33,9 @@ import {
 // Detectable without a round trip: the Studio can tell instantly whether a
 // current bridge is present, rather than inferring it from a timeout.
 document.documentElement.setAttribute(STUDIO_BRIDGE_MARKER, String(STUDIO_BRIDGE_PROTOCOL));
+
+/** Shorter than the Studio's own patience, so the bridge reports first. */
+const BACKGROUND_ANSWER_TIMEOUT_MS = 20_000;
 
 type AnyRequest = Omit<Partial<StudioBridgeExecuteRequest & StudioBridgeInspectRequest>, "kind"> & { kind?: string };
 
@@ -69,19 +70,49 @@ window.addEventListener("message", (event) => {
       post({ requestId, ok: false, reason: "introspection-failed", error: "No binding was supplied." });
       return;
     }
+
+    // A watchdog, because the one failure this path could not report was
+    // silence. `chrome.runtime.sendMessage` neither resolves nor rejects if
+    // the service worker accepts the message and never answers, and the
+    // caller then blames "the extension" without knowing which hop stopped.
+    let answered = false;
+    const watchdog = setTimeout(() => {
+      if (answered) return;
+      answered = true;
+      console.warn("[AutoWebMCP] bridge: the background service worker did not answer the inspect request.");
+      post({
+        requestId,
+        ok: false,
+        reason: "extension-unavailable",
+        error:
+          "The extension's background service worker accepted the request but never answered it. " +
+          "Reload the extension at chrome://extensions, then reload this page."
+      });
+    }, BACKGROUND_ANSWER_TIMEOUT_MS);
+
+    const settle = (payload: Record<string, unknown>): void => {
+      if (answered) return;
+      answered = true;
+      clearTimeout(watchdog);
+      post({ requestId, ...payload });
+    };
+
+    console.debug("[AutoWebMCP] bridge: forwarding inspect request to the service worker.");
     chrome.runtime
       .sendMessage({ type: "browser-binding:inspect", request: { binding } })
       .then((response: unknown) => {
-        const inspection = (response ?? {
-          ok: false,
-          reason: "extension-unavailable",
-          error: "The extension returned no response."
-        }) as BrowserBindingInspectResponse;
-        post({ requestId, ...inspection } satisfies Omit<StudioBridgeInspectResponse, "source" | "direction">);
+        console.debug("[AutoWebMCP] bridge: service worker answered", response);
+        settle(
+          (response ?? {
+            ok: false,
+            reason: "extension-unavailable",
+            error: "The extension's background service worker returned no response."
+          }) as unknown as Record<string, unknown>
+        );
       })
       .catch((error: unknown) => {
-        post({
-          requestId,
+        console.warn("[AutoWebMCP] bridge: service worker call failed", error);
+        settle({
           ok: false,
           reason: "extension-unavailable",
           error: error instanceof Error ? error.message : String(error)
