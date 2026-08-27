@@ -981,7 +981,6 @@ function renderTestControl(field: TestFormField): string {
         // Acquisition runs by itself, so the control reports the state of
         // that work rather than offering the user a job to start.
         const acquiring = isWorking(operations, "acquire-domains");
-        const failure = operations["acquire-domains"]?.status === "failed";
         const why = liveDomainProblems[field.name];
         return `<select data-test-input="${escapeHtml(field.name)}" disabled aria-busy="${acquiring}">
             <option value="">${escapeHtml(acquiring ? "Loading valid choices…" : "Valid values are not known")}</option>
@@ -990,17 +989,12 @@ function renderTestControl(field: TestFormField): string {
             acquiring
               ? `<span class="spinner" aria-hidden="true"></span>${escapeHtml(`Loading valid ${field.label} choices…`)}`
               : escapeHtml(
-                  failure || why
+                  why || operations["acquire-domains"]?.status === "failed"
                     ? `Valid ${field.label} choices could not be determined automatically.` +
                       (why ? ` ${why}` : "")
                     : `${field.label} is a fixed set of choices whose values are not known yet.`
                 )
-          }</small>
-          ${
-            !acquiring && (failure || why)
-              ? `<button type="button" class="secondary" data-acquire-domains="retry">Try again</button>`
-              : ""
-          }`;
+          }</small>`;
       }
       return `<select data-test-input="${escapeHtml(field.name)}">
         <option value="">Choose…</option>
