@@ -24,6 +24,12 @@ export const ATTRIBUTION_WINDOW_MS = 5_000;
 export const BACKGROUND_REPEAT_THRESHOLD = 3;
 /** Two actions closer together than this make attribution by timing ambiguous. */
 export const AMBIGUITY_WINDOW_MS = 400;
+/**
+ * A request that carries an action starts essentially with it. Anything later
+ * is the application reacting — a refresh, a re-render, a related list — and is
+ * kept as nearby activity rather than treated as the mechanism.
+ */
+export const CAUSAL_IMMEDIACY_MS = 250;
 
 export type EvidenceConfidence = "high" | "medium" | "low";
 
@@ -41,6 +47,21 @@ export type EvidenceConfidence = "high" | "medium" | "low";
  * in this engine, which must stay free of any one vendor's specifics.
  */
 export type BindingEligibility = "unresolved";
+
+/**
+ * How seriously a request should be taken as the mechanism of an action.
+ *
+ * `nearby` is the honest default: temporally correlated, retained in full, and
+ * not evidence of anything on its own. A real Salesforce Save produced thirty
+ * requests inside five seconds, all successful POSTs, and only the first was
+ * plausibly the save.
+ *
+ * `causal-candidate` still is not a binding. It is the shortlist a future
+ * binding-discovery step would examine, and it needs strong evidence: a
+ * successful mutation starting essentially with the action, unambiguously
+ * attributed, and not background traffic.
+ */
+export type EvidenceRole = "causal-candidate" | "nearby";
 
 /** One observed request, attributed to the action it followed. */
 export interface NetworkEffect {
@@ -61,6 +82,8 @@ export interface NetworkEffect {
   /** Another action happened just before the one this was attributed to. */
   ambiguousAttribution: boolean;
   confidence: EvidenceConfidence;
+  /** Shortlisted as the possible mechanism, or retained as nearby activity. */
+  role: EvidenceRole;
   /** Why it scored that way, in the order the signals were considered. */
   reasons: string[];
   /**
@@ -78,7 +101,10 @@ export interface ExecutionEvidence {
   actionObservationId: string;
   action: ObservationAction;
   actionLabel?: string;
+  /** Everything correlated, in the order it started. Nothing is discarded. */
   networkEffects: NetworkEffect[];
+  /** Request ids shortlisted as possible mechanisms, earliest first. */
+  causalCandidates: string[];
   applicationEffects: string[];
   confidence: EvidenceConfidence;
 }
@@ -187,6 +213,21 @@ interface Signals {
  * application reaction, is not background chatter, and had no competing action
  * next to it. Anything less is `medium`; anything disqualifying is `low`.
  */
+/**
+ * The stricter gate. Correlation strength answers "is this associated with the
+ * action"; this answers "could this plausibly *be* the action", which on a
+ * framework that tunnels every call through one endpoint is a much narrower
+ * question.
+ */
+function roleFor(request: CaptureNetworkMetadata, signals: Signals): EvidenceRole {
+  if (signals.backgroundLikely) return "nearby";
+  if (signals.ambiguousAttribution) return "nearby";
+  if (request.resourceType !== "xmlhttprequest") return "nearby";
+  if (request.category !== "mutation") return "nearby";
+  if (!request.ok) return "nearby";
+  return signals.startedAfterMs <= CAUSAL_IMMEDIACY_MS ? "causal-candidate" : "nearby";
+}
+
 function scoreRequest(
   request: CaptureNetworkMetadata,
   signals: Signals
@@ -312,6 +353,12 @@ export function correlateExecutionEvidence(
       backgroundLikely,
       ambiguousAttribution,
       confidence: scored.confidence,
+      role: roleFor(request, {
+        startedAfterMs,
+        backgroundLikely,
+        ambiguousAttribution,
+        reactedAfterRequest: false
+      }),
       reasons: scored.reasons,
       bindingEligibility: "unresolved"
     };
@@ -331,6 +378,10 @@ export function correlateExecutionEvidence(
           ? { actionLabel: (action.target ?? action.field?.label) as string }
           : {}),
         networkEffects,
+        causalCandidates: networkEffects
+          .filter((effect) => effect.role === "causal-candidate")
+          .sort((left, right) => left.startedAfterMs - right.startedAfterMs)
+          .map((effect) => effect.requestId),
         applicationEffects: [...(action.effects ?? [])],
         confidence: strongest(networkEffects.map((effect) => effect.confidence))
       };

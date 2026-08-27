@@ -120,6 +120,8 @@ export interface ObservationTrace {
 const SAVE_LABEL = /^(save|submit|update|create|confirm|publish)\b/i;
 /** A click on a submit control and the resulting submit event are one intent. */
 const SUBMIT_COLLAPSE_WINDOW_MS = 400;
+/** One edit inside a nested component fires once per shadow host it crosses. */
+const DUPLICATE_FIELD_WINDOW_MS = 250;
 
 /**
  * Reduces a URL to a path pattern. Identifiers are replaced, query values
@@ -192,6 +194,41 @@ function isSubstantive(observation: NormalizedObservation): boolean {
 }
 
 /**
+ * Collapses the repeats a component library produces for one human edit.
+ *
+ * A change crossing several shadow boundaries is observed once per host, so a
+ * single date selection arrives as two or three identical field changes
+ * milliseconds apart. They describe one thing the human did. The raw events are
+ * untouched on the trace; only the semantic reading is deduplicated, and the
+ * collapsed ids are kept so the evidence still points back at all of them.
+ */
+function collapseDuplicateFieldChanges(observations: NormalizedObservation[]): NormalizedObservation[] {
+  const kept: NormalizedObservation[] = [];
+
+  for (const observation of observations) {
+    const previous = kept[kept.length - 1];
+    const duplicate =
+      observation.action === "field_change" &&
+      previous?.action === "field_change" &&
+      observation.t - previous.t <= DUPLICATE_FIELD_WINDOW_MS &&
+      observation.field?.label === previous.field?.label &&
+      observation.oldValue === previous.oldValue &&
+      observation.newValue === previous.newValue;
+
+    if (!duplicate || !previous) {
+      kept.push(observation);
+      continue;
+    }
+
+    for (const id of observation.sourceEventIds) {
+      if (!previous.sourceEventIds.includes(id)) previous.sourceEventIds.push(id);
+    }
+    for (const effect of observation.effects ?? []) addEffect(previous, effect);
+  }
+  return kept;
+}
+
+/**
  * Clicking a submit control fires both a click and a submit. They describe one
  * human intent, and the click carries the better label, so the submit is
  * folded into it.
@@ -242,7 +279,16 @@ export function normalizeCapture(events: readonly CaptureEvent[]): NormalizedObs
       lastPath = path;
     }
 
-    if (action === "field_change" && event.value && !event.value.masked && event.value.from === event.value.to) {
+    // A no-op edit is dropped, but only when both sides were actually readable.
+    // A control that exposes no value at all still records that a human edited
+    // it; discarding the interaction would destroy evidence rather than noise.
+    if (
+      action === "field_change" &&
+      event.value &&
+      !event.value.masked &&
+      event.value.from !== undefined &&
+      event.value.from === event.value.to
+    ) {
       continue;
     }
 
@@ -298,7 +344,7 @@ export function normalizeCapture(events: readonly CaptureEvent[]): NormalizedObs
     // `execution.ts` instead, against a copy of the same events.
   }
 
-  return collapseSubmits(observations).filter(isSubstantive);
+  return collapseDuplicateFieldChanges(collapseSubmits(observations)).filter(isSubstantive);
 }
 
 export function collectLabels(observations: readonly NormalizedObservation[]): string[] {

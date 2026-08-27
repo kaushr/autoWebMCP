@@ -299,12 +299,18 @@ function renderEvidencePanel(trace: ObservationTrace): string {
   const scored = evidence
     .map(
       (entry) => `<li><strong>${escapeHtml(entry.actionLabel ?? entry.action)}</strong>
+        <small>${(entry.causalCandidates ?? []).length} causal ${
+          (entry.causalCandidates ?? []).length === 1 ? "candidate" : "candidates"
+        } of ${(entry.networkEffects ?? []).length} correlated requests</small>
         <ul class="network-effects">${(entry.networkEffects ?? [])
           .map(
             (effect) => `<li class="effect-${escapeHtml(effect.confidence)}">
               <span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code>
               <em>${effect.failed ? "failed" : String(effect.status)}</em>
               <strong>${escapeHtml(effect.confidence.toUpperCase())}</strong>
+              <small class="role-${escapeHtml(effect.role ?? "nearby")}">${
+                (effect.role ?? "nearby") === "causal-candidate" ? "causal candidate" : "nearby activity"
+              }</small>
               <ul class="reasons">${(effect.reasons ?? [])
                 .map((reason) => `<li>${escapeHtml(reason)}</li>`)
                 .join("")}</ul>
