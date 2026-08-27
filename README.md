@@ -108,6 +108,15 @@ URL to replay. This is evidence about an application's behaviour, never an
 execution binding: nothing here is published to an agent. An application with no
 network traffic, like SignalBase, honestly reports none.
 
+## Admin / Debug
+
+The Studio's collapsed **Admin / Debug** section shows the full pipeline for a
+selected capture — capture stream, normalized trace, execution evidence, and
+every semanticizer run with its instructions, input, raw model response, and
+parsed result kept apart, so a bad model answer and a bad parse look different.
+Runs accumulate rather than overwrite. It reads the pipeline and changes
+nothing; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Verify
 
 ```bash
