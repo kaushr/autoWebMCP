@@ -1,11 +1,26 @@
 import { assertSemanticCapability, type SemanticCapability } from "../semantic/model";
+import type { NormalizedObservation } from "../capture/normalize";
+import type { CapturePlatform } from "../capture/types";
 import type { ObservationEvent } from "./events";
 
-export interface SemanticizationRequest {
+/** Evidence instrumented by the Prospect Intelligence application itself. */
+export interface AppTraceRequest {
+  traceKind?: "app";
   application: "prospect-intelligence";
   trace: readonly ObservationEvent[];
   uiLabels: string[];
 }
+
+/** Evidence captured by the browser extension on an arbitrary application. */
+export interface ExtensionTraceRequest {
+  traceKind: "extension";
+  application: string;
+  platform: CapturePlatform;
+  trace: readonly NormalizedObservation[];
+  uiLabels: string[];
+}
+
+export type SemanticizationRequest = AppTraceRequest | ExtensionTraceRequest;
 
 export interface SemanticizationResponse {
   candidate: SemanticCapability;
@@ -21,8 +36,13 @@ export function parseSemanticizationResponse(value: unknown): SemanticizationRes
   if (!Array.isArray(response.ambiguities) || !response.ambiguities.every((item) => typeof item === "string")) {
     throw new Error("Semanticizer ambiguities must be strings.");
   }
-  assertSemanticCapability(response.candidate);
-  return { candidate: response.candidate, ambiguities: response.ambiguities };
+
+  // A capability taught on an arbitrary application may have no execution
+  // binding yet; the model reports that as an explicit null.
+  const candidate: SemanticCapability = { ...response.candidate };
+  if (!candidate.binding) delete candidate.binding;
+  assertSemanticCapability(candidate);
+  return { candidate, ambiguities: response.ambiguities };
 }
 
 /** Calls a same-origin server endpoint; the browser never receives the API key. */

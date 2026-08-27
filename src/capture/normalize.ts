@@ -99,7 +99,9 @@ export interface ObservationTrace {
   };
 }
 
-const SAVE_LABEL = /^(save|submit|update|apply|create|confirm|publish)\b/i;
+// "Apply" is deliberately absent: it labels filter buttons at least as often
+// as it labels a commit, and misreading a read as a write is the worse error.
+const SAVE_LABEL = /^(save|submit|update|create|confirm|publish)\b/i;
 const NETWORK_CORRELATION_WINDOW_MS = 5_000;
 
 /**

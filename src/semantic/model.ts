@@ -27,9 +27,13 @@ export interface SemanticCapability {
   description: string;
   inputs: CapabilityInput[];
   outputs: CapabilityOutput[];
-  /** An observed or configured existing application execution path. */
+  /**
+   * An observed or configured existing application execution path. Teach Mode
+   * runs against arbitrary applications, so a capability may be confirmed
+   * with no binding at all; discovering one is a separate step.
+   */
   binding?: {
-    application: "prospect-intelligence" | "salesforce";
+    application: string;
     action: string;
   };
   provenance: {

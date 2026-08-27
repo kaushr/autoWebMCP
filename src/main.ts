@@ -4,6 +4,8 @@ import { invokeProspectCapability, prospectCapabilities } from "./prospect/capab
 import { findContacts, getCompany, searchCompanies } from "./prospect/service";
 import { TrainingSession } from "./training/events";
 import { confirmCandidate, semanticizeTrace, type SemanticizationResponse } from "./training/semanticizer";
+import { getTrace, listTraces, type TraceSummary } from "./training/traces";
+import type { ObservationTrace } from "./capture/normalize";
 import { registerCapability } from "./webmcp/compiler";
 import { registerHelloControl } from "./webmcp/hello";
 import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
@@ -33,6 +35,9 @@ const trainingSession = new TrainingSession();
 let candidate: SemanticCapability | undefined;
 let ambiguities: string[] = [];
 let semanticizerStatus = "Demonstrate a session, then request a candidate capability.";
+let extensionTraces: TraceSummary[] = [];
+let selectedTrace: ObservationTrace | undefined;
+let traceStatus = "Record a session with the AutoWebMCP extension, then refresh.";
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -59,6 +64,49 @@ function renderContactCard(contact: Contact): string {
   </button>`;
 }
 
+function describeObservation(observation: ObservationTrace["observations"][number]): string {
+  const parts: string[] = [];
+  if (observation.field?.label) parts.push(escapeHtml(observation.field.label));
+  if (observation.field?.context) parts.push(`in ${escapeHtml(observation.field.context)}`);
+  if (observation.target) parts.push(escapeHtml(observation.target));
+  if (observation.oldValue !== undefined || observation.newValue !== undefined) {
+    parts.push(`<em>${escapeHtml(observation.oldValue ?? "∅")} → ${escapeHtml(observation.newValue ?? "∅")}</em>`);
+  }
+  if (observation.effects?.length) parts.push(`<small>${observation.effects.map(escapeHtml).join(" · ")}</small>`);
+  return parts.join(" ");
+}
+
+function renderExtensionTraces(): string {
+  const list = extensionTraces.length
+    ? extensionTraces
+        .map(
+          (trace) => `<li><button class="trace-option ${trace.sessionId === selectedTrace?.sessionId ? "selected" : ""}" data-trace-id="${escapeHtml(trace.sessionId)}">
+            <strong>${escapeHtml(trace.title ?? trace.application)}</strong>
+            <span>${escapeHtml(trace.platform)} · ${trace.observations} observations</span>
+          </button></li>`
+        )
+        .join("")
+    : "<li class=empty>No extension traces have been handed off yet.</li>";
+
+  const detail = selectedTrace
+    ? `<ol class="event-trace">${selectedTrace.observations
+        .map((observation) => `<li><span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`)
+        .join("")}</ol>
+       <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events and ${selectedTrace.stats.rrwebEvents} rrweb events reduced to ${selectedTrace.observations.length} observations.</p>`
+    : "";
+
+  return `<section class="extension-traces" aria-label="Extension traces">
+    <div class="panel-heading"><div><p class="eyebrow">Browser extension</p><h2>Teach Mode captures</h2></div><span>${extensionTraces.length}</span></div>
+    <ul class="trace-list">${list}</ul>
+    ${detail}
+    <div class="studio-actions">
+      <button id="refresh-traces" class="secondary">Refresh traces</button>
+      <button id="semanticize-extension-trace" ${selectedTrace ? "" : "disabled"}>Propose capability from trace</button>
+      <p class="semanticizer-status">${escapeHtml(traceStatus)}</p>
+    </div>
+  </section>`;
+}
+
 function renderTrainingStudio(): string {
   const events = trainingSession.list();
   const candidateEditor = candidate
@@ -80,6 +128,7 @@ function renderTrainingStudio(): string {
     <div class="studio-heading"><div><p class="eyebrow">Training Studio</p><h2>Teach one session. Publish one capability.</h2><p>Capture normalized evidence from this controlled application; the model proposes meaning, while the compiler produces the tool deterministically.</p></div><a href="/?control=1">Open WebMCP control</a></div>
     <ol class="event-trace">${events.length ? events.map((event) => `<li><span>${event.type}</span><strong>${escapeHtml(event.entity)}</strong> ${escapeHtml(event.target ?? "")} <em>${escapeHtml(event.value ?? "")}</em></li>`).join("") : "<li class=empty>Start by searching, opening a company, filtering contacts, and opening a contact.</li>"}</ol>
     <div class="studio-actions"><button id="semanticize-trace" ${events.length < 2 ? "disabled" : ""}>Propose capability</button><button id="clear-training" class="secondary">Clear session</button><p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p></div>
+    ${renderExtensionTraces()}
     ${candidateEditor}
   </section>`;
 }
@@ -215,6 +264,54 @@ function render(): void {
     render();
   });
 
+  document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", async () => {
+    traceStatus = "Loading extension traces…";
+    render();
+    try {
+      extensionTraces = await listTraces();
+      traceStatus = extensionTraces.length
+        ? "Select a capture to review its normalized evidence."
+        : "No traces yet. Start and stop a training session in the extension.";
+    } catch (error) {
+      traceStatus = error instanceof Error ? error.message : "Could not reach the trace endpoint.";
+    }
+    render();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-trace-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        selectedTrace = await getTrace(button.dataset.traceId ?? "");
+        traceStatus = `Loaded ${selectedTrace.observations.length} observations from ${selectedTrace.application.host}.`;
+      } catch (error) {
+        traceStatus = error instanceof Error ? error.message : "Could not load that trace.";
+      }
+      render();
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#semanticize-extension-trace")?.addEventListener("click", async () => {
+    if (!selectedTrace) return;
+    traceStatus = "Proposing a bounded candidate capability from extension evidence…";
+    render();
+    try {
+      const response = await semanticizeTrace({
+        traceKind: "extension",
+        application: selectedTrace.application.host,
+        platform: selectedTrace.application.platform,
+        trace: selectedTrace.observations,
+        uiLabels: selectedTrace.labels
+      });
+      candidate = response.candidate;
+      ambiguities = response.ambiguities;
+      traceStatus = "Candidate ready for human review.";
+      semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
+    } catch (error) {
+      traceStatus = error instanceof Error ? error.message : "Candidate generation failed.";
+    }
+    render();
+  });
+
   document.querySelector<HTMLFormElement>("#candidate-editor")?.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!candidate) return;
@@ -236,6 +333,15 @@ function render(): void {
   document.querySelector<HTMLButtonElement>("#confirm-capability")?.addEventListener("click", () => {
     if (!candidate) return;
     candidate = confirmCandidate(candidate);
+
+    // A capability taught on another application is confirmed here but has no
+    // execution binding to compile against yet; live execution is a separate milestone.
+    if (candidate.binding?.application !== "prospect-intelligence") {
+      semanticizerStatus = "Capability confirmed. It has no execution binding in this application yet, so it is not published to WebMCP.";
+      render();
+      return;
+    }
+
     const publishResult = registerCapability(candidate, invokeProspectCapability);
     semanticizerStatus = publishResult === "registered" ? "Confirmed capability published to WebMCP." : "Confirmed capability is ready, but WebMCP is unavailable in this browser.";
     render();
