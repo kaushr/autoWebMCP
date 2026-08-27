@@ -8,8 +8,13 @@ agent-ready. SignalBase starts with no agent capabilities at all, and gains one
 only after a human has taught, confirmed, and published it.
 
 ```text
-TEACH → UNDERSTAND → CONFIRM → PUBLISH → USE
+TEACH → UNDERSTAND → CONFIRM → BIND → PUBLISH → USE
 ```
+
+Binding has two halves. A **binding candidate** is proposed from execution
+evidence and platform policy — a lead worth investigating, never permission to
+call anything. An **execution binding** is a validated mechanism a human chose,
+and only that permits publication.
 
 Salesforce remains a documented enterprise/platform constraint and compatibility spike, not a product integration.
 

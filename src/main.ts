@@ -3,6 +3,13 @@ import { confirmCandidate, semanticizeTrace, type SemanticizerRun } from "./trai
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { sourceApplicationFor } from "./training/sourceApplication";
 import {
+  inferBindingCandidate,
+  resetControlPlane,
+  type BindingCandidateRecord,
+  type BindingInferenceRun
+} from "./training/bindingInference";
+import { isInvestigable } from "./binding/model";
+import {
   buildDebugBundle,
   debugBundleFilename,
   serializeDebugBundle,
@@ -49,6 +56,9 @@ let semanticizerRuns: SemanticizerRun[] = [];
 let comparisonTraces: ObservationTrace[] = [];
 let comparisonStatus = "Load the captures to compare what each workflow did.";
 let exportStatus = "";
+let bindingRuns: BindingInferenceRun[] = [];
+let bindingCandidate: BindingCandidateRecord | undefined;
+let bindingStatus = "";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 
@@ -187,6 +197,68 @@ function renderBindingPicker(capability: SemanticCapability): string {
           source?.label ?? "this application"
         )} already performs for this workflow.`
   }</p>`;
+}
+
+/**
+ * The proposal step between confirmation and a binding.
+ *
+ * A candidate is a research lead, never a binding: it does not populate the
+ * execution binding, and Publish stays exactly as gated as before.
+ */
+function renderBindingCandidate(confirmed: boolean, bound: boolean): string {
+  if (!confirmed || bound) return "";
+
+  const record = bindingCandidate;
+  const proposal = record?.proposal;
+  const body = proposal
+    ? `<dl class="capability-state">
+        <div><dt>Binding family</dt><dd>${escapeHtml(proposal.candidate?.bindingFamily ?? "none proposed")}</dd></div>
+        <div><dt>Eligibility</dt><dd>${escapeHtml(proposal.eligibility)}</dd></div>
+        <div><dt>Confidence</dt><dd>${escapeHtml(proposal.confidence)}</dd></div>
+        <div><dt>Direct replay</dt><dd>prohibited</dd></div>
+      </dl>
+      ${
+        proposal.candidate
+          ? `<p class="semanticizer-status">${escapeHtml(proposal.candidate.mechanism)}${
+              proposal.candidate.observedTransport
+                ? ` · observed transport <code>${escapeHtml(proposal.candidate.observedTransport)}</code>`
+                : ""
+            }</p>`
+          : ""
+      }
+      ${proposal.evidence.length ? `<ul class="reasons">${proposal.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
+      ${proposal.warnings.length ? `<p class="ambiguity">${proposal.warnings.map(escapeHtml).join(" · ")}</p>` : ""}
+      ${
+        proposal.validationRequired.length
+          ? `<p class="semanticizer-status">Before this can become a binding: ${proposal.validationRequired
+              .map(escapeHtml)
+              .join("; ")}.</p>`
+          : ""
+      }
+      <p class="semanticizer-status">A candidate is a lead to investigate, not an execution binding.
+        The execution binding stays unset and publication stays blocked.</p>`
+    : "";
+
+  return `<div class="binding-candidate">
+    <p class="eyebrow">Binding candidate</p>
+    ${body}
+    <div class="studio-actions">
+      <button type="button" id="generate-binding" class="secondary">${
+        proposal ? "Regenerate binding candidate" : "Suggest execution binding"
+      }</button>
+      ${
+        proposal && isInvestigable(proposal)
+          ? `<button type="button" id="accept-binding-candidate" class="secondary" ${
+              record?.state === "accepted-for-validation" ? "disabled" : ""
+            }>${record?.state === "accepted-for-validation" ? "Accepted for validation" : "Accept for validation"}</button>
+             <button type="button" id="reject-binding-candidate" class="secondary" ${
+               record?.state === "rejected" ? "disabled" : ""
+             }>${record?.state === "rejected" ? "Rejected" : "Reject"}</button>`
+          : ""
+      }
+      <p class="semanticizer-status">${escapeHtml(bindingStatus)}</p>
+    </div>
+  </div>`;
 }
 
 /** The two questions the lifecycle keeps apart, answered side by side. */
@@ -413,6 +485,8 @@ function currentDebugBundle(): DebugBundle | undefined {
     candidate,
     ambiguities,
     publications,
+    bindingRuns,
+    bindingCandidate,
     exportedAt: new Date().toISOString()
   });
 }
@@ -469,6 +543,63 @@ function renderExportPanel(): string {
        <button id="copy-bundle" class="secondary">Copy JSON</button>
        <p class="semanticizer-status">${escapeHtml(exportStatus)}</p>
      </div>`
+  );
+}
+
+function renderBindingRuns(): string {
+  if (bindingRuns.length === 0) {
+    return panel(
+      "Binding inference runs",
+      bindingCandidate ? "resolved without a model" : "none yet",
+      `<p class="semanticizer-status">${
+        bindingCandidate
+          ? "The strongest evidence was decided deterministically; no model call was needed."
+          : "Confirm a capability and suggest an execution binding to record a run."
+      }</p>`
+    );
+  }
+
+  const runs = bindingRuns
+    .map(
+      (run, index) => `<details class="admin-run">
+        <summary>Run #${index + 1} · <code>${escapeHtml(run.diagnostics.model)}</code> ·
+          ${run.diagnostics.latencyMs}ms · ${run.proposal ? "parsed" : "parse failed"}</summary>
+        <p class="semanticizer-status">run <code>${escapeHtml(run.runId)}</code> ·
+          capability <code>${escapeHtml(run.capabilityId)}</code> ·
+          trace <code>${escapeHtml(run.traceSessionId)}</code> ·
+          prompt <code>${escapeHtml(run.diagnostics.promptVersion)}</code></p>
+        <details class="admin-raw"><summary>Request</summary>${json({
+          model: run.diagnostics.model,
+          parameters: run.diagnostics.parameters,
+          instructions: run.diagnostics.instructions,
+          input: safeJsonParse(run.diagnostics.input)
+        })}</details>
+        <details class="admin-raw"><summary>Raw response</summary><pre class="admin-json">${escapeHtml(
+          run.rawResponse
+        )}</pre></details>
+        <details class="admin-raw"><summary>Parsed result</summary>${
+          run.proposal ? json(run.proposal) : `<p class="ambiguity">${escapeHtml(run.parseError ?? "unknown")}</p>`
+        }</details>
+      </details>`
+    )
+    .join("");
+
+  return panel(
+    "Binding inference runs",
+    `${bindingRuns.length} · candidate ${bindingCandidate?.state ?? "none"}`,
+    `<p class="semanticizer-status">A separate question from semantic inference, asked with its own prompt:
+      given the capability and the strongest evidence, which supported mechanism is worth investigating?</p>${runs}`
+  );
+}
+
+function renderReset(): string {
+  return panel(
+    "Reset",
+    "destructive",
+    `<p class="semanticizer-status">Clears every local Teach Mode trace, inference run, candidate and
+      publication from this control plane. It does not touch the source application, its data, the
+      extension, or any configuration, and everything it drops is already lost on restart.</p>
+     <div class="studio-actions"><button id="reset-control-plane" class="secondary">Clear all traces and artifacts</button></div>`
   );
 }
 
@@ -535,9 +666,9 @@ function renderComparison(): string {
 
 function renderAdminDebug(): string {
   const body = selectedTrace
-    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}`
+    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderBindingRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}${renderReset()}`
     : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
-       ${renderSemanticizerRuns()}${renderExportPanel()}${renderComparison()}`;
+       ${renderSemanticizerRuns()}${renderBindingRuns()}${renderExportPanel()}${renderComparison()}${renderReset()}`;
 
   return `<details class="admin-debug">
     <summary>Admin / Debug</summary>
@@ -562,6 +693,7 @@ function renderTrainingStudio(): string {
           .join("")}</div>
         ${renderBindingPicker(candidate)}
         ${renderCapabilityState(candidate, confirmed, bound)}
+        ${renderBindingCandidate(confirmed, bound)}
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
         <div class="studio-actions">
           <button type="submit">Save candidate edits</button>
@@ -761,6 +893,69 @@ function render(): void {
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
       publishStatus = error instanceof Error ? error.message : "Publishing failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#generate-binding")?.addEventListener("click", async () => {
+    if (!candidate || !selectedTrace) return;
+    bindingStatus = "Proposing a binding candidate from the strongest execution evidence…";
+    render();
+    try {
+      const result = await inferBindingCandidate(candidate, selectedTrace, selectedTrace.observations);
+      if (result.run) bindingRuns = [...bindingRuns, result.run];
+      bindingCandidate = { state: "proposed", proposal: result.proposal };
+      bindingStatus = result.proposal.candidate
+        ? "Candidate proposed. It is a lead to validate, not a binding."
+        : "No safe binding candidate was found from this evidence.";
+    } catch (error) {
+      bindingStatus = error instanceof Error ? error.message : "Binding inference failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#accept-binding-candidate")?.addEventListener("click", () => {
+    if (!bindingCandidate) return;
+    // Recorded only. The execution binding stays unset until a human selects a
+    // validated one, and publication is unchanged.
+    bindingCandidate = { ...bindingCandidate, state: "accepted-for-validation" };
+    bindingStatus = "Accepted for validation. It is still not an execution binding.";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#reject-binding-candidate")?.addEventListener("click", () => {
+    if (!bindingCandidate) return;
+    bindingCandidate = { ...bindingCandidate, state: "rejected" };
+    bindingStatus = "Candidate rejected.";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#reset-control-plane")?.addEventListener("click", async () => {
+    const confirmed = window.confirm(
+      "This clears all local AutoWebMCP Teach Mode traces, inference runs, candidates and publications.\n\n" +
+        "It does not change the source application, its data, the extension, or any configuration."
+    );
+    if (!confirmed) return;
+
+    try {
+      const result = await resetControlPlane();
+      extensionTraces = [];
+      selectedTrace = undefined;
+      comparisonTraces = [];
+      semanticizerRuns = [];
+      bindingRuns = [];
+      bindingCandidate = undefined;
+      candidate = undefined;
+      ambiguities = [];
+      publications = [];
+      exportStatus = "";
+      bindingStatus = "";
+      traceStatus = "Record a session with the Teach Mode extension, then refresh.";
+      semanticizerStatus = "Review the proposed contract, choose an execution binding, then confirm.";
+      publishStatus = "Nothing has been published yet.";
+      comparisonStatus = `Cleared ${result.traces} traces and ${result.publications} publications.`;
+    } catch (error) {
+      comparisonStatus = error instanceof Error ? error.message : "Reset failed.";
     }
     render();
   });
