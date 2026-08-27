@@ -1,9 +1,21 @@
 import { assertSemanticCapability, type SemanticCapability } from "../semantic/model";
+import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
 
-/** One capability a human confirmed and then published to the control plane. */
+/**
+ * One capability a human confirmed and then published to the control plane.
+ *
+ * `executionBinding` is carried alongside, not required by, the publication
+ * gate below: a capability may also reach publication through an advertised
+ * application binding (SignalBase) or an accepted supported-API binding,
+ * neither of which needs this field. When present, it is the accepted
+ * browser execution binding — declarative and safe to serialize, per
+ * `binding/browserExecution/model.ts` — so a runtime invoking this published
+ * tool later can find *how* to perform it without re-deriving anything.
+ */
 export interface PublicationRecord {
   capability: SemanticCapability;
   publishedAt: string;
+  executionBinding?: BrowserExecutionBinding;
 }
 
 /**
@@ -34,7 +46,11 @@ export function parsePublicationRecord(value: unknown): PublicationRecord {
   const record = value as Partial<PublicationRecord>;
   if (typeof record.publishedAt !== "string") throw new Error("Publication timestamp is required.");
   if (!record.capability) throw new Error("Publication capability is required.");
-  return { capability: assertPublishable(record.capability), publishedAt: record.publishedAt };
+  return {
+    capability: assertPublishable(record.capability),
+    publishedAt: record.publishedAt,
+    ...(record.executionBinding ? { executionBinding: record.executionBinding } : {})
+  };
 }
 
 export function parsePublicationList(value: unknown): PublicationRecord[] {
@@ -43,13 +59,16 @@ export function parsePublicationList(value: unknown): PublicationRecord[] {
   return body.publications.map(parsePublicationRecord);
 }
 
-export async function publishCapability(capability: SemanticCapability): Promise<PublicationRecord> {
+export async function publishCapability(
+  capability: SemanticCapability,
+  executionBinding?: BrowserExecutionBinding
+): Promise<PublicationRecord> {
   assertPublishable(capability);
 
   const response = await fetch("/api/capabilities", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ capability })
+    body: JSON.stringify({ capability, ...(executionBinding ? { executionBinding } : {}) })
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };

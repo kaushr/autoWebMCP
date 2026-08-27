@@ -1,5 +1,7 @@
 import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/types";
 import type { ObservationTrace } from "../../src/capture/normalize";
+import type { BrowserExecutionBinding } from "../../src/binding/browserExecution/model";
+import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 
 /** Where the extension hands its normalized trace to the Training Studio. */
 export const DEFAULT_STUDIO_ORIGIN = "http://127.0.0.1:8787";
@@ -33,7 +35,26 @@ export interface SessionStatus {
   hasTrace: boolean;
 }
 
-/** Popup or content script → service worker. */
+/**
+ * A live-DOM execution request: a declarative browser execution binding, the
+ * input values to write, and an explicit confirmation. This is a write
+ * operation on the user's own authenticated session — every hop of this
+ * protocol carries `confirmed: true` literally, never a variable that could
+ * quietly be false, and each handler re-checks it before touching the DOM.
+ */
+export interface BrowserBindingExecuteRequest {
+  binding: BrowserExecutionBinding;
+  inputs: Record<string, string>;
+  confirmed: true;
+}
+
+export interface BrowserBindingExecuteResponse {
+  ok: boolean;
+  result?: ExecutionResult;
+  error?: string;
+}
+
+/** Popup, content script, or the Studio bridge → service worker. */
 export type ToBackgroundMessage =
   | { type: "session:start" }
   | { type: "session:stop" }
@@ -41,12 +62,14 @@ export type ToBackgroundMessage =
   | { type: "session:settings"; settings: Partial<CaptureSettings> }
   | { type: "session:trace" }
   | { type: "capture:context"; sessionId: string; application: CaptureApplicationContext }
-  | { type: "capture:events"; sessionId: string; events: CaptureEvent[]; rrwebEvents: number };
+  | { type: "capture:events"; sessionId: string; events: CaptureEvent[]; rrwebEvents: number }
+  | { type: "browser-binding:execute"; request: BrowserBindingExecuteRequest };
 
 /** Service worker → content script. */
 export type ToContentMessage =
   | { type: "capture:begin"; sessionId: string; startedAt: number; settings: CaptureSettings }
-  | { type: "capture:end" };
+  | { type: "capture:end" }
+  | { type: "execute:run"; request: BrowserBindingExecuteRequest };
 
 export interface CaptureFlush {
   events: CaptureEvent[];
@@ -54,3 +77,30 @@ export interface CaptureFlush {
 }
 
 export type TraceResponse = { trace?: ObservationTrace };
+
+/**
+ * Studio page (`window.postMessage`) ↔ the Studio-bridge content script.
+ * A separate, narrower envelope from the extension's own internal messages:
+ * `window.postMessage` is visible to anything sharing the page, so every
+ * message is tagged and every request carries the `requestId` its response
+ * must echo back — a plain web page has no other way to correlate them.
+ */
+export const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
+
+export interface StudioBridgeExecuteRequest {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "request";
+  requestId: string;
+  binding: BrowserExecutionBinding;
+  inputs: Record<string, string>;
+  confirmed: true;
+}
+
+export interface StudioBridgeExecuteResponse {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "response";
+  requestId: string;
+  ok: boolean;
+  result?: ExecutionResult;
+  error?: string;
+}

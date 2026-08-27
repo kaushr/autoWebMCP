@@ -29,7 +29,11 @@ import {
 } from "./webmcp/publication";
 import { registerHelloControl } from "./webmcp/hello";
 import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
-import type { SemanticCapability } from "./semantic/model";
+import type { CapabilityInputValues, SemanticCapability } from "./semantic/model";
+import { proposeBrowserBinding } from "./binding/browserExecution/propose";
+import { acceptedBrowserBinding, type BrowserBindingCandidateRecord, type BrowserBindingValidationRecord } from "./binding/browserExecution/model";
+import { extensionBridgeExecutionClient } from "./training/browserExecutionClient";
+import { registerCapability } from "./webmcp/compiler";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root not found.");
@@ -38,10 +42,40 @@ const appRoot: HTMLDivElement = app;
 const controlMode = new URLSearchParams(window.location.search).get("control") === "1";
 const captureMode = new URLSearchParams(window.location.search).get("capture") === "1";
 /**
- * The Studio publishes capabilities to the control plane; it never hosts them.
- * The only tool it can register is the browser-support control on `?control=1`.
+ * The Studio publishes capabilities to the control plane; it never hosts them
+ * as a taught application would. `?control=1` is its own local proof surface
+ * instead: once a capability with an accepted browser execution binding is
+ * published, this same document registers it as a real WebMCP tool, whose
+ * `execute` calls through the extension bridge to the live tab — proving the
+ * callable path (`semantic capability → accepted browser execution binding →
+ * browser execution engine → live page`) without needing the taught
+ * application's own origin to host `document.modelContext` itself.
  */
 const registration = controlMode ? registerHelloControl() : document.modelContext ? "available" : "unavailable";
+const browserExecutionRegistered = new Set<string>();
+
+/** A WebMCP tool's inputs arrive untyped; the engine writes strings to the DOM regardless of a field's declared type. */
+function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: CapabilityInputValues): Promise<unknown> {
+  const record = publications.find((entry) => entry.capability.id === subject.id);
+  const executionBinding = record?.executionBinding;
+  if (!executionBinding) {
+    throw new Error(`No accepted browser execution binding is published for "${subject.id}".`);
+  }
+  const stringInputs: Record<string, string> = {};
+  for (const [name, value] of Object.entries(inputs)) stringInputs[name] = value === undefined ? "" : String(value);
+  return extensionBridgeExecutionClient.execute(executionBinding, stringInputs);
+}
+
+/** Registers any published capability this control-mode document has not already exposed. */
+function syncBrowserExecutionRegistrations(): void {
+  if (!controlMode) return;
+  for (const record of publications) {
+    if (!record.executionBinding || browserExecutionRegistered.has(record.capability.id)) continue;
+    if (registerCapability(record.capability, invokeBrowserExecutionBinding) === "registered") {
+      browserExecutionRegistered.add(record.capability.id);
+    }
+  }
+}
 
 const stopCaptureProbe = captureMode ? startRrwebCaptureProbe((snapshot) => {
   const status = document.querySelector("#capture-probe-status");
@@ -65,6 +99,16 @@ let bindingStatus = "";
 let validationRuns: BindingValidationRecord[] = [];
 let validation: BindingValidationRecord | undefined;
 let validationStatus = "";
+/**
+ * The second execution strategy, kept in its own state precisely parallel
+ * to `bindingCandidate`/`validation` above — the two routes never share a
+ * variable, so one can be rejected while the other is accepted without
+ * either overwriting the other's evidence.
+ */
+let browserBindingCandidate: BrowserBindingCandidateRecord | undefined;
+let browserBindingStatus = "";
+let browserBindingValidation: BrowserBindingValidationRecord | undefined;
+let browserValidationStatus = "";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 /**
@@ -112,6 +156,10 @@ function clearExecutionState(): void {
   bindingStatus = "";
   validation = undefined;
   validationStatus = "";
+  browserBindingCandidate = undefined;
+  browserBindingStatus = "";
+  browserBindingValidation = undefined;
+  browserValidationStatus = "";
 }
 
 /**
@@ -367,6 +415,103 @@ function renderValidationStage(view: StudioLifecycleView): string {
           : ""
       }
       <p class="semanticizer-status">${escapeHtml(validationStatus)}</p>
+    </div>
+  </div>`;
+}
+
+/**
+ * The second execution strategy: driving the taught application's own
+ * browser UI rather than calling a supported API. Shown as its own section
+ * so both routes stay honestly visible at once — a Salesforce capability can
+ * sit at "Setup required" on the supported-API route while this one is
+ * "available / testable", and neither display hides the other.
+ */
+function renderBrowserExecutionStage(view: StudioLifecycleView): string {
+  if (view.capability.status !== "confirmed" || view.browserExecution.status === "not-applicable") return "";
+
+  const binding = view.browserExecution.binding;
+  const body = binding
+    ? `<dl class="capability-state">
+        <div><dt>Platform</dt><dd>${escapeHtml(binding.platform)}</dd></div>
+        <div><dt>Record type</dt><dd>${escapeHtml(binding.context.recordType ?? "unspecified")}</dd></div>
+        <div><dt>Commit action</dt><dd>${escapeHtml(binding.commit.semanticAction.label)}</dd></div>
+      </dl>
+      <ul class="reasons">${binding.inputs
+        .map(
+          (input) =>
+            `<li><code>${escapeHtml(input.semanticInput)}</code> → the ${escapeHtml(
+              input.semanticTarget.role
+            )} labelled "${escapeHtml(input.semanticTarget.label)}"${
+              input.semanticTarget.section ? ` in "${escapeHtml(input.semanticTarget.section)}"` : ""
+            }</li>`
+        )
+        .join("")}</ul>
+      <p class="semanticizer-status">Re-resolved from the live page at execution time — never a recorded coordinate,
+        selector, or replay script. Safety: no coordinates, no XPath, no private-transport replay, no credential
+        extraction.</p>
+      ${binding.evidence.length ? `<ul class="reasons">${binding.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}`
+    : view.browserExecution.status === "no-safe-candidate"
+      ? `<p class="semanticizer-status">${escapeHtml(
+          browserBindingCandidate?.proposal.warnings.join(" ") ?? "No safe browser execution path was found from the available evidence."
+        )}</p>`
+      : "";
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Semantic browser execution</p>
+    ${body}
+    <div class="studio-actions">
+      <button type="button" id="suggest-browser-binding" class="secondary">${
+        browserBindingCandidate ? "Suggest again" : "Suggest browser execution"
+      }</button>
+      ${
+        view.browserExecution.canTest
+          ? `<button type="button" id="test-browser-binding">Test browser execution</button>`
+          : ""
+      }
+      ${
+        view.browserExecution.status === "proposed" && view.browserExecution.canReject
+          ? `<button type="button" id="reject-browser-binding" class="secondary">Reject this suggestion</button>`
+          : ""
+      }
+      <p class="semanticizer-status">${escapeHtml(browserBindingStatus)}</p>
+    </div>
+  </div>`;
+}
+
+/**
+ * The browser route's own validation summary — a test result, not a
+ * supported-interface proof, so its language stays "tested" and "verified"
+ * rather than "validated" against a documented interface.
+ */
+function renderBrowserValidationStage(view: StudioLifecycleView): string {
+  // Nothing to show before a test has actually run — the browser-execution
+  // section above already carries the "not tested yet" state via its own
+  // Test/Suggest actions, so an empty result section here would just repeat
+  // that with no new information.
+  const result = browserBindingValidation?.result;
+  if (!result) return "";
+
+  const checks = `<ul class="reasons">${result.checks
+    .map(
+      (check) =>
+        `<li class="check-${escapeHtml(check.status)}"><strong>${escapeHtml(
+          check.status.toUpperCase()
+        )}</strong> ${escapeHtml(check.name)} — ${escapeHtml(check.detail)}</li>`
+    )
+    .join("")}</ul>
+    ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}`;
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Browser execution test result</p>
+    <p class="semanticizer-status">${escapeHtml(view.browserValidation.label)}</p>
+    ${checks}
+    <div class="studio-actions">
+      ${
+        view.browserValidation.canAccept
+          ? `<button type="button" id="accept-browser-binding">Accept execution binding</button>`
+          : ""
+      }
+      <p class="semanticizer-status">${escapeHtml(browserValidationStatus)}</p>
     </div>
   </div>`;
 }
@@ -847,6 +992,8 @@ function renderTrainingStudio(): string {
           advertisedBound,
           bindingCandidate,
           validation,
+          browserBindingCandidate,
+          browserBindingValidation,
           published
         });
 
@@ -868,6 +1015,8 @@ function renderTrainingStudio(): string {
         </div>
         ${renderExecutionStage(capability, view)}
         ${renderValidationStage(view)}
+        ${renderBrowserExecutionStage(view)}
+        ${renderBrowserValidationStage(view)}
         ${renderPublicationStage(view)}
       </form>`;
       })()
@@ -1070,8 +1219,9 @@ function render(): void {
     connectionIssue = undefined;
     render();
     try {
-      const record = await publishCapability(candidate);
+      const record = await publishCapability(candidate, acceptedBrowserBinding(browserBindingValidation));
       publications = await listPublishedCapabilities();
+      syncBrowserExecutionRegistrations();
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
       publishStatus = describeActionFailure("Publishing", error);
@@ -1142,9 +1292,16 @@ function render(): void {
   });
 
   document.querySelector<HTMLButtonElement>("#accept-binding")?.addEventListener("click", () => {
-    if (!validation?.result.binding) return;
+    if (!candidate || !validation?.result.binding) return;
+    const operation = validation.result.binding.operation;
     // Technical proof and product approval are different decisions.
     validation = { ...validation, state: "accepted" };
+    // Publication's gate reads `capability.binding`, the same field the
+    // SignalBase picker below sets — an accepted binding from this route
+    // must populate it too, or the button this unlocks would fail the
+    // moment it were clicked.
+    const source = candidate.provenance.sourceApplication;
+    if (source) candidate = { ...candidate, binding: { application: source.id, action: operation || candidate.id } };
     validationStatus = "Execution binding accepted. Publication is now unblocked.";
     render();
   });
@@ -1157,6 +1314,86 @@ function render(): void {
     validation = undefined;
     validationStatus = "";
     bindingStatus = "Suggestion rejected. Suggest another execution path, or select one manually below.";
+    render();
+  });
+
+  // Deterministic — built entirely from evidence the capture already
+  // recorded, the same evidence `fieldMapping.ts` reads. No model call, so
+  // there is nothing to wait on and nothing that can time out here.
+  document.querySelector<HTMLButtonElement>("#suggest-browser-binding")?.addEventListener("click", () => {
+    if (!candidate || !selectedTrace) return;
+    browserBindingValidation = undefined;
+    browserValidationStatus = "";
+    const proposal = proposeBrowserBinding(candidate, selectedTrace);
+    browserBindingCandidate = { state: "proposed", proposal };
+    browserBindingStatus = proposal.binding
+      ? "Browser execution path suggested from the captured evidence. Test it before accepting."
+      : `No safe browser execution path was found: ${proposal.warnings.join(" ")}`;
+    render();
+  });
+
+  // A real write against the live page: gathers the values to test with,
+  // requires an explicit confirmation beyond the click itself, then runs the
+  // engine through the Teach Mode extension's live tab access.
+  document.querySelector<HTMLButtonElement>("#test-browser-binding")?.addEventListener("click", async () => {
+    const binding = browserBindingCandidate?.proposal.binding;
+    if (!candidate || !binding) return;
+
+    const inputs: Record<string, string> = {};
+    for (const input of binding.inputs) {
+      const value = window.prompt(
+        `Test value for "${input.semanticTarget.label}" (${input.semanticInput}):`
+      );
+      if (value === null) {
+        browserValidationStatus = "Test cancelled.";
+        render();
+        return;
+      }
+      inputs[input.semanticInput] = value;
+    }
+
+    const confirmed = window.confirm(
+      "This performs a real write through the application's own browser UI, in the tab this workflow was taught " +
+        "on, and clicks its commit action.\n\nOnly proceed if you intend to make this change."
+    );
+    if (!confirmed) {
+      browserValidationStatus = "Test cancelled.";
+      render();
+      return;
+    }
+
+    browserValidationStatus = "Testing browser execution — writing through the live page…";
+    connectionIssue = undefined;
+    render();
+    try {
+      const result = await extensionBridgeExecutionClient.execute(binding, inputs);
+      browserBindingCandidate = browserBindingCandidate ? { ...browserBindingCandidate, state: "tested" } : undefined;
+      browserBindingValidation = { state: "tested", binding, result };
+      browserValidationStatus = `Test finished: ${result.status}.`;
+    } catch (error) {
+      browserValidationStatus = error instanceof Error ? error.message : "Browser execution test failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#accept-browser-binding")?.addEventListener("click", () => {
+    if (!candidate || !browserBindingValidation) return;
+    // Technical proof and product approval are different decisions, the same
+    // rule the supported-API route follows above.
+    browserBindingValidation = { ...browserBindingValidation, state: "accepted" };
+    if (browserBindingCandidate) browserBindingCandidate = { ...browserBindingCandidate, state: "accepted" };
+    const source = candidate.provenance.sourceApplication;
+    if (source) candidate = { ...candidate, binding: { application: source.id, action: candidate.id } };
+    browserValidationStatus = "Execution binding accepted. Publication is now unblocked.";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#reject-browser-binding")?.addEventListener("click", () => {
+    if (!browserBindingCandidate) return;
+    browserBindingCandidate = { ...browserBindingCandidate, state: "rejected" };
+    browserBindingValidation = undefined;
+    browserValidationStatus = "";
+    browserBindingStatus = "Suggestion rejected.";
     render();
   });
 
@@ -1242,6 +1479,7 @@ function render(): void {
     try {
       publications = await listPublishedCapabilities();
       publishStatus = publications.length ? "Published capabilities loaded." : "Nothing has been published yet.";
+      syncBrowserExecutionRegistrations();
     } catch (error) {
       publishStatus = describeActionFailure("Refreshing publications", error);
     }
@@ -1267,6 +1505,7 @@ void listPublishedCapabilities()
   .then((records) => {
     publications = records;
     if (records.length) publishStatus = "Published capabilities loaded.";
+    syncBrowserExecutionRegistrations();
     render();
   })
   .catch((error) => {

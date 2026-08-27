@@ -14,7 +14,8 @@ const outDir = join(root, "dist-extension");
 const entries = [
   { entry: "extension/src/background.ts", file: "background.js", name: "AutoWebMcpBackground" },
   { entry: "extension/src/content.ts", file: "content.js", name: "AutoWebMcpContent" },
-  { entry: "extension/src/popup.ts", file: "popup.js", name: "AutoWebMcpPopup" }
+  { entry: "extension/src/popup.ts", file: "popup.js", name: "AutoWebMcpPopup" },
+  { entry: "extension/src/studioBridge.ts", file: "studioBridge.js", name: "AutoWebMcpStudioBridge" }
 ];
 
 await rm(outDir, { recursive: true, force: true });

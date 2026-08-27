@@ -221,7 +221,16 @@ async function publishCapability(request, response) {
     return;
   }
 
-  const record = { capability, publishedAt: new Date().toISOString() };
+  // Carried alongside, not required by, the gate above: a browser execution
+  // binding is declarative metadata a later invoker can use to find *how* to
+  // perform the capability, the same idea `binding/browserExecution/model.ts`
+  // documents on the client side. Passthrough only — this server does not
+  // interpret it.
+  const record = {
+    capability,
+    publishedAt: new Date().toISOString(),
+    ...(body?.executionBinding ? { executionBinding: body.executionBinding } : {})
+  };
   publications.set(capability.id, record);
   console.log(`published capability ${capability.id}`);
   send(response, 201, record, corsHeaders(request));

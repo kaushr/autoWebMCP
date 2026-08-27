@@ -9,6 +9,13 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1:5173/*", "http://127.0.0.1:8787/*"],
+      "js": ["studioBridge.js"],
+      "run_at": "document_start"
+    }
+  ],
   "action": {
     "default_title": "AutoWebMCP — not recording",
     "default_popup": "popup.html"

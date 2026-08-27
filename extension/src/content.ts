@@ -15,7 +15,15 @@ import type {
   CaptureReaction,
   SafeElementContext
 } from "../../src/capture/types";
-import type { CaptureFlush, CaptureSettings, ToContentMessage } from "./protocol";
+import type {
+  BrowserBindingExecuteRequest,
+  BrowserBindingExecuteResponse,
+  CaptureFlush,
+  CaptureSettings,
+  ToContentMessage
+} from "./protocol";
+import { executeConfirmed } from "../../src/binding/browserExecution/execute";
+import { resolverAdapterForPlatform } from "../../src/binding/browserExecution/adapters";
 
 /**
  * Teach Mode sensor.
@@ -429,6 +437,31 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   };
 }
 
+/**
+ * Runs one browser execution binding against this tab's live DOM. The
+ * confirmation is re-checked here, at the boundary that actually touches the
+ * page, rather than trusted from the message that carried it — the same
+ * defense `executeConfirmed` itself applies, kept even though the sender
+ * (the Studio-bridge) already required it once.
+ */
+async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise<BrowserBindingExecuteResponse> {
+  if (request.confirmed !== true) {
+    return { ok: false, error: "Execution refused: no explicit confirmation was supplied." };
+  }
+  try {
+    const result = await executeConfirmed({
+      root: document,
+      binding: request.binding,
+      inputs: request.inputs,
+      adapter: resolverAdapterForPlatform(request.binding.platform),
+      confirmed: true
+    });
+    return { ok: true, result };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const request = message as ToContentMessage;
   if (request.type === "capture:begin") {
@@ -441,6 +474,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const flush = window.__autoWebMcpCapture?.stop();
     window.__autoWebMcpCapture = undefined;
     sendResponse(flush ?? { events: [], rrwebEvents: 0 });
+    return true;
+  }
+  if (request.type === "execute:run") {
+    void runExecuteRequest(request.request).then(sendResponse);
     return true;
   }
   return undefined;

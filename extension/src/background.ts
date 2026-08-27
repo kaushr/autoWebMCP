@@ -4,6 +4,7 @@ import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/
 import {
   DEFAULT_SETTINGS,
   DEFAULT_STUDIO_ORIGIN,
+  type BrowserBindingExecuteResponse,
   type CaptureSettings,
   type HandoffResult,
   type SessionStatus,
@@ -21,6 +22,14 @@ import {
 
 const SESSION_KEY = "autowebmcp.session";
 const TAB_KEY = "autowebmcp.tabId";
+/**
+ * Distinct from `TAB_KEY`: that one is cleared the moment recording stops,
+ * because `recordingTabId` means "actively observing this tab". Testing or
+ * executing a browser binding happens afterward, back in the Studio, with
+ * recording long since stopped — this key is the one thing that survives
+ * that stop, so execution still has a tab to reach.
+ */
+const LAST_TAB_KEY = "autowebmcp.lastTabId";
 const TRACE_KEY = "autowebmcp.lastTrace";
 const HANDOFF_KEY = "autowebmcp.lastHandoff";
 const SETTINGS_KEY = "autowebmcp.settings";
@@ -57,6 +66,15 @@ async function getSettings(): Promise<CaptureSettings> {
 async function getStudioOrigin(): Promise<string> {
   const stored = await chrome.storage.local.get(STUDIO_KEY);
   return (stored[STUDIO_KEY] as string | undefined) ?? DEFAULT_STUDIO_ORIGIN;
+}
+
+async function rememberLastTab(tabId: number): Promise<void> {
+  await chrome.storage.session.set({ [LAST_TAB_KEY]: tabId });
+}
+
+async function lastKnownTabId(): Promise<number | undefined> {
+  const stored = await chrome.storage.session.get(LAST_TAB_KEY);
+  return stored[LAST_TAB_KEY] as number | undefined;
 }
 
 function newSessionId(): string {
@@ -179,6 +197,7 @@ async function startSession(): Promise<SessionStatus> {
 
   session = new CaptureSession(newSessionId(), Date.now(), applicationFromTab(tab));
   recordingTabId = tab.id;
+  await rememberLastTab(tab.id);
   attachNetworkObserver();
   await chrome.storage.local.remove(HANDOFF_KEY);
   await persistState();
@@ -293,6 +312,31 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       await persistState();
       return { ok: true, captureEvents: session.count() };
     }
+    case "browser-binding:execute": {
+      await loadState();
+      const tabId = recordingTabId ?? (await lastKnownTabId());
+      if (tabId === undefined) {
+        return {
+          ok: false,
+          error: "No target tab is known. Start a Teach Mode session on the target application first, then try again."
+        } satisfies BrowserBindingExecuteResponse;
+      }
+      try {
+        // Idempotent: content.js declines to attach a second capture probe
+        // if one is already present, and the execute handler here has no
+        // session state to duplicate.
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+        return (await chrome.tabs.sendMessage(tabId, {
+          type: "execute:run",
+          request: message.request
+        })) as BrowserBindingExecuteResponse;
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        } satisfies BrowserBindingExecuteResponse;
+      }
+    }
     default:
       return { ok: false };
   }
@@ -314,6 +358,9 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabId === recordingTabId) void stopSession();
+  void lastKnownTabId().then((last) => {
+    if (last === tabId) void chrome.storage.session.remove(LAST_TAB_KEY);
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => void setBadge(false));

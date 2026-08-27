@@ -21,6 +21,15 @@ from inside a platform may be unreachable from a browser extension — so
 `requires-setup` is a first-class outcome rather than a failure. Designed in
 [docs/BINDING_VALIDATION.md](docs/BINDING_VALIDATION.md).
 
+A capability can have **two independent execution strategies**, and the
+Studio shows both honestly: a supported application API, validated the same
+way as above, and **semantic browser execution** — driving the taught
+application's own browser UI, with every target re-resolved from a live
+label/role/accessible-name search at execution time, never a recorded
+coordinate, selector, or replay script. Either route accepted is enough to
+publish; neither weakens the other's requirements. See
+[docs/BINDING_VALIDATION.md](docs/BINDING_VALIDATION.md#browser-semantic-execution--implemented-v01).
+
 **Platform Intelligence** is the pack-backed architecture layer for reusable
 platform behaviour: how Lightning retargets events, which interfaces are
 supported, what must never be replayed. V0.1 is implemented as a hand-authored,
@@ -28,7 +37,13 @@ versioned Salesforce Intelligence Pack consumed by the binding policy provider.
 RAG, documentation crawling, and pack compilation remain deferred; see
 [docs/PLATFORM_INTELLIGENCE.md](docs/PLATFORM_INTELLIGENCE.md).
 
-Salesforce remains a documented enterprise/platform constraint and compatibility spike, not a product integration.
+Salesforce remains a documented enterprise/platform constraint and
+compatibility spike, not a product integration — no OAuth, no Salesforce-hosted
+code, no session-token extraction, and the private Aura transport stays
+prohibited. What has changed: one real, taught Salesforce workflow (updating
+an Opportunity's Close Date) can now execute through Salesforce's own browser
+UI, semantically re-resolved and read back where Lightning allows it, as a
+bounded experiment — not a general Salesforce integration.
 
 ## Run locally
 

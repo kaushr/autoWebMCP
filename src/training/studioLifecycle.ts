@@ -1,5 +1,12 @@
 import { isInvestigable, type BindingCandidateProposal } from "../binding/model";
 import { acceptedBinding, type BindingValidationRecord } from "../binding/validation";
+import {
+  acceptedBrowserBinding,
+  type BrowserBindingCandidateRecord,
+  type BrowserBindingValidationRecord,
+  type BrowserExecutionBinding
+} from "../binding/browserExecution/model";
+import type { ExecutionOutcomeStatus } from "../binding/browserExecution/result";
 import type { SemanticCapability } from "../semantic/model";
 import type { BindingCandidateRecord } from "./bindingInference";
 
@@ -72,6 +79,43 @@ export interface ValidationStageView {
   accepted: boolean;
 }
 
+/**
+ * The second execution strategy: driving the application's own browser UI
+ * rather than calling a supported API. Kept as its own stage, never merged
+ * into `ExecutionStageView` — a capability can have a candidate on one
+ * strategy, a rejection on the other, and the two must stay legible
+ * separately. See docs/BINDING_VALIDATION.md for why both are legitimate at
+ * once.
+ */
+export type BrowserExecutionStageStatus =
+  | "not-applicable"
+  | "not-analyzed"
+  | "proposed"
+  | "no-safe-candidate"
+  | "rejected";
+
+export interface BrowserExecutionStageView {
+  status: BrowserExecutionStageStatus;
+  label: string;
+  binding?: BrowserExecutionBinding;
+  /** Show "Suggest browser execution". */
+  canPropose: boolean;
+  /** Show "Test browser execution". */
+  canTest: boolean;
+  /** Show "Reject this suggestion". */
+  canReject: boolean;
+}
+
+export type BrowserValidationStageStatus = "not-applicable" | "not-started" | ExecutionOutcomeStatus;
+
+export interface BrowserValidationStageView {
+  status: BrowserValidationStageStatus;
+  label: string;
+  /** Show "Accept execution binding". Only true once a test has actually run to a usable outcome. */
+  canAccept: boolean;
+  accepted: boolean;
+}
+
 export interface PublicationStageView {
   status: PublicationStageStatus;
   label: string;
@@ -84,6 +128,8 @@ export interface StudioLifecycleView {
   capability: CapabilityStageView;
   execution: ExecutionStageView;
   validation: ValidationStageView;
+  browserExecution: BrowserExecutionStageView;
+  browserValidation: BrowserValidationStageView;
   publication: PublicationStageView;
 }
 
@@ -93,6 +139,9 @@ export interface StudioLifecycleInput {
   advertisedBound: boolean;
   bindingCandidate: BindingCandidateRecord | undefined;
   validation: BindingValidationRecord | undefined;
+  /** The second execution strategy's candidate, independent of `bindingCandidate` above. */
+  browserBindingCandidate?: BrowserBindingCandidateRecord;
+  browserBindingValidation?: BrowserBindingValidationRecord;
   /** Whether this exact capability id is already in the control plane's publications. */
   published: boolean;
 }
@@ -172,11 +221,71 @@ function validationStage(
   };
 }
 
+function browserExecutionStage(
+  advertisedBound: boolean,
+  browserBindingCandidate: BrowserBindingCandidateRecord | undefined
+): BrowserExecutionStageView {
+  if (advertisedBound) {
+    return { status: "not-applicable", label: "Not required for this application", canPropose: false, canTest: false, canReject: false };
+  }
+  if (!browserBindingCandidate) {
+    return { status: "not-analyzed", label: "Not analyzed yet", canPropose: true, canTest: false, canReject: false };
+  }
+  if (browserBindingCandidate.state === "rejected") {
+    return { status: "rejected", label: "Suggestion rejected", canPropose: true, canTest: false, canReject: false };
+  }
+  if (!browserBindingCandidate.proposal.binding) {
+    return { status: "no-safe-candidate", label: "No safe browser execution path identified", canPropose: true, canTest: false, canReject: false };
+  }
+  return {
+    status: "proposed",
+    label: "Browser execution path suggested",
+    binding: browserBindingCandidate.proposal.binding,
+    canPropose: true,
+    canTest: true,
+    canReject: true
+  };
+}
+
+const BROWSER_VALIDATION_LABEL: Record<ExecutionOutcomeStatus, string> = {
+  succeeded: "Validated",
+  partially_verified: "Save succeeded — value read-back unavailable",
+  failed: "Failed",
+  blocked: "Blocked before writing anything"
+};
+
+function browserValidationStage(
+  advertisedBound: boolean,
+  browserBindingValidation: BrowserBindingValidationRecord | undefined
+): BrowserValidationStageView {
+  if (advertisedBound) {
+    return { status: "not-applicable", label: "Not required for this execution path", canAccept: false, accepted: false };
+  }
+  if (!browserBindingValidation) {
+    return { status: "not-started", label: "Not started", canAccept: false, accepted: false };
+  }
+
+  const { result, state } = browserBindingValidation;
+  // A binding is offerable for acceptance once it is at least proven safe to
+  // use — `succeeded` or `partially_verified` (a save that genuinely
+  // completed but could not be read back). `failed` and `blocked` never are.
+  const usable = result.status === "succeeded" || result.status === "partially_verified";
+
+  return {
+    status: result.status,
+    label: BROWSER_VALIDATION_LABEL[result.status],
+    canAccept: usable && state !== "accepted",
+    accepted: state === "accepted"
+  };
+}
+
 function publicationStage(
   capability: SemanticCapability,
   bound: boolean,
   bindingCandidate: BindingCandidateRecord | undefined,
   validation: BindingValidationRecord | undefined,
+  browserBindingCandidate: BrowserBindingCandidateRecord | undefined,
+  browserBindingValidation: BrowserBindingValidationRecord | undefined,
   published: boolean
 ): PublicationStageView {
   const confirmed = capability.provenance.confirmedByHuman;
@@ -192,10 +301,32 @@ function publicationStage(
   }
 
   // Confirmed, but not bound: say precisely which step is outstanding rather
-  // than a single generic "no binding" message.
+  // than a single generic "no binding" message. The browser-execution route
+  // takes priority here when it is the one actually offering a next step —
+  // most capabilities that land on `requires-setup` for the supported-API
+  // route will never move past it, so leading with that discouraging
+  // message while a validated browser binding sits ready to accept would
+  // bury the real path forward.
+  if (
+    browserBindingValidation &&
+    (browserBindingValidation.result.status === "succeeded" ||
+      browserBindingValidation.result.status === "partially_verified") &&
+    browserBindingValidation.state !== "accepted"
+  ) {
+    return {
+      status: "blocked",
+      label: "Blocked",
+      reason: "A validated browser execution path is ready — accept it to publish.",
+      canPublish: false
+    };
+  }
+
   let reason: string;
   if (!bindingCandidate) {
-    reason = "No execution path has been identified yet. Suggest one to continue.";
+    reason =
+      browserBindingCandidate?.proposal.binding && browserBindingCandidate.state !== "rejected"
+        ? "A browser execution path has been suggested — test it to continue."
+        : "No execution path has been identified yet. Suggest one to continue.";
   } else if (bindingCandidate.state === "rejected") {
     reason = "The suggested execution path was rejected.";
   } else if (!bindingCandidate.proposal.candidate) {
@@ -223,8 +354,21 @@ function publicationStage(
  * here mutates state or performs I/O.
  */
 export function deriveStudioLifecycle(input: StudioLifecycleInput): StudioLifecycleView {
-  const { capability, advertisedBound, bindingCandidate, validation, published } = input;
-  const bound = advertisedBound || Boolean(acceptedBinding(validation));
+  const {
+    capability,
+    advertisedBound,
+    bindingCandidate,
+    validation,
+    browserBindingCandidate,
+    browserBindingValidation,
+    published
+  } = input;
+  // Two independent routes to a binding, either sufficient on its own: a
+  // supported application API the runtime can prove and accept, or a
+  // semantic browser execution binding tested and accepted through the
+  // application's own UI. Neither weakens the other's requirements.
+  const bound =
+    advertisedBound || Boolean(acceptedBinding(validation)) || Boolean(acceptedBrowserBinding(browserBindingValidation));
 
   return {
     capability: {
@@ -233,6 +377,16 @@ export function deriveStudioLifecycle(input: StudioLifecycleInput): StudioLifecy
     },
     execution: executionStage(advertisedBound, bindingCandidate),
     validation: validationStage(advertisedBound, validation),
-    publication: publicationStage(capability, bound, bindingCandidate, validation, published)
+    browserExecution: browserExecutionStage(advertisedBound, browserBindingCandidate),
+    browserValidation: browserValidationStage(advertisedBound, browserBindingValidation),
+    publication: publicationStage(
+      capability,
+      bound,
+      bindingCandidate,
+      validation,
+      browserBindingCandidate,
+      browserBindingValidation,
+      published
+    )
   };
 }
