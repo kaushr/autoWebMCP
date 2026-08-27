@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AutoWebMCP Teach Mode</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --ink: #10151c;
+        --muted: #5b6672;
+        --line: #d9dee5;
+        --accent: #1b4dd8;
+        --rec: #c2261a;
+        --surface: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ink: #e8ecf1;
+          --muted: #9aa5b1;
+          --line: #2b323b;
+          --accent: #7ea1ff;
+          --surface: #161b22;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 16px;
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        color: var(--ink);
+        background: var(--surface);
+      }
+      h1 { font-size: 14px; margin: 0 0 2px; letter-spacing: -0.01em; }
+      p { margin: 0; }
+      .eyebrow { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .state { display: flex; align-items: center; gap: 8px; margin: 14px 0 10px; font-weight: 600; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+      .recording .dot { background: var(--rec); animation: pulse 1.4s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: 0.25; } }
+      dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 12px; font-size: 12px; }
+      dt { color: var(--muted); }
+      dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+      .actions { display: flex; gap: 8px; margin-bottom: 12px; }
+      button {
+        flex: 1; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--accent);
+        background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+      }
+      button.secondary { background: transparent; color: var(--accent); }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      label.toggle { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--muted); }
+      label.toggle input { margin-top: 2px; }
+      .notice { margin-top: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+      .notice.error { border-color: var(--rec); }
+      footer { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; color: var(--muted); font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <p class="eyebrow">AutoWebMCP</p>
+    <h1>Teach Mode</h1>
+    <p class="eyebrow" id="platform">Not recording</p>
+
+    <div class="state" id="state"><span class="dot"></span><span id="state-text">Idle</span></div>
+
+    <dl>
+      <dt>Application</dt><dd id="application">—</dd>
+      <dt>Observations captured</dt><dd id="events">0</dd>
+      <dt>Session</dt><dd id="session">—</dd>
+    </dl>
+
+    <div class="actions">
+      <button id="start">Start training</button>
+      <button id="stop" class="secondary" disabled>Stop training</button>
+    </div>
+
+    <label class="toggle">
+      <input type="checkbox" id="capture-values" />
+      <span>Capture ordinary field values. Passwords, contact, and payment fields are always masked.</span>
+    </label>
+
+    <div class="notice" id="notice" hidden></div>
+    <button id="copy" class="secondary" style="margin-top: 12px" disabled>Copy last trace JSON</button>
+
+    <footer>Capture runs only between start and stop, on this tab. Raw recording stays in the page.</footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

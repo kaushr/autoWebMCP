@@ -1,0 +1,339 @@
+import { record } from "@rrweb/record";
+import { controlKindFor, detectPlatform, safeValueChange, type FieldDescriptor } from "../../src/capture/policy";
+import type {
+  CaptureApplicationContext,
+  CaptureEvent,
+  CaptureEventKind,
+  CaptureFieldContext,
+  CapturePageContext,
+  CaptureReaction,
+  SafeElementContext
+} from "../../src/capture/types";
+import type { CaptureFlush, CaptureSettings, ToContentMessage } from "./protocol";
+
+/**
+ * Teach Mode sensor.
+ *
+ * rrweb records the page as the raw substrate, but its events never leave
+ * this script: only a count, and derived "did the application react" signal,
+ * cross the boundary. Everything sent to the service worker is safe element
+ * and value metadata produced by the shared capture policy.
+ *
+ * This is deliberately not a recorder for replay: no selectors, coordinates,
+ * or key sequences are captured.
+ */
+
+declare global {
+  interface Window {
+    __autoWebMcpCapture?: { stop: () => CaptureFlush };
+  }
+}
+
+const FLUSH_INTERVAL_MS = 800;
+const REACTION_WINDOW_MS = 1_200;
+const NAVIGATION_POLL_MS = 400;
+const MAX_LABEL_LENGTH = 80;
+
+const ACTIONABLE =
+  "button, a[href], [role=button], [role=link], [role=option], [role=menuitem], [role=tab], [role=checkbox], [role=switch], input[type=submit], input[type=button], summary, label";
+
+const SECTION =
+  "[role=dialog], [role=region], [role=tabpanel], form, fieldset, section, article, .slds-card, .slds-form-element__group, .panel";
+
+const HEADING = "[role=heading], h1, h2, h3, h4, h5, h6, legend, .slds-card__header-title, .panel-heading h2";
+
+const VALIDATION = '[role=alert], [aria-invalid="true"], .slds-has-error, .error, .invalid-feedback';
+const DIALOG = '[role=dialog], [aria-modal="true"], dialog[open]';
+const TOAST = "[role=status], .slds-notify, .toast, .snackbar";
+const FIELDS = "input, select, textarea, [role=combobox], [contenteditable=true]";
+
+function newId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function compact(value: string | null | undefined): string | undefined {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length > MAX_LABEL_LENGTH ? `${normalized.slice(0, MAX_LABEL_LENGTH)}…` : normalized;
+}
+
+function page(): CapturePageContext {
+  return {
+    host: location.host,
+    path: location.pathname,
+    ...(compact(document.title) ? { title: compact(document.title)! } : {})
+  };
+}
+
+/* --------------------------- page semantics -------------------------- */
+
+function labelledByText(element: Element): string | undefined {
+  const ids = element.getAttribute("aria-labelledby")?.split(/\s+/) ?? [];
+  const text = ids
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+  return compact(text);
+}
+
+function accessibleLabel(element: Element): string | undefined {
+  const explicitId = element.getAttribute("id");
+  const forLabel = explicitId ? document.querySelector(`label[for="${CSS.escape(explicitId)}"]`) : null;
+
+  return (
+    compact(element.getAttribute("aria-label")) ??
+    labelledByText(element) ??
+    compact(forLabel?.textContent) ??
+    compact(element.closest("label")?.textContent) ??
+    compact(element.closest(".slds-form-element")?.querySelector(".slds-form-element__label")?.textContent) ??
+    compact(element.getAttribute("placeholder")) ??
+    compact(element.getAttribute("title")) ??
+    compact(element.textContent) ??
+    compact(element.getAttribute("name"))
+  );
+}
+
+function sectionContext(element: Element): string | undefined {
+  const section = element.closest(SECTION);
+  if (!section) return undefined;
+  return compact(section.querySelector(HEADING)?.textContent) ?? compact(section.getAttribute("aria-label"));
+}
+
+function elementContext(element: Element): SafeElementContext {
+  const label = accessibleLabel(element);
+  const role = element.getAttribute("role");
+  const name = element.getAttribute("name");
+  const testId = element.getAttribute("data-testid");
+  return {
+    tag: element.tagName.toLowerCase(),
+    ...(label ? { label } : {}),
+    ...(role ? { role } : {}),
+    ...(name ? { name } : {}),
+    ...(testId ? { testId } : {})
+  };
+}
+
+function descriptorFor(element: Element): FieldDescriptor {
+  const tag = element.tagName.toLowerCase();
+  const type =
+    element instanceof HTMLInputElement ? element.type : element.getAttribute("role") === "combobox" ? "combobox" : tag;
+  return {
+    type,
+    ...(element.getAttribute("name") ? { name: element.getAttribute("name")! } : {}),
+    ...(element.getAttribute("id") ? { id: element.getAttribute("id")! } : {}),
+    ...(accessibleLabel(element) ? { label: accessibleLabel(element)! } : {}),
+    ...(element.getAttribute("autocomplete") ? { autocomplete: element.getAttribute("autocomplete")! } : {})
+  };
+}
+
+function readableValue(element: Element): string | undefined {
+  if (element instanceof HTMLSelectElement) {
+    return compact(element.selectedOptions[0]?.textContent ?? element.value);
+  }
+  if (element instanceof HTMLInputElement) {
+    if (element.type === "checkbox" || element.type === "radio") return element.checked ? "checked" : "unchecked";
+    return element.value === "" ? undefined : element.value;
+  }
+  if (element instanceof HTMLTextAreaElement) return element.value === "" ? undefined : element.value;
+  return compact(element.textContent);
+}
+
+function fieldContext(element: Element): CaptureFieldContext {
+  const descriptor = descriptorFor(element);
+  return {
+    ...(descriptor.label ? { label: descriptor.label } : {}),
+    ...(sectionContext(element) ? { section: sectionContext(element)! } : {}),
+    control: controlKindFor(descriptor)
+  };
+}
+
+function applicationContext(): CaptureApplicationContext {
+  const lightning = Boolean(
+    document.querySelector("one-record-home-flexipage2, [data-aura-rendered-by], .slds-scope, .oneHeader")
+  );
+  const prospect = Boolean(document.querySelector(".training-studio, [aria-label='Prospect research workspace']"));
+  return {
+    host: location.host,
+    platform: detectPlatform(location.host, { lightning, prospect }),
+    ...(compact(document.title) ? { title: compact(document.title)! } : {})
+  };
+}
+
+/* ------------------------------ capture ------------------------------ */
+
+function start(sessionId: string, startedAt: number, settings: CaptureSettings): { stop: () => CaptureFlush } {
+  const queue: CaptureEvent[] = [];
+  const previousValues = new WeakMap<Element, string | undefined>();
+  let rrwebEvents = 0;
+  let mutationEvents = 0;
+  let lastUrl = location.href;
+  let pending: { actionId: string; timer: number; marks: ReturnType<typeof markPage>; mutationsAt: number } | undefined;
+
+  function markPage() {
+    return {
+      url: location.href,
+      validation: document.querySelectorAll(VALIDATION).length,
+      dialog: document.querySelectorAll(DIALOG).length,
+      toast: document.querySelectorAll(TOAST).length,
+      fields: document.querySelectorAll(FIELDS).length
+    };
+  }
+
+  function push(kind: CaptureEventKind, event: Partial<CaptureEvent>): CaptureEvent {
+    const captured: CaptureEvent = {
+      id: newId(kind),
+      kind,
+      t: Math.max(0, Date.now() - startedAt),
+      page: page(),
+      ...event
+    };
+    queue.push(captured);
+    return captured;
+  }
+
+  function closeReaction(): void {
+    if (!pending) return;
+    const { actionId, marks, mutationsAt } = pending;
+    pending = undefined;
+    const now = markPage();
+    const reaction: CaptureReaction = {
+      domMutations: mutationEvents - mutationsAt,
+      urlChanged: now.url !== marks.url,
+      validationShown: now.validation > marks.validation,
+      fieldsAppeared: now.fields > marks.fields,
+      dialogShown: now.dialog > marks.dialog,
+      toastShown: now.toast > marks.toast
+    };
+    push("reaction", { correlatesWith: actionId, reaction });
+  }
+
+  /** Opens a short window in which the application's response to `actionId` is summarized. */
+  function watchReaction(actionId: string): void {
+    closeReaction();
+    pending = {
+      actionId,
+      marks: markPage(),
+      mutationsAt: mutationEvents,
+      timer: window.setTimeout(closeReaction, REACTION_WINDOW_MS)
+    };
+  }
+
+  const onClick = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const actionable = target.closest(ACTIONABLE) ?? target;
+    const context = elementContext(actionable);
+    const captured = push("click", {
+      element: context,
+      ...(context.label ? { actionLabel: context.label } : {}),
+      ...(sectionContext(actionable) ? { field: { section: sectionContext(actionable)!, control: "other" } } : {})
+    });
+    watchReaction(captured.id);
+  };
+
+  const onFocus = (event: Event): void => {
+    if (event.target instanceof Element) previousValues.set(event.target, readableValue(event.target));
+  };
+
+  const onChange = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const descriptor = descriptorFor(target);
+    const next = readableValue(target);
+    const previous = previousValues.get(target);
+    previousValues.set(target, next);
+
+    const change = settings.captureValues
+      ? safeValueChange(descriptor, previous, next)
+      : { masked: true as const };
+
+    const captured = push("field_change", {
+      element: elementContext(target),
+      field: fieldContext(target),
+      value: change
+    });
+    watchReaction(captured.id);
+  };
+
+  const onSubmit = (event: Event): void => {
+    const target = event.target;
+    const label = target instanceof Element ? accessibleLabel(target) : undefined;
+    const captured = push("submit", { ...(label ? { actionLabel: label } : {}) });
+    watchReaction(captured.id);
+  };
+
+  const listeners: Array<[keyof DocumentEventMap, EventListener]> = [
+    ["click", onClick],
+    ["focusin", onFocus],
+    ["change", onChange],
+    ["submit", onSubmit]
+  ];
+  for (const [type, listener] of listeners) document.addEventListener(type, listener, true);
+
+  const stopRrweb = record({
+    emit(event: { type?: number }) {
+      rrwebEvents += 1;
+      if (event.type === 3) mutationEvents += 1;
+    },
+    maskAllInputs: true,
+    maskInputOptions: { password: true },
+    blockSelector: "[data-automcp-block], input[type=password]",
+    maskTextSelector: "[data-automcp-mask]",
+    recordCanvas: false,
+    inlineImages: false,
+    collectFonts: false,
+    sampling: { mousemove: false, scroll: 500, input: "last" }
+  });
+
+  const navigationTimer = window.setInterval(() => {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    push("navigate", {});
+  }, NAVIGATION_POLL_MS);
+
+  const flushTimer = window.setInterval(() => void flush(), FLUSH_INTERVAL_MS);
+
+  async function flush(): Promise<void> {
+    if (queue.length === 0) return;
+    const events = queue.splice(0, queue.length);
+    try {
+      await chrome.runtime.sendMessage({ type: "capture:events", sessionId, events, rrwebEvents });
+    } catch {
+      // The service worker went away; stop losing cycles on this batch.
+    }
+  }
+
+  push("navigate", {});
+  void chrome.runtime
+    .sendMessage({ type: "capture:context", sessionId, application: applicationContext() })
+    .catch(() => undefined);
+
+  return {
+    stop(): CaptureFlush {
+      if (pending) window.clearTimeout(pending.timer);
+      closeReaction();
+      window.clearInterval(navigationTimer);
+      window.clearInterval(flushTimer);
+      stopRrweb?.();
+      for (const [type, listener] of listeners) document.removeEventListener(type, listener, true);
+      return { events: queue.splice(0, queue.length), rrwebEvents };
+    }
+  };
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const request = message as ToContentMessage;
+  if (request.type === "capture:begin") {
+    window.__autoWebMcpCapture?.stop();
+    window.__autoWebMcpCapture = start(request.sessionId, request.startedAt, request.settings);
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (request.type === "capture:end") {
+    const flush = window.__autoWebMcpCapture?.stop();
+    window.__autoWebMcpCapture = undefined;
+    sendResponse(flush ?? { events: [], rrwebEvents: 0 });
+    return true;
+  }
+  return undefined;
+});

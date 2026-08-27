@@ -63,3 +63,35 @@ describe("CaptureSession lifecycle", () => {
     expect(session.toTrace().endedAt).toBe(new Date(100).toISOString());
   });
 });
+
+describe("CaptureSession persistence", () => {
+  it("survives a service-worker restart through a snapshot round trip", () => {
+    const session = new CaptureSession("session-4", 1_000, application, { maxEvents: 3 });
+    session.add(event("a", 10));
+    session.noteRrwebEvents(9);
+
+    const restored = CaptureSession.fromSnapshot(JSON.parse(JSON.stringify(session.toSnapshot())));
+    restored.add(event("b", 20));
+    restored.stop(2_000);
+
+    const trace = restored.toTrace();
+    expect(trace.sessionId).toBe("session-4");
+    expect(trace.stats.captureEvents).toBe(2);
+    expect(trace.stats.rrwebEvents).toBe(9);
+    expect(restored.isRecording()).toBe(false);
+  });
+
+  it("refines platform identity once the page has been inspected", () => {
+    const session = new CaptureSession("session-5", 0, { host: "example.com", platform: "generic" });
+    session.describeApplication({
+      host: "acme.lightning.force.com",
+      platform: "salesforce-lightning",
+      title: "Opportunity"
+    });
+    expect(session.toTrace().application).toEqual({
+      host: "acme.lightning.force.com",
+      platform: "salesforce-lightning",
+      title: "Opportunity"
+    });
+  });
+});

@@ -8,6 +8,22 @@ export interface CaptureSessionOptions {
   maxEvents?: number;
 }
 
+/**
+ * Serializable session state. An extension service worker may be suspended
+ * mid-session, so the lifecycle has to survive a round trip through storage.
+ */
+export interface CaptureSessionSnapshot {
+  id: string;
+  startedAt: number;
+  application: CaptureApplicationContext;
+  status: CaptureSessionStatus;
+  endedAt?: number;
+  events: CaptureEvent[];
+  rrwebEvents: number;
+  dropped: number;
+  maxEvents: number;
+}
+
 const DEFAULT_MAX_EVENTS = 800;
 
 /**
@@ -40,6 +56,39 @@ export class CaptureSession {
     this.startedAt = startedAt;
     this.application = application;
     this.maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
+  }
+
+  static fromSnapshot(snapshot: CaptureSessionSnapshot): CaptureSession {
+    const session = new CaptureSession(snapshot.id, snapshot.startedAt, snapshot.application, {
+      maxEvents: snapshot.maxEvents
+    });
+    session.events.push(...snapshot.events);
+    session.rrwebEvents = snapshot.rrwebEvents;
+    session.dropped = snapshot.dropped;
+    session.status = snapshot.status;
+    session.endedAt = snapshot.endedAt;
+    return session;
+  }
+
+  toSnapshot(): CaptureSessionSnapshot {
+    return {
+      id: this.id,
+      startedAt: this.startedAt,
+      application: this.application,
+      status: this.status,
+      ...(this.endedAt !== undefined ? { endedAt: this.endedAt } : {}),
+      events: [...this.events],
+      rrwebEvents: this.rrwebEvents,
+      dropped: this.dropped,
+      maxEvents: this.maxEvents
+    };
+  }
+
+  /** Platform identity is refined once the content script has inspected the page. */
+  describeApplication(application: CaptureApplicationContext): void {
+    this.application.host = application.host;
+    this.application.platform = application.platform;
+    if (application.title) this.application.title = application.title;
   }
 
   getStatus(): CaptureSessionStatus {

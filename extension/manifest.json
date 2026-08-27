@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "AutoWebMCP Teach Mode",
+  "version": "0.1.0",
+  "description": "Observe a human workflow in any web application and hand normalized evidence to the AutoWebMCP Training Studio.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "scripting", "tabs", "webRequest"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "AutoWebMCP — not recording",
+    "default_popup": "popup.html"
+  }
+}

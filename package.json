@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "dev:semanticizer": "node --env-file=.env.local server.mjs",
     "build": "tsc --noEmit && vite build",
+    "build:extension": "node scripts/build-extension.mjs",
     "start": "node --env-file=.env.local server.mjs",
     "test": "vitest run"
   },

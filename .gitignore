@@ -15,3 +15,6 @@ coverage/
 .sfdx/
 salesforce/.sf/
 salesforce/.sfdx/
+
+# Built browser extension
+dist-extension/
