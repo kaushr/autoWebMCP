@@ -2,6 +2,12 @@ import "./styles.css";
 import { confirmCandidate, semanticizeTrace, type SemanticizerRun } from "./training/semanticizer";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { sourceApplicationFor } from "./training/sourceApplication";
+import {
+  buildDebugBundle,
+  debugBundleFilename,
+  serializeDebugBundle,
+  type DebugBundle
+} from "./training/debugBundle";
 import { getTrace, listTraces, type TraceSummary } from "./training/traces";
 import type { ObservationTrace } from "./capture/normalize";
 import type { CaptureEvent } from "./capture/types";
@@ -42,6 +48,7 @@ let semanticizerRuns: SemanticizerRun[] = [];
 /** Traces loaded side by side for the comparison table. Ephemeral. */
 let comparisonTraces: ObservationTrace[] = [];
 let comparisonStatus = "Load the captures to compare what each workflow did.";
+let exportStatus = "";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 
@@ -72,47 +79,6 @@ function describeObservation(observation: ObservationTrace["observations"][numbe
  * into the capability. Correlation, not causation, so the wording stays
  * observational.
  */
-function renderExecutionEvidence(trace: ObservationTrace): string {
-  const evidence = trace.executionEvidence ?? [];
-  if (evidence.length === 0) {
-    return `<p class="semanticizer-status">No network execution evidence was observed. The application
-      appears to perform this workflow in-process rather than over the network.</p>`;
-  }
-
-  const entries = evidence
-    .map((entry) => {
-      const requests = (entry.networkEffects ?? [])
-        .map(
-          (effect) => `<li class="effect-${escapeHtml(effect.confidence)}">
-            <span>${escapeHtml(effect.method)}</span> <code>${escapeHtml(effect.pathPattern)}</code>
-            <em>${effect.failed ? "failed" : String(effect.status)}</em>
-            <small>+${effect.startedAfterMs}ms · ${effect.durationMs}ms · ${escapeHtml(effect.confidence)} confidence${
-              effect.backgroundLikely ? " · background traffic" : ""
-            }</small>
-          </li>`
-        )
-        .join("");
-
-      return `<li>
-        <strong>${escapeHtml(entry.actionLabel ?? entry.action)}</strong>
-        <ul class="network-effects">${requests}</ul>
-        ${
-          (entry.applicationEffects ?? []).length
-            ? `<small>Application: ${(entry.applicationEffects ?? []).map(escapeHtml).join(" · ")}</small>`
-            : ""
-        }
-      </li>`;
-    })
-    .join("");
-
-  return `<details class="execution-evidence">
-    <summary>Execution evidence · ${evidence.length} correlated ${evidence.length === 1 ? "action" : "actions"}</summary>
-    <p class="semanticizer-status">Requests observed after each action, by timing alone. This is evidence of
-      how the application behaved, not an execution binding, and nothing here is replayable.</p>
-    <ul class="evidence-list">${entries}</ul>
-  </details>`;
-}
-
 function renderExtensionTraces(): string {
   const list = extensionTraces.length
     ? extensionTraces
@@ -129,8 +95,10 @@ function renderExtensionTraces(): string {
     ? `<ol class="event-trace">${selectedTrace.observations
         .map((observation) => `<li><span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`)
         .join("")}</ol>
-       <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events and ${selectedTrace.stats.rrwebEvents} rrweb events reduced to ${selectedTrace.observations.length} observations.</p>
-       ${renderExecutionEvidence(selectedTrace)}`
+       <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events
+         → ${selectedTrace.observations.length} normalized observations
+         → ${(selectedTrace.executionEvidence ?? []).length} execution evidence groups.
+         Details are under Admin / Debug.</p>`
     : "";
 
   return `<section class="extension-traces" aria-label="Extension traces">
@@ -430,6 +398,74 @@ function safeJsonParse(value: string): unknown {
  * business-specific capability. The table shows the evidence; it draws no such
  * conclusion, because that is a judgement about a platform, not about timing.
  */
+/** The one place the bundle is assembled, for both the panel and the download. */
+function currentDebugBundle(): DebugBundle | undefined {
+  if (!selectedTrace) return undefined;
+  return buildDebugBundle({
+    trace: selectedTrace,
+    runs: semanticizerRuns,
+    candidate,
+    ambiguities,
+    publications,
+    exportedAt: new Date().toISOString()
+  });
+}
+
+/** Read-only. The controls that change any of this stay in the normal workflow. */
+function renderLifecyclePanel(): string {
+  const bundle = currentDebugBundle();
+  const lifecycle = bundle?.capabilityLifecycle;
+  if (!lifecycle?.candidate) {
+    return panel(
+      "Capability lifecycle",
+      "no candidate",
+      `<p class="semanticizer-status">No capability has been proposed from this capture yet.</p>`
+    );
+  }
+
+  const binding = lifecycle.executionBinding;
+  return panel(
+    "Capability lifecycle",
+    lifecycle.publishable ? "publishable" : "blocked",
+    `<dl class="capability-state">
+      <div><dt>Candidate</dt><dd><code>${escapeHtml(lifecycle.candidate.id)}</code></dd></div>
+      <div><dt>Semantic confirmation</dt><dd>${escapeHtml(lifecycle.semanticConfirmation ?? "—")}</dd></div>
+      <div><dt>Execution binding</dt><dd>${
+        binding ? `<code>${escapeHtml(`${binding.application}.${binding.action}`)}</code>` : "not discovered"
+      }</dd></div>
+      <div><dt>Publishability</dt><dd>${lifecycle.publishable ? "ready" : "blocked"}</dd></div>
+      <div><dt>Publication</dt><dd>${
+        lifecycle.publication ? escapeHtml(lifecycle.publication.publishedAt) : "not published"
+      }</dd></div>
+    </dl>`
+  );
+}
+
+function renderExportPanel(): string {
+  if (!selectedTrace) {
+    return panel(
+      "Export",
+      "no capture selected",
+      `<p class="semanticizer-status">Select a Teach Mode capture to export its evidence.</p>
+       <div class="studio-actions"><button id="download-bundle" class="secondary" disabled>Download debug bundle</button></div>`
+    );
+  }
+
+  return panel(
+    "Export",
+    debugBundleFilename(selectedTrace.sessionId),
+    `<p class="semanticizer-status">Everything safely retained about
+      <code>${escapeHtml(selectedTrace.sessionId)}</code>: capture stream, normalized observations, execution
+      evidence, every semantic inference run, and the capability lifecycle. It carries no credential, header,
+      body, or query value, because the pipeline never retained any.</p>
+     <div class="studio-actions">
+       <button id="download-bundle">Download debug bundle</button>
+       <button id="copy-bundle" class="secondary">Copy JSON</button>
+       <p class="semanticizer-status">${escapeHtml(exportStatus)}</p>
+     </div>`
+  );
+}
+
 function renderComparison(): string {
   if (comparisonTraces.length === 0) {
     return panel(
@@ -493,9 +529,9 @@ function renderComparison(): string {
 
 function renderAdminDebug(): string {
   const body = selectedTrace
-    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderComparison()}`
+    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}`
     : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
-       ${renderSemanticizerRuns()}${renderComparison()}`;
+       ${renderSemanticizerRuns()}${renderExportPanel()}${renderComparison()}`;
 
   return `<details class="admin-debug">
     <summary>Admin / Debug</summary>
@@ -719,6 +755,34 @@ function render(): void {
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
       publishStatus = error instanceof Error ? error.message : "Publishing failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#download-bundle")?.addEventListener("click", () => {
+    const bundle = currentDebugBundle();
+    if (!bundle || !selectedTrace) return;
+
+    const blob = new Blob([serializeDebugBundle(bundle)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = debugBundleFilename(selectedTrace.sessionId);
+    link.click();
+    URL.revokeObjectURL(url);
+
+    exportStatus = `Downloaded ${debugBundleFilename(selectedTrace.sessionId)}.`;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#copy-bundle")?.addEventListener("click", async () => {
+    const bundle = currentDebugBundle();
+    if (!bundle) return;
+    try {
+      await navigator.clipboard.writeText(serializeDebugBundle(bundle));
+      exportStatus = "Bundle copied to the clipboard.";
+    } catch {
+      exportStatus = "The browser refused clipboard access; use Download instead.";
     }
     render();
   });
