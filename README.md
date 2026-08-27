@@ -16,6 +16,11 @@ evidence and platform policy — a lead worth investigating, never permission to
 call anything. An **execution binding** is a validated mechanism a human chose,
 and only that permits publication.
 
+Binding validity is not a property of a binding alone — a mechanism reachable
+from inside a platform may be unreachable from a browser extension — so
+`requires-setup` is a first-class outcome rather than a failure. Designed in
+[docs/BINDING_VALIDATION.md](docs/BINDING_VALIDATION.md).
+
 **Platform Intelligence** is the next architectural layer: documented platform
 behaviour — how Lightning retargets events, which interfaces are supported, what
 must never be replayed — compiled once into a versioned pack that runtime
