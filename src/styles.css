@@ -40,3 +40,6 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 .need-answer { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; margin-top: .2rem; }
 .need-answer label { display: grid; gap: .2rem; font-size: .78rem; color: #b6c1d9; flex: 1 1 16rem; }
 .need-answer input { width: 100%; }
+.need-path { list-style: none; margin: .1rem 0; padding: 0 0 0 .8rem; border-left: 2px solid #33507d; display: grid; gap: .12rem; }
+.need-path li { color: #8fa6c8; font-size: .74rem; }
+.need-suggestions code { color: #dbe7ff; }

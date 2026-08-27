@@ -1,6 +1,7 @@
 import type { ObservationTrace } from "../capture/normalize";
 import type { SemanticCapability } from "../semantic/model";
 import type {
+  ApplicationFieldType,
   EpistemicNeed,
   FieldClarification,
   FieldGrounding,
@@ -103,14 +104,34 @@ export function observedFieldCandidates(trace: ObservationTrace): ObservedFieldC
     const existing = found.get(key);
     if (existing && existing.strength >= strength) continue;
 
+    // The control classification and any value the human actually set are
+    // deterministic discriminators when several fields share a label.
+    const value = event.kind === "field_change" && !event.value?.masked ? event.value?.to : undefined;
     found.set(key, {
       ...(identifier ? { applicationIdentifier: identifier } : {}),
       ...(label ? { label } : {}),
       ...(event.field?.section ? { section: event.field.section } : {}),
+      ...(event.field?.control ? { control: event.field.control } : {}),
+      ...(value ? { value } : {}),
       strength
     });
   }
   return [...found.values()];
+}
+
+/**
+ * The capability's own declared type, in the application's vocabulary.
+ *
+ * Used only to rule a candidate out. `string` is what an unconfirmed input
+ * looks like and deliberately rules nothing out; an enumerated input is a
+ * closed domain, which is what a picklist is.
+ */
+function declaredTypeFor(input: SemanticCapability["inputs"][number]): ApplicationFieldType | undefined {
+  if (input.enum && input.enum.length > 0) return "picklist";
+  if (input.type === "date") return "date";
+  if (input.type === "number") return "number";
+  if (input.type === "boolean") return "boolean";
+  return undefined;
 }
 
 export function resolveFieldMapping(
@@ -148,6 +169,7 @@ export function resolveFieldMapping(
     const resolution = resolveApplicationField({
       inputName: input.name,
       ...(objectApiName ? { objectApiName } : {}),
+      ...(declaredTypeFor(input) ? { inputType: declaredTypeFor(input) } : {}),
       observed,
       ...(intelligence.platform ? { platform: intelligence.platform } : {}),
       ...(intelligence.standard ? { standard: intelligence.standard } : {}),

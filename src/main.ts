@@ -636,7 +636,7 @@ function recordClarification(observedLabel: string, objectApiName: string, apiNa
  * fact would unblock it. Suggestions are shown as suggestions, with where
  * each came from, and confirming one is a deliberate act.
  */
-function renderEpistemicNeed(need: EpistemicNeed): string {
+function renderEpistemicNeed(need: EpistemicNeed, needIndex: number): string {
   const heading =
     need.status === "needs-information"
       ? "Needs information"
@@ -658,18 +658,24 @@ function renderEpistemicNeed(need: EpistemicNeed): string {
     .map(
       (suggestion, index) =>
         `<li><code>${escapeHtml(suggestion.value)}</code>
-           <small>${escapeHtml(suggestion.detail)} (${escapeHtml(suggestion.source)})</small>
-           <button type="button" class="secondary" data-accept-suggestion="${index}"
+           <small>${escapeHtml(suggestion.detail)}</small>
+           <button type="button" class="secondary" data-accept-suggestion="${index}" data-need-index="${needIndex}"
              data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
              data-need-object="${escapeHtml(need.knownEvidence.objectApiName ?? "")}"
-           >Confirm ${escapeHtml(suggestion.value)}</button></li>`
+           >This one</button></li>`
     )
     .join("");
 
+  // How the system got here. Shown because "I could not resolve this" is a
+  // far weaker thing to read than the steps that were actually tried.
+  const trail = (need.resolutionPath ?? []).length
+    ? `<ul class="need-path">${(need.resolutionPath ?? []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>`
+    : "";
+
   const answerBox =
-    need.blocking && need.kind === "field-api-name"
+    need.blocking
       ? `<div class="need-answer">
-          <label>Field API name
+          <label>${suggestions ? "Or another field API name" : "Field API name"}
             <input id="clarification-answer" value="${escapeHtml(clarificationDraft)}"
               placeholder="e.g. Implementation_Region__c"
               data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
@@ -684,6 +690,7 @@ function renderEpistemicNeed(need: EpistemicNeed): string {
     <p>${escapeHtml(need.question)}</p>
     <p class="semanticizer-status">${escapeHtml(need.reason)}</p>
     ${known.length ? `<p class="semanticizer-status">Already known: ${known.join(", ")}. You are not being asked for these.</p>` : ""}
+    ${trail}
     ${suggestions ? `<ul class="need-suggestions">${suggestions}</ul>` : ""}
     ${answerBox}
   </div>`;
@@ -692,7 +699,7 @@ function renderEpistemicNeed(need: EpistemicNeed): string {
 function renderEpistemicNeeds(): string {
   const needs = browserBindingCandidate?.proposal.needs ?? [];
   if (needs.length === 0) return "";
-  return needs.map(renderEpistemicNeed).join("");
+  return needs.map((need, index) => renderEpistemicNeed(need, index)).join("");
 }
 
 /** One typed control per field, per the canonical input contract. */
@@ -1618,9 +1625,7 @@ function render(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-accept-suggestion]")) {
     button.addEventListener("click", () => {
       const index = Number(button.dataset.acceptSuggestion);
-      const need = (browserBindingCandidate?.proposal.needs ?? []).find(
-        (candidateNeed) => (candidateNeed.suggestedAnswers?.length ?? 0) > index
-      );
+      const need = (browserBindingCandidate?.proposal.needs ?? [])[Number(button.dataset.needIndex)];
       const suggestion = need?.suggestedAnswers?.[index];
       if (!suggestion) return;
       recordClarification(button.dataset.needLabel ?? "", button.dataset.needObject ?? "", suggestion.value);

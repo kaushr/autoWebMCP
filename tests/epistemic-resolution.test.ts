@@ -227,19 +227,19 @@ describe("6–9 — a human answer feeds back into resolution", () => {
     expect(proposal.binding?.inputs[0].applicationField?.release).toBeUndefined();
   });
 
-  it("10 — a human answer that metadata contradicts surfaces the contradiction", () => {
+  it("10 — with no tenant metadata, a human may name a field the vendor default does not ship", () => {
+    // Standard knowledge describes how Salesforce ships, not how this org
+    // is configured, so this is not a contradiction — it is a person
+    // telling us their org is customized. Marked unverified, not accepted
+    // as vendor truth. Tenant-backed contradiction is covered separately in
+    // tests/intent-disambiguation.test.ts.
     const contradicting: FieldClarification[] = [
       { platform: PLATFORM, objectApiName: "Opportunity", observedLabel: "Stage", apiName: "Custom_Stage__c", source: "human-confirmed", scope: "capability" }
     ];
     const result = resolveFieldMapping(capabilityWith([STAGE]), STAGE_TRACE, { ...STANDARD_ONLY, clarifications: contradicting });
-    expect(result.mapping).toEqual({});
-    expect(result.statuses.stage).toBe("ambiguous");
-    expect(result.ambiguities.join(" ")).toMatch(/contradiction/i);
-    // Neither side is silently discarded: both are offered as choices.
-    expect(result.needs[0].suggestedAnswers?.map((suggestion) => suggestion.value).sort()).toEqual([
-      "Custom_Stage__c",
-      "StageName"
-    ]);
+    expect(result.mapping).toEqual({ stage: "Custom_Stage__c" });
+    expect(result.grounding.stage.tenantUnverified).toBe(true);
+    expect(result.grounding.stage.detail).toMatch(/Tenant metadata has not verified this/i);
   });
 });
 

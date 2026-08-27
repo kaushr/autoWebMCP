@@ -167,14 +167,35 @@ export interface ResolvedApplicationField {
   custom?: boolean;
 }
 
-/** How a resolution was reached — both halves, because they are different claims. */
+/**
+ * How a resolution was reached.
+ *
+ * Deliberately several separate claims rather than one score, because the
+ * sources answer different questions:
+ *
+ *   metadata     tells us what exists and its technical properties
+ *   observation  tells us what happened
+ *   a human      tells us what they MEANT, when evidence cannot distinguish it
+ *
+ * So `knowledge` names where the field's technical facts came from, while
+ * `intentDisambiguatedByHuman` records that a person chose between
+ * candidates the metadata already knew. A human picking `Custom_Stage__c`
+ * from two tenant-known fields is not asserting anything about that
+ * field's type — they are saying which one they used.
+ */
 export interface FieldGrounding {
   /** What the human demonstrably did. */
   evidence: FieldEvidenceKind;
-  /** What explained it. */
+  /** Where the field's technical facts came from. */
   knowledge: FieldKnowledgeSource;
   /** The standard release consulted, when standard knowledge was used. */
   release?: string;
+  /** A person chose among candidates the application's model already knew. Intent, not a technical claim. */
+  intentDisambiguatedByHuman?: boolean;
+  /** The identity rests on a human answer that no tenant metadata has confirmed. */
+  tenantUnverified?: boolean;
+  /** How the system got here, step by step, for Studio and debug evidence. */
+  path: string[];
   /** A sentence a human can audit. */
   detail: string;
 }
@@ -201,6 +222,24 @@ export interface FieldGrounding {
  */
 export type ResolutionStatus = "resolved" | "needs-information" | "needs-setup" | "ambiguous" | "blocked";
 
+/**
+ * Why the system could not settle this, in machine-readable form.
+ *
+ * Kept as a diagnostic under the five lifecycle outcomes rather than as
+ * new outcomes of its own: the distinction matters for explaining and for
+ * choosing what to do next, but it is not a different state in the
+ * capability's life.
+ */
+export type EpistemicSubreason =
+  /** No candidate interpretations at all. */
+  | "unknown"
+  /** Candidates exist; this recording cannot tell them apart. */
+  | "insufficient-evidence"
+  /** A source — typically tenant metadata — would likely resolve it, but is not installed. */
+  | "knowledge-unavailable"
+  /** Sources point to incompatible interpretations. */
+  | "conflicting";
+
 /** Where an answer could legitimately come from, cheapest-authority-first. */
 export type ResolutionSource =
   | "tenant-metadata"
@@ -213,6 +252,8 @@ export interface SuggestedAnswer {
   value: string;
   label?: string;
   source: FieldKnowledgeSource;
+  /** The application's declared type for this candidate, when known. */
+  type?: ApplicationFieldType;
   detail: string;
 }
 
@@ -244,6 +285,10 @@ export interface EpistemicNeed {
   suggestedAnswers?: SuggestedAnswer[];
   /** Who or what could settle this. */
   resolutionSources: ResolutionSource[];
+  /** Why it could not be settled, for diagnostics and for choosing what to do next. */
+  subreason: EpistemicSubreason;
+  /** What was tried, step by step, so the question can explain itself. */
+  resolutionPath?: string[];
 }
 
 /**
@@ -301,6 +346,10 @@ export interface ObservedFieldSignal {
   /** The visible label, as the human read it. */
   label?: string;
   section?: string;
+  /** The control kind the capture classified, e.g. `date`. A deterministic discriminator when it is specific. */
+  control?: string;
+  /** A value the human actually set, which a candidate's own value domain can be checked against. */
+  value?: string;
   /** A `field_change` outranks a `click`; higher wins. */
   strength: number;
 }

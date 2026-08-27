@@ -1,11 +1,12 @@
 import type {
+  ApplicationFieldType,
   EpistemicNeed,
   FieldClarification,
   FieldResolution,
   ObservedFieldSignal,
-  SuggestedAnswer,
   ResolvedApplicationField,
   StandardApplicationSchema,
+  SuggestedAnswer,
   TenantFieldSchema,
   TenantIntelligenceSource,
   TenantObjectSchema
@@ -15,32 +16,29 @@ import { foldIdentity } from "./model";
 /* ------------------------------------------------------------------ *
  * Grounding one capability input in the application's own model.
  *
- * The ordering here is a claim about responsibility, not a preference
- * ranking. Evidence and knowledge answer different questions and neither
- * substitutes for the other:
+ * Three sources answer three different questions, and forcing them into a
+ * single authority ranking loses the distinction:
  *
- *   OBSERVED EVIDENCE      establishes WHAT THE HUMAN TAUGHT
- *   APPLICATION KNOWLEDGE  establishes WHAT THAT OBSERVED THING MEANS
+ *   METADATA     what exists, and its technical properties
+ *   OBSERVATION  what actually happened
+ *   A HUMAN      what they MEANT, when evidence cannot distinguish it
  *
- * So the evidence gate runs FIRST and is absolute. Knowing that
+ * So the evidence gate runs first and absolutely — knowing that
  * `Opportunity.StageName` exists is never a reason to bind Stage; only a
- * human demonstrating Stage is. Metadata that was never demonstrated
- * cannot enter this function's candidate set at all, which is why that
- * invariant is structural rather than a check someone has to remember.
+ * human demonstrating Stage is — and then the work is candidate-shaped
+ * rather than lookup-shaped:
  *
- * Within application knowledge, tenant refines standard: a tenant's own
- * configuration describes the screen the human actually saw, so it wins
- * over what the vendor ships by default. Tenant knowledge cannot reach
- * platform safety policy — see `model.ts`.
+ *   gather every plausible interpretation
+ *     → discriminate with evidence already in hand
+ *       → ask a person only about what genuinely remains
  *
- * Runtime context (record type, controlling fields, permissions) is the
- * layer that would narrow a resolved value domain to what is legal *right
- * now*. V0.1 does not implement it; `materializeOptions` below is where it
- * attaches, and `docs/APPLICATION_INTELLIGENCE.md` records why the
- * distinction matters.
+ * That ordering matters. Two tenant fields both labelled "Stage" is not a
+ * failure and not a coin toss; it is a set of two known candidates, and an
+ * identifier observed anywhere else in the same recording settles it
+ * without troubling anyone. Asking "what is the API name of Stage?" when
+ * both API names are already known is the thing to avoid.
  * ------------------------------------------------------------------ */
 
-/** One field the capture actually observed the human interact with. */
 export type ObservedFieldCandidate = ObservedFieldSignal;
 
 export interface FieldResolutionRequest {
@@ -50,15 +48,29 @@ export interface FieldResolutionRequest {
   objectApiName?: string;
   observed: readonly ObservedFieldCandidate[];
   platform?: string;
+  /** The capability's own declared type, used only to rule a candidate out. */
+  inputType?: ApplicationFieldType;
   standard?: StandardApplicationSchema;
   tenant?: TenantIntelligenceSource;
   /**
-   * Facts a human already supplied for this capability. Consulted only
-   * after tenant and standard knowledge have both failed — a person should
-   * never be asked, or re-asked, for something the application's own model
-   * can answer.
+   * Answers a human has already given for this capability. Read as
+   * disambiguating INTENT, not as an assertion about the application's
+   * technical model — see `applyClarification`.
    */
   clarifications?: readonly FieldClarification[];
+}
+
+/** One plausible reading of what the human interacted with. */
+interface Candidate {
+  field: ResolvedApplicationField;
+  /**
+   * Where this reading comes from. `observed` means the application named
+   * a control that no knowledge layer recognizes — real evidence of a
+   * distinct field, but not an account of what that field is.
+   */
+  source: "tenant" | "standard" | "observed";
+  /** Whether the application itself named it in the recording. */
+  matchedByIdentifier: boolean;
 }
 
 function tenantObjectFor(request: FieldResolutionRequest): TenantObjectSchema | undefined {
@@ -70,6 +82,16 @@ function standardObjectFor(request: FieldResolutionRequest) {
   if (!request.standard || !request.objectApiName) return undefined;
   const wanted = foldIdentity(request.objectApiName);
   return request.standard.objects.find((object) => foldIdentity(object.apiName) === wanted);
+}
+
+/** Whether this installation has tenant knowledge at all — different from it being silent on one field. */
+function tenantIsAvailable(request: FieldResolutionRequest): boolean {
+  return Boolean(request.tenant?.describe(request.platform ?? ""));
+}
+
+function cleanLabel(value: string | undefined): string | undefined {
+  const trimmed = value?.replace(/^\*/, "").trim();
+  return trimmed || undefined;
 }
 
 /**
@@ -85,10 +107,7 @@ function materializeOptions(field: TenantFieldSchema): Pick<ResolvedApplicationF
   return { options: [...field.options], optionsSource: "tenant" };
 }
 
-function fromTenantField(
-  field: TenantFieldSchema,
-  objectApiName: string | undefined
-): ResolvedApplicationField {
+function fromTenantField(field: TenantFieldSchema, objectApiName: string | undefined): ResolvedApplicationField {
   return {
     ...(objectApiName ? { objectApiName } : {}),
     apiName: field.apiName,
@@ -99,266 +118,440 @@ function fromTenantField(
   };
 }
 
-/** Candidates whose own signals name this input. The evidence gate. */
+/* ----------------------------- STEP A: evidence ----------------------------- */
+
+/**
+ * The signals in this recording that correspond to this input. The
+ * evidence gate.
+ *
+ * A signal qualifies when it names the input directly — the observed label
+ * `*Stage` for input `stage`, or an identifier that folds to it like
+ * `CloseDate` for `close_date` — or when application knowledge says the
+ * control it named IS this input: `StageName` does not look like `stage`,
+ * but metadata knows that field is labelled "Stage".
+ *
+ * That second route uses knowledge to INTERPRET an interaction, never to
+ * invent one. The human still had to touch the control; metadata only
+ * explains which input the control corresponds to. Metadata alone can
+ * still never put a field into a capability, which is the invariant this
+ * gate exists to hold.
+ */
 function observedMatchesFor(request: FieldResolutionRequest): ObservedFieldCandidate[] {
   const wanted = foldIdentity(request.inputName);
+  const tenantObject = tenantObjectFor(request);
+  const standardObject = standardObjectFor(request);
+
+  const identifierMeansThisInput = (identifier: string): boolean => {
+    const key = foldIdentity(identifier);
+    const tenantField = tenantObject?.fields.find((field) => foldIdentity(field.apiName) === key);
+    if (tenantField) return foldIdentity(tenantField.label) === wanted;
+    const standardField = standardObject?.fields.find((field) => foldIdentity(field.apiName) === key);
+    return standardField ? foldIdentity(standardField.defaultLabel) === wanted : false;
+  };
+
   return request.observed.filter(
     (candidate) =>
-      (candidate.applicationIdentifier ? foldIdentity(candidate.applicationIdentifier) === wanted : false) ||
-      (candidate.label ? foldIdentity(candidate.label) === wanted : false)
+      (candidate.applicationIdentifier
+        ? foldIdentity(candidate.applicationIdentifier) === wanted ||
+          identifierMeansThisInput(candidate.applicationIdentifier)
+        : false) || (candidate.label ? foldIdentity(candidate.label) === wanted : false)
   );
 }
 
+/* --------------------------- STEP C: interpretations --------------------------- */
+
 /**
- * A failed attempt is `hard` when the failure is a genuine ambiguity —
- * knowledge that names two candidates for one thing. That must veto the
- * whole input even if another observed candidate did resolve.
+ * Every reading the application's model supports for what was observed.
  *
- * A `soft` failure only means *this* signal could not be explained. A
- * recording routinely carries several events for one field (a click that
- * exposed an identifier, a change that exposed only a label); one of them
- * being unexplainable is not a reason to discard a sibling that grounded
- * cleanly.
+ * Gathered across ALL the matched signals at once rather than one signal
+ * at a time. That is the fix for the real Lightning shape: the click named
+ * `StageName` while the retargeted change carried only the label, and
+ * resolving each signal in isolation meant an identifier sitting in the
+ * same recording could not narrow a label that matched two fields.
  */
-type AttemptCore =
-  | {
-      ok: true;
-      field: ResolvedApplicationField;
-      evidence: "application-identifier" | "visible-label";
-      knowledge: "tenant" | "standard" | "observation-only" | "human-confirmed";
-    }
-  | { ok: false; reason: string; hard: boolean; unknownLabel?: string; candidates?: SuggestedAnswer[] };
-
-/** An attempt once the candidate it rests on has been attached. */
-type Attempt = AttemptCore extends infer T ? (T extends { ok: true } ? T & { observed: ObservedFieldCandidate } : T) : never;
-
-/**
- * What one observed candidate means, consulting tenant knowledge before
- * standard knowledge. An observed application identifier that no layer
- * recognizes still grounds the field — the application named its own
- * control, which is evidence in itself. An observed *label* that no layer
- * recognizes does not: a label alone is not a field identity, and
- * guessing one would be exactly the silent mapping this system refuses.
- */
-function attemptFor(candidate: ObservedFieldCandidate, request: FieldResolutionRequest): AttemptCore {
+function gatherCandidates(
+  matches: readonly ObservedFieldCandidate[],
+  request: FieldResolutionRequest,
+  path: string[]
+): Candidate[] {
   const tenantObject = tenantObjectFor(request);
   const standardObject = standardObjectFor(request);
-  const identifier = candidate.applicationIdentifier;
+  const byApiName = new Map<string, Candidate>();
 
-  if (identifier) {
+  const add = (field: ResolvedApplicationField, source: Candidate["source"], matchedByIdentifier: boolean): void => {
+    const key = foldIdentity(field.apiName);
+    const existing = byApiName.get(key);
+    if (existing) {
+      // Same field, two accounts of it: tenant describes the org actually
+      // on screen, so its account supersedes the vendor default. An
+      // identifier match is remembered wherever it came from.
+      if (matchedByIdentifier) existing.matchedByIdentifier = true;
+      if (existing.source !== "tenant" && source === "tenant") existing.field = field;
+      return;
+    }
+    byApiName.set(key, { field, source, matchedByIdentifier });
+  };
+
+  const identifiers = [...new Set(matches.map((match) => match.applicationIdentifier).filter(Boolean) as string[])];
+  const labels = [...new Set(matches.map((match) => cleanLabel(match.label)).filter(Boolean) as string[])];
+  const observedLabel = labels[0];
+
+  for (const identifier of identifiers) {
     const wanted = foldIdentity(identifier);
-    const tenantField = tenantObject?.fields.filter((field) => foldIdentity(field.apiName) === wanted) ?? [];
-    if (tenantField.length > 1) {
-      return { ok: false, hard: true, reason: `Tenant metadata lists several fields with the identifier "${identifier}".` };
+    for (const field of tenantObject?.fields.filter((entry) => foldIdentity(entry.apiName) === wanted) ?? []) {
+      add(fromTenantField(field, request.objectApiName), "tenant", true);
     }
-    if (tenantField.length === 1) {
-      return { ok: true, field: fromTenantField(tenantField[0], request.objectApiName), evidence: "application-identifier", knowledge: "tenant" };
-    }
-
-    const standardField = standardObject?.fields.find((field) => foldIdentity(field.apiName) === wanted);
-    if (standardField) {
-      return {
-        ok: true,
-        field: {
+    for (const field of standardObject?.fields.filter((entry) => foldIdentity(entry.apiName) === wanted) ?? []) {
+      add(
+        {
           ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
-          apiName: standardField.apiName,
-          label: candidate.label?.replace(/^\*/, "").trim() || standardField.defaultLabel,
-          type: standardField.type
+          apiName: field.apiName,
+          label: observedLabel ?? field.defaultLabel,
+          type: field.type
         },
-        evidence: "application-identifier",
-        knowledge: "standard"
-      };
+        "standard",
+        true
+      );
     }
+  }
 
-    // No knowledge layer recognizes it, but the application itself named
-    // the control the human used. That is weaker than schema knowledge and
-    // is reported as such, never dressed up as an understood field.
-    return {
-      ok: true,
+  for (const label of labels) {
+    const wanted = foldIdentity(label);
+    for (const field of tenantObject?.fields.filter((entry) => foldIdentity(entry.label) === wanted) ?? []) {
+      add(fromTenantField(field, request.objectApiName), "tenant", false);
+    }
+    for (const field of standardObject?.fields.filter((entry) => foldIdentity(entry.defaultLabel) === wanted) ?? []) {
+      add(
+        {
+          ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
+          apiName: field.apiName,
+          label,
+          type: field.type
+        },
+        "standard",
+        false
+      );
+    }
+  }
+
+  // An identifier the application exposed that no knowledge layer
+  // recognizes is still evidence of a real, distinct control. Dropping it
+  // would let a recognized field quietly stand in for a second one the
+  // human also touched.
+  for (const identifier of identifiers) {
+    const key = foldIdentity(identifier);
+    if (byApiName.has(key)) continue;
+    byApiName.set(key, {
       field: {
         ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
         apiName: identifier,
-        label: candidate.label?.replace(/^\*/, "").trim() || identifier,
-        type: "string"
+        label: observedLabel ?? identifier,
+        type: request.inputType ?? "string"
       },
-      evidence: "application-identifier",
-      knowledge: "observation-only"
-    };
+      source: "observed",
+      matchedByIdentifier: true
+    });
   }
 
-  const label = candidate.label?.replace(/^\*/, "").trim();
-  if (!label) return { ok: false, hard: false, reason: "The observed interaction carried neither an application identifier nor a visible label." };
-  const wantedLabel = foldIdentity(label);
-
-  const tenantByLabel = tenantObject?.fields.filter((field) => foldIdentity(field.label) === wantedLabel) ?? [];
-  if (tenantByLabel.length > 1) {
-    return { ok: false, hard: true, reason: `Tenant metadata lists several fields labelled "${label}".` };
+  const candidates = [...byApiName.values()];
+  if (candidates.length > 0) {
+    const fromTenant = candidates.some((candidate) => candidate.source === "tenant");
+    path.push(
+      `Found ${candidates.length} candidate${candidates.length === 1 ? "" : "s"} in ` +
+        `${fromTenant ? "tenant metadata" : "standard application knowledge"}: ` +
+        `${candidates.map((candidate) => candidate.field.apiName).join(", ")}.`
+    );
   }
-  if (tenantByLabel.length === 1) {
-    return { ok: true, field: fromTenantField(tenantByLabel[0], request.objectApiName), evidence: "visible-label", knowledge: "tenant" };
-  }
-
-  const standardByLabel = standardObject?.fields.filter((field) => foldIdentity(field.defaultLabel) === wantedLabel) ?? [];
-  if (standardByLabel.length > 1) {
-    return { ok: false, hard: true, reason: `Standard application knowledge lists several fields labelled "${label}".` };
-  }
-  if (standardByLabel.length === 1) {
-    return {
-      ok: true,
-      field: {
-        ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
-        apiName: standardByLabel[0].apiName,
-        label,
-        type: standardByLabel[0].type
-      },
-      evidence: "visible-label",
-      knowledge: "standard"
-    };
-  }
-
-  // Human clarification is the LAST resort, reached only now that tenant
-  // and standard knowledge have both declined. Asking earlier would burden
-  // a person with something the application's own model already knows.
-  const answered = clarificationFor(label, request);
-  if (answered) {
-    return {
-      ok: true,
-      field: {
-        ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
-        apiName: answered.apiName,
-        label,
-        type: answered.type ?? "string",
-        ...(answered.apiName.endsWith("__c") ? { custom: true } : {})
-      },
-      evidence: "visible-label",
-      knowledge: "human-confirmed"
-    };
-  }
-
-  return {
-    ok: false,
-    hard: false,
-    unknownLabel: label,
-    reason:
-      `No application field identifier was observed for "${label}", and no application knowledge identifies that label` +
-      `${request.objectApiName ? ` on ${request.objectApiName}` : ""}.`
-  };
+  return candidates;
 }
 
-/** A human answer for this label on this object, if one has been given. */
-function clarificationFor(label: string, request: FieldResolutionRequest): FieldClarification | undefined {
-  const wanted = foldIdentity(label);
+/* ---------------------------- STEP D: discriminate ---------------------------- */
+
+/** Types that can plausibly describe the same control. Conservative on purpose. */
+function typesCompatible(declared: ApplicationFieldType | undefined, candidate: ApplicationFieldType): boolean {
+  // `string` is what an unconfirmed capability input looks like; it rules
+  // nothing out. Only a specific declared type can eliminate anything.
+  if (!declared || declared === "string") return true;
+  if (declared === candidate) return true;
+  if (declared === "number") return candidate === "currency";
+  if (declared === "currency") return candidate === "number";
+  if (declared === "date") return candidate === "datetime";
+  if (declared === "datetime") return candidate === "date";
+  return false;
+}
+
+/** What the capture's control classification implies, when it implies anything. */
+function controlSuggestsType(control: string | undefined): ApplicationFieldType | undefined {
+  if (control === "date") return "date";
+  if (control === "number") return "number";
+  if (control === "checkbox") return "boolean";
+  if (control === "select" || control === "combobox" || control === "radio") return "picklist";
+  // "other"/"text" say nothing: Lightning reports "other" for a datepicker
+  // and a picklist alike, which is what made this whole layer necessary.
+  return undefined;
+}
+
+/**
+ * Narrows the candidate set using evidence already captured.
+ *
+ * Every rule here must ELIMINATE on incompatibility or IDENTIFY directly.
+ * "More likely because it is standard" is not a discriminator, and there is
+ * no scoring or confidence weighting here by design. A rule that would
+ * eliminate every candidate is treated as non-discriminating rather than as
+ * proof of nothing: evidence contradicting everything is more likely to be
+ * evidence we misread.
+ */
+function discriminate(
+  candidates: Candidate[],
+  matches: readonly ObservedFieldCandidate[],
+  request: FieldResolutionRequest,
+  path: string[]
+): Candidate[] {
+  let surviving = candidates;
+  const narrow = (next: Candidate[], explain: string): void => {
+    if (next.length === 0 || next.length === surviving.length) return;
+    surviving = next;
+    path.push(explain);
+  };
+
+  // 1. The application named it — but an identifier no knowledge layer
+  //    recognizes must never eliminate one that metadata explains. That
+  //    would let a framework-generated name outrank the application's own
+  //    model, which is the inversion this ordering exists to prevent.
+  const described = surviving.filter((candidate) => candidate.source !== "observed");
+  const named = surviving.filter((candidate) => candidate.matchedByIdentifier);
+  const namedKeepsDescribed = described.length === 0 || named.some((candidate) => candidate.source !== "observed");
+  if (named.length > 0 && namedKeepsDescribed) {
+    const identifiers = [...new Set(matches.map((match) => match.applicationIdentifier).filter(Boolean))];
+    narrow(
+      named,
+      `Observed identifier ${identifiers.map((entry) => `"${entry}"`).join(", ")} matched ${named.length} of them.`
+    );
+    if (surviving.length === 1) return surviving;
+  }
+
+  // 2. A value the human actually set must be inside the candidate's own domain.
+  const observedValue = matches.map((match) => match.value).find(Boolean);
+  if (observedValue && surviving.some((candidate) => (candidate.field.options?.length ?? 0) > 0)) {
+    const accepts = surviving.filter(
+      (candidate) =>
+        !candidate.field.options ||
+        candidate.field.options.some((option) => foldIdentity(option) === foldIdentity(observedValue))
+    );
+    narrow(accepts, `The observed value "${observedValue}" is offered by ${accepts.length} of them.`);
+    if (surviving.length === 1) return surviving;
+  }
+
+  // 3. The declared type, or the control the capture classified, can rule a
+  //    candidate out — never rule one in.
+  const declared = request.inputType ?? controlSuggestsType(matches.map((match) => match.control).find(Boolean));
+  if (declared) {
+    const compatible = surviving.filter((candidate) => typesCompatible(declared, candidate.field.type));
+    narrow(compatible, `Only ${compatible.length} of them can hold a ${declared} value.`);
+  }
+
+  return surviving;
+}
+
+/* ------------------------- STEP D2: human intent ------------------------- */
+
+/** A human answer for one of these labels on this object, if one has been given. */
+function clarificationFor(
+  labels: readonly string[],
+  request: FieldResolutionRequest
+): FieldClarification | undefined {
+  const wanted = labels.map(foldIdentity);
   return request.clarifications?.find(
     (entry) =>
-      foldIdentity(entry.observedLabel) === wanted &&
+      wanted.includes(foldIdentity(entry.observedLabel)) &&
       (!request.platform || entry.platform === request.platform) &&
-      (!entry.objectApiName || !request.objectApiName || foldIdentity(entry.objectApiName) === foldIdentity(request.objectApiName))
+      (!entry.objectApiName ||
+        !request.objectApiName ||
+        foldIdentity(entry.objectApiName) === foldIdentity(request.objectApiName))
   );
 }
 
-/**
- * How much authority a resolution carries.
- *
- * A tenant describes the org actually on screen; a vendor release
- * describes how the product ships; a human answer is scoped local
- * knowledge; an observed identifier alone is not application knowledge at
- * all. Ranking these matters because two observed signals for one field
- * can resolve through different layers, and treating them as peers made a
- * knowledge-backed answer "conflict" with a meaningless framework-
- * generated name and block the whole input.
- */
-const KNOWLEDGE_AUTHORITY: Record<string, number> = {
-  tenant: 4,
-  standard: 3,
-  "human-confirmed": 2,
-  "observation-only": 1
-};
-
-
-/* ------------------------- epistemic need construction ------------------------- */
+type ClarificationOutcome =
+  /** The person picked one of the readings the model already knew: intent, not a technical claim. */
+  | { kind: "selects-candidate"; candidate: Candidate }
+  /** No metadata knows what they named, and none contradicts it either. */
+  | { kind: "asserts-identity"; apiName: string }
+  /** Authoritative tenant metadata describes this label and does not include their answer. */
+  | { kind: "contradicts-tenant"; apiName: string; known: Candidate[] };
 
 /**
- * The question to ask when the application's own model cannot name a field
- * a human demonstrably used.
+ * What a human answer means, given what the model already knows.
  *
- * Built from the unresolved fact, never improvised: it names only the
- * residual unknown, and everything already established travels in
- * `knownEvidence` so no one is asked for the object, the label, or the
- * platform that the recording already proved.
+ * The same answer is three different things depending on context, which is
+ * exactly why a single authority ranking was the wrong shape:
+ *
+ *   picking `Custom_Stage__c` from two tenant-known fields
+ *     → disambiguating intent. Resolve it; the field's technical
+ *       properties still come from tenant metadata, not from the person.
+ *
+ *   naming `Custom_Stage__c` when tenant metadata describes this label and
+ *   knows no such field
+ *     → an unverified assertion against authoritative metadata. Surface it.
+ *
+ *   naming `Custom_Stage__c` when tenant metadata is unavailable and only
+ *   the vendor default suggested otherwise
+ *     → legitimate: standard knowledge describes how Salesforce ships, not
+ *       how this org is configured. Resolve, marked tenant-unverified.
  */
-function missingApiNameNeed(request: FieldResolutionRequest, label: string): EpistemicNeed {
-  const tenantKnown = Boolean(request.tenant?.describe(request.platform ?? ""));
-  const onObject = request.objectApiName ? ` on ${request.objectApiName}` : "";
+function applyClarification(
+  answer: FieldClarification,
+  candidates: readonly Candidate[],
+  request: FieldResolutionRequest
+): ClarificationOutcome {
+  const wanted = foldIdentity(answer.apiName);
+  const chosen = candidates.find((candidate) => foldIdentity(candidate.field.apiName) === wanted);
+  if (chosen) return { kind: "selects-candidate", candidate: chosen };
+
+  const tenantCandidates = candidates.filter((candidate) => candidate.source === "tenant");
+  if (tenantIsAvailable(request) && tenantCandidates.length > 0) {
+    return { kind: "contradicts-tenant", apiName: answer.apiName, known: tenantCandidates };
+  }
+  return { kind: "asserts-identity", apiName: answer.apiName };
+}
+
+/* --------------------- technical facts, sourced separately --------------------- */
+
+/**
+ * The application's own account of a field, looked up by identity.
+ *
+ * Deliberately independent of how that identity was settled. A person may
+ * tell us WHICH field they used; they do not get to tell us what its
+ * datatype is. So a human answer naming a field the metadata knows still
+ * takes its type and value domain from the metadata.
+ */
+function technicalFactsFor(
+  apiName: string,
+  request: FieldResolutionRequest
+): { field: ResolvedApplicationField; source: "tenant" | "standard" } | undefined {
+  const wanted = foldIdentity(apiName);
+  const tenantField = tenantObjectFor(request)?.fields.find((field) => foldIdentity(field.apiName) === wanted);
+  if (tenantField) return { field: fromTenantField(tenantField, request.objectApiName), source: "tenant" };
+
+  const standardField = standardObjectFor(request)?.fields.find((field) => foldIdentity(field.apiName) === wanted);
+  if (standardField) {
+    return {
+      field: {
+        ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
+        apiName: standardField.apiName,
+        label: standardField.defaultLabel,
+        type: standardField.type
+      },
+      source: "standard"
+    };
+  }
+  return undefined;
+}
+
+/* ------------------------------ needs ------------------------------ */
+
+function suggestionsFrom(candidates: readonly Candidate[]): SuggestedAnswer[] {
+  return candidates.map((candidate) => ({
+    value: candidate.field.apiName,
+    label: candidate.field.label,
+    source: candidate.source === "observed" ? "observation-only" : candidate.source,
+    type: candidate.field.type,
+    detail:
+      candidate.source === "tenant"
+        ? `Tenant metadata: ${candidate.field.custom ? "custom" : "standard"} field, ${candidate.field.type}.`
+        : candidate.source === "standard"
+          ? `Standard Salesforce field, ${candidate.field.type}.`
+          : "Named by the application in the recording; no metadata describes it."
+  }));
+}
+
+function needBase(request: FieldResolutionRequest, label: string | undefined, path: readonly string[]) {
   return {
-    status: "needs-information",
-    kind: "field-api-name",
-    question: `What is the API name for the field labelled "${label}"${onObject}?`,
-    reason:
-      tenantKnown
-        ? `Tenant metadata is available but describes no field labelled "${label}"${onObject}, and the control exposed no identifier of its own. ` +
-          "Without its API name this field cannot be bound durably."
-        : `No tenant metadata is available in this installation, and "${label}" is not a field the vendor's standard model ships${onObject}. ` +
-          "One answer unblocks this capability; full metadata access is not required.",
-    blocking: true,
+    blocking: true as const,
     knownEvidence: {
       inputName: request.inputName,
       ...(request.platform ? { platform: request.platform } : {}),
       ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
-      observedLabel: label
+      ...(label ? { observedLabel: label } : {})
     },
-    resolutionSources: tenantKnown ? ["human"] : ["tenant-metadata", "human"]
-  };
-}
-
-/** A choice, not a question: the system has candidates but no grounds to pick. */
-function ambiguityNeed(
-  request: FieldResolutionRequest,
-  suggestions: SuggestedAnswer[],
-  reason: string
-): EpistemicNeed {
-  return {
-    status: "ambiguous",
-    kind: "field-choice",
-    question: `Which application field does "${request.inputName}" refer to?`,
-    reason,
-    blocking: true,
-    knownEvidence: {
-      inputName: request.inputName,
-      ...(request.platform ? { platform: request.platform } : {}),
-      ...(request.objectApiName ? { objectApiName: request.objectApiName } : {})
-    },
-    ...(suggestions.length > 0 ? { suggestedAnswers: suggestions } : {}),
-    resolutionSources: ["human"]
+    resolutionPath: [...path]
   };
 }
 
 /**
- * The outcome when no observed signal could be explained.
+ * The question when several known candidates survive.
  *
- * A label the system saw but cannot identify is a question worth asking. A
- * signal that carried nothing to reason about is not — there is no fact a
- * human could supply that would make an anonymous event meaningful.
+ * It names them, with their sources and types, because the system already
+ * knows them. Asking "what is the API name?" here would be asking a person
+ * to repeat information we possess.
  */
-function unresolvedOutcome(
+function choiceNeed(
   request: FieldResolutionRequest,
-  failures: Array<Extract<Attempt, { ok: false }>>
-): FieldResolution {
-  const unknownLabel = failures.find((failure) => failure.unknownLabel)?.unknownLabel;
-  const reason = failures[0]?.reason ?? `"${request.inputName}" could not be grounded in the application's model.`;
-  if (!unknownLabel) return { status: "blocked", ok: false, reason };
-  return { status: "needs-information", ok: false, reason, need: missingApiNameNeed(request, unknownLabel) };
+  label: string | undefined,
+  candidates: readonly Candidate[],
+  path: readonly string[]
+): EpistemicNeed {
+  return {
+    ...needBase(request, label, path),
+    status: "ambiguous",
+    kind: "field-choice",
+    subreason: "insufficient-evidence",
+    question: `Which field did you change${label ? ` when you edited "${label}"` : ""}?`,
+    reason:
+      `${candidates.length} fields${request.objectApiName ? ` on ${request.objectApiName}` : ""} match what was observed, ` +
+      "and this recording contains nothing that distinguishes them — no identifier, no value, and no type difference.",
+    suggestedAnswers: suggestionsFrom(candidates),
+    resolutionSources: ["human"]
+  };
 }
 
-/** A human answer the application's own model disagrees with. */
-function contradictingClarification(
-  winner: Extract<Attempt, { ok: true }> & { observed: ObservedFieldCandidate },
-  request: FieldResolutionRequest
-): FieldClarification | undefined {
-  if (winner.knowledge !== "tenant" && winner.knowledge !== "standard") return undefined;
-  const label = winner.observed.label?.replace(/^\*/, "").trim();
-  if (!label) return undefined;
-  const answered = clarificationFor(label, request);
-  return answered && foldIdentity(answered.apiName) !== foldIdentity(winner.field.apiName) ? answered : undefined;
+/** The question when nothing in the model matches at all. */
+function missingApiNameNeed(request: FieldResolutionRequest, label: string, path: readonly string[]): EpistemicNeed {
+  const tenantKnown = tenantIsAvailable(request);
+  const onObject = request.objectApiName ? ` on ${request.objectApiName}` : "";
+  return {
+    ...needBase(request, label, path),
+    status: "needs-information",
+    kind: "field-api-name",
+    subreason: tenantKnown ? "unknown" : "knowledge-unavailable",
+    question: `What is the API name for the field labelled "${label}"${onObject}?`,
+    reason: tenantKnown
+      ? `Tenant metadata is available for this org but describes no field labelled "${label}"${onObject}, and the control ` +
+        "exposed no identifier of its own. The fact is genuinely unknown, not merely out of reach."
+      : `No tenant metadata is available in this installation, and "${label}" is not a field the vendor's standard model ` +
+        `ships${onObject}. This is being asked because org metadata is unavailable, not because the field is unknowable — ` +
+        "one answer unblocks this capability, and full metadata access is not required.",
+    resolutionSources: tenantKnown ? ["human"] : ["tenant-metadata", "human"]
+  };
+}
+
+/** The question when a human answer and authoritative tenant metadata disagree. */
+function conflictNeed(
+  request: FieldResolutionRequest,
+  label: string | undefined,
+  answered: string,
+  known: readonly Candidate[],
+  path: readonly string[]
+): EpistemicNeed {
+  return {
+    ...needBase(request, label, path),
+    status: "ambiguous",
+    kind: "field-choice",
+    subreason: "conflicting",
+    question: `Which field did you change${label ? ` when you edited "${label}"` : ""}?`,
+    reason:
+      `A human answer names ${answered}, but tenant metadata for this org lists ` +
+      `${known.map((candidate) => candidate.field.apiName).join(", ")} for that label and knows no such field. ` +
+      "Authoritative org metadata is not overridden silently.",
+    suggestedAnswers: [
+      ...suggestionsFrom(known),
+      {
+        value: answered,
+        source: "human-confirmed" as const,
+        detail: "Previously supplied by a human; unverified by tenant metadata."
+      }
+    ],
+    resolutionSources: ["human", "tenant-metadata"]
+  };
 }
 
 /**
@@ -367,17 +560,18 @@ function contradictingClarification(
  * A picklist whose value domain is unknown still binds and still executes —
  * the live control remains the authority on what it will accept. But the
  * typed form cannot offer a real choice, and that is a consequence of
- * missing tenant metadata rather than of anything the human did, so it is
- * reported as a non-blocking setup gap instead of disappearing.
+ * missing tenant metadata rather than of anything the human did.
  */
 function unknownDomainNeed(
   request: FieldResolutionRequest,
-  field: ResolvedApplicationField
+  field: ResolvedApplicationField,
+  path: readonly string[]
 ): EpistemicNeed | undefined {
   if (field.type !== "picklist" || (field.options && field.options.length > 0)) return undefined;
   return {
     status: "needs-setup",
     kind: "tenant-metadata",
+    subreason: "knowledge-unavailable",
     question: `Which values are valid for "${field.label}"?`,
     reason:
       `${field.apiName} is a picklist, but no tenant metadata is available to say which values this org allows. ` +
@@ -390,152 +584,217 @@ function unknownDomainNeed(
       ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
       observedLabel: field.label
     },
+    resolutionPath: [...path],
     resolutionSources: ["tenant-metadata", "runtime-context"]
   };
 }
 
+/* ------------------------------ resolution ------------------------------ */
+
+function resolvedWith(
+  request: FieldResolutionRequest,
+  identity: ResolvedApplicationField,
+  observed: ObservedFieldCandidate,
+  knowledge: "tenant" | "standard" | "human-confirmed" | "observation-only",
+  path: string[],
+  extras: { intentDisambiguatedByHuman?: boolean; tenantUnverified?: boolean } = {}
+): FieldResolution {
+  const objectPrefix = identity.objectApiName ? `${identity.objectApiName}.` : "";
+  const by =
+    knowledge === "tenant"
+      ? "with technical properties from tenant metadata"
+      : knowledge === "standard"
+        ? `with technical properties from standard application knowledge${request.standard ? ` (${request.standard.release})` : ""}`
+        : knowledge === "human-confirmed"
+          ? "on an identity supplied by a human, which no application metadata has confirmed"
+          : "not described by any application knowledge, so the observed identifier stands alone";
+
+  path.push(`Resolved ${objectPrefix}${identity.apiName}.`);
+  path.push(
+    extras.intentDisambiguatedByHuman
+      ? "Resolved demonstrated intent; technical properties sourced from application metadata."
+      : "No user clarification required."
+  );
+
+  const domainNeed = unknownDomainNeed(request, identity, path);
+  return {
+    status: "resolved",
+    ok: true,
+    field: identity,
+    observed,
+    ...(domainNeed ? { need: domainNeed } : {}),
+    grounding: {
+      evidence: observed.applicationIdentifier ? "application-identifier" : "visible-label",
+      knowledge,
+      ...(knowledge === "standard" && request.standard ? { release: request.standard.release } : {}),
+      ...(extras.intentDisambiguatedByHuman ? { intentDisambiguatedByHuman: true } : {}),
+      ...(extras.tenantUnverified ? { tenantUnverified: true } : {}),
+      path: [...path],
+      detail:
+        `"${request.inputName}" was observed in the recording and resolved to ${objectPrefix}${identity.apiName} ` +
+        `(${identity.type}), ${by}.` +
+        (extras.intentDisambiguatedByHuman ? " A person identified which candidate they used." : "") +
+        (extras.tenantUnverified ? " Tenant metadata has not verified this." : "")
+    }
+  };
+}
+
+function blocked(reason: string): FieldResolution {
+  return { status: "blocked", ok: false, reason };
+}
+
 /**
- * Grounds one capability input, or refuses.
+ * Grounds one capability input, or says precisely what it still needs.
  *
- * Refusal is a first-class outcome. An input that cannot be grounded
- * uniquely blocks the whole binding upstream, which is the behaviour that
- * keeps a wrong write from ever being attempted.
+ * Refusal is a first-class outcome, but so is a question: an input that
+ * cannot be grounded blocks the binding upstream either way, and the
+ * difference between "this failed" and "one specific fact would fix this"
+ * is the difference between a dead end and a next step.
  */
 export function resolveApplicationField(request: FieldResolutionRequest): FieldResolution {
+  const path: string[] = [];
+
   // STEP A — evidence gate. Knowledge cannot open this door.
   const matches = observedMatchesFor(request);
   if (matches.length === 0) {
-    // Not an epistemic need: nothing is missing that a human could supply.
-    // The recording simply does not show this field being used, and no
-    // answer changes that without a new demonstration.
-    return {
-      status: "blocked",
-      ok: false,
-      reason: `No observed field identifier or visible label matches "${request.inputName}".`
-    };
+    // Not an epistemic need: no answer makes an undemonstrated field part
+    // of what the human taught. Only a new recording would.
+    return blocked(`No observed field identifier or visible label matches "${request.inputName}".`);
   }
 
-  // STEP C — what the observed signals mean.
-  // Ordered the way the platform pack declares identity priority:
-  // an identifier the application exposed outranks an accessible name,
-  // regardless of which event carried it. The live capture makes the
-  // difference concrete — the *click* on Close Date named the control while
-  // the stronger `field_change` was retargeted to a nameless shadow host,
-  // so ranking by event strength alone would ground the field on its label
-  // when the application had named it outright.
-  const attempts = matches
-    .slice()
-    .sort((left, right) => {
-      const named = Number(Boolean(right.applicationIdentifier)) - Number(Boolean(left.applicationIdentifier));
-      return named !== 0 ? named : right.strength - left.strength;
-    })
-    .map((candidate) => {
-      const attempt = attemptFor(candidate, request);
-      return attempt.ok ? { ...attempt, observed: candidate } : attempt;
-    });
+  const labels = [...new Set(matches.map((match) => cleanLabel(match.label)).filter(Boolean) as string[])];
+  const primaryLabel = labels[0];
+  path.push(`Observed "${primaryLabel ?? request.inputName}"${request.objectApiName ? ` on ${request.objectApiName}` : ""}.`);
 
-  const failures = attempts.filter((attempt): attempt is Extract<Attempt, { ok: false }> => !attempt.ok);
-  const hardBlock = failures.find((attempt) => attempt.hard);
-  if (hardBlock) {
-    return {
-      status: "ambiguous",
-      ok: false,
-      reason: hardBlock.reason,
-      need: ambiguityNeed(request, hardBlock.candidates ?? [], hardBlock.reason)
-    };
-  }
+  // The signal used to describe how the control is found on screen. An
+  // identifier the application exposed outranks an accessible name, which
+  // mirrors the platform pack's declared identity priority.
+  const observed =
+    matches.find((match) => match.applicationIdentifier && match.label) ??
+    matches.find((match) => match.applicationIdentifier) ??
+    matches.slice().sort((left, right) => right.strength - left.strength)[0];
 
-  const allResolved = attempts.filter((attempt): attempt is Extract<Attempt, { ok: true }> => attempt.ok);
-  if (allResolved.length === 0) {
-    return unresolvedOutcome(request, failures);
-  }
+  // STEP C — gather every reading the application's model supports.
+  const candidates = gatherCandidates(matches, request, path);
+  const answer = clarificationFor(labels, request);
 
-  // STEP E — consistency and uniqueness, computed over EVERY reading.
-  //
-  // Authority decides which layer explains a field; it must not be used to
-  // silence a disagreement. Two observed signals that name two different
-  // application fields is a real conflict even when one of them resolved
-  // through stronger knowledge — quietly preferring the recognized one
-  // would be exactly the "silently choose a potentially wrong mapping"
-  // failure this system exists to avoid. It is now a choice put to a human
-  // rather than a dead end.
-  const resolved = allResolved;
-  const distinct = [...new Set(resolved.map((attempt) => attempt.field.apiName))];
-  if (distinct.length > 1) {
-    const reason = `"${request.inputName}" matches several observed fields resolving to different application fields: ${distinct.join(", ")}. A human must choose.`;
-    return {
-      status: "ambiguous",
-      ok: false,
-      reason,
-      need: ambiguityNeed(
+  if (candidates.length === 0) {
+    if (observed.applicationIdentifier && !answer) {
+      // The application named a control no knowledge layer recognizes. The
+      // name itself is evidence; it is reported as standing alone.
+      path.push("No application knowledge describes it; the observed identifier stands alone.");
+      return resolvedWith(
         request,
-        resolved.map((attempt) => ({
-          value: attempt.field.apiName,
-          label: attempt.field.label,
-          source: attempt.knowledge,
-          detail: `Observed as "${attempt.observed.label ?? attempt.observed.applicationIdentifier}".`
-        })),
-        reason
-      )
+        {
+          ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
+          apiName: observed.applicationIdentifier,
+          label: cleanLabel(observed.label) ?? observed.applicationIdentifier,
+          type: request.inputType ?? "string"
+        },
+        observed,
+        "observation-only",
+        path
+      );
+    }
+    if (!primaryLabel) {
+      return blocked("The observed interaction carried neither an application identifier nor a visible label.");
+    }
+
+    path.push("No application knowledge describes that label.");
+    if (answer) {
+      // Nothing in the model to contradict, so the human answer stands. Its
+      // technical facts still come from metadata if metadata knows the field.
+      const facts = technicalFactsFor(answer.apiName, request);
+      path.push(`A person identified it as ${answer.apiName}.`);
+      return resolvedWith(
+        request,
+        facts?.field ?? {
+          ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
+          apiName: answer.apiName,
+          label: primaryLabel,
+          type: answer.type ?? request.inputType ?? "string",
+          ...(answer.apiName.endsWith("__c") ? { custom: true } : {})
+        },
+        observed,
+        facts?.source ?? "human-confirmed",
+        path,
+        { tenantUnverified: true }
+      );
+    }
+    const need = missingApiNameNeed(request, primaryLabel, path);
+    return {
+      status: "needs-information",
+      ok: false,
+      reason:
+        `No application field identifier was observed for "${primaryLabel}", and no application knowledge identifies ` +
+        `that label${request.objectApiName ? ` on ${request.objectApiName}` : ""}.`,
+      need
     };
   }
-  // Every reading agrees on WHICH field this is; authority now decides
-  // WHICH LAYER's account of it to keep. This is where a tenant's own
-  // configuration supersedes the vendor default — same field, better
-  // description: the org's real label, its configured type, its values.
-  const winner = resolved
-    .slice()
-    .sort((left, right) => (KNOWLEDGE_AUTHORITY[right.knowledge] ?? 0) - (KNOWLEDGE_AUTHORITY[left.knowledge] ?? 0))[0];
 
-  // A human answer that the application's own model contradicts is not
-  // quietly overridden in either direction; the disagreement is the finding.
-  const contradiction = contradictingClarification(winner, request);
-  if (contradiction) {
+  // STEP D — discriminate with what the recording already contains.
+  const surviving = discriminate(candidates, matches, request, path);
+
+  // STEP D2 — a human answer is the last discriminator, never the first.
+  if (answer) {
+    const outcome = applyClarification(answer, surviving, request);
+    if (outcome.kind === "selects-candidate") {
+      path.push(`A person identified ${outcome.candidate.field.apiName} as the field they changed.`);
+      return resolvedWith(
+        request,
+        outcome.candidate.field,
+        observed,
+        outcome.candidate.source === "observed" ? "observation-only" : outcome.candidate.source,
+        path,
+        { intentDisambiguatedByHuman: true }
+      );
+    }
+    if (outcome.kind === "contradicts-tenant") {
+      path.push(`A person named ${outcome.apiName}, which tenant metadata does not list for this label.`);
+      const need = conflictNeed(request, primaryLabel, outcome.apiName, outcome.known, path);
+      return { status: "ambiguous", ok: false, reason: need.reason, need };
+    }
+    // Standard knowledge describes the vendor default, not this org, so a
+    // person naming a field it does not ship is not contradicting anything
+    // authoritative about this tenant.
+    const facts = technicalFactsFor(outcome.apiName, request);
+    path.push(`A person identified it as ${outcome.apiName}; no tenant metadata is available to verify that.`);
+    return resolvedWith(
+      request,
+      facts?.field ?? {
+        ...(request.objectApiName ? { objectApiName: request.objectApiName } : {}),
+        apiName: outcome.apiName,
+        label: primaryLabel ?? outcome.apiName,
+        type: answer.type ?? request.inputType ?? "string",
+        ...(outcome.apiName.endsWith("__c") ? { custom: true } : {})
+      },
+      observed,
+      facts?.source ?? "human-confirmed",
+      path,
+      { tenantUnverified: true }
+    );
+  }
+
+  if (surviving.length > 1) {
+    path.push("Available evidence could not distinguish them.");
+    const need = choiceNeed(request, primaryLabel, surviving, path);
     return {
       status: "ambiguous",
       ok: false,
       reason:
-        `A human answered that "${contradiction.observedLabel}" is ${contradiction.apiName}, but ` +
-        `${winner.knowledge === "tenant" ? "tenant metadata" : "standard application knowledge"} identifies it as ` +
-        `${winner.field.apiName}. This contradiction must be settled before the field can be bound.`,
-      need: ambiguityNeed(
-        request,
-        [
-          { value: winner.field.apiName, label: winner.field.label, source: winner.knowledge, detail: "From application knowledge." },
-          { value: contradiction.apiName, label: contradiction.observedLabel, source: "human-confirmed", detail: "Previously supplied by a human." }
-        ],
-        "Application knowledge and a human answer disagree."
-      )
+        `"${request.inputName}" matches several application fields: ` +
+        `${surviving.map((candidate) => candidate.field.apiName).join(", ")}. A human must choose.`,
+      need
     };
   }
-  const objectPrefix = winner.field.objectApiName ? `${winner.field.objectApiName}.` : "";
-  const via =
-    winner.evidence === "application-identifier"
-      ? "the identifier the control exposed"
-      : `the visible label "${winner.field.label}"`;
-  const by =
-    winner.knowledge === "tenant"
-      ? "confirmed by tenant metadata"
-      : winner.knowledge === "standard"
-        ? `confirmed by standard application knowledge${request.standard ? ` (${request.standard.release})` : ""}`
-        : winner.knowledge === "human-confirmed"
-          ? "supplied by a human for this capability, and confirmed by no application metadata"
-          : "not described by any application knowledge, so the observed identifier stands alone";
 
-  const domainNeed = unknownDomainNeed(request, winner.field);
-  return {
-    status: "resolved",
-    ok: true,
-    field: winner.field,
-    observed: winner.observed,
-    ...(domainNeed ? { need: domainNeed } : {}),
-    grounding: {
-      evidence: winner.evidence,
-      knowledge: winner.knowledge,
-      ...(winner.knowledge === "standard" && request.standard ? { release: request.standard.release } : {}),
-      detail:
-        `"${request.inputName}" was observed in the recording and resolved through ${via} to ` +
-        `${objectPrefix}${winner.field.apiName} (${winner.field.type}), ${by}.`
-    }
-  };
+  // STEP E — one reading survives. Its technical facts are the candidate's own.
+  const winner = surviving[0];
+  return resolvedWith(
+    request,
+    winner.field,
+    observed,
+    winner.source === "observed" ? "observation-only" : winner.source,
+    path
+  );
 }
