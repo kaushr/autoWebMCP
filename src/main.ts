@@ -67,6 +67,34 @@ let validation: BindingValidationRecord | undefined;
 let validationStatus = "";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
+/**
+ * Set only while the control plane appears unreachable. Distinct from any
+ * single panel's status caption: a dead connection fails every panel at once,
+ * and a one-line message next to whichever button happened to be clicked is
+ * easy to read as "that one thing is broken" rather than "nothing here can
+ * work right now". This is checked at the top of the page instead.
+ */
+let connectionIssue: string | undefined;
+
+/**
+ * `TypeError` is what `fetch` throws when a request never reached a server at
+ * all — refused connection, DNS failure, or, locally, no dev server listening.
+ * That is a different failure from the server responding with an error, and
+ * it is what "Reset doesn't clear all the traces" turned out to be: the reset
+ * call itself never reached the control plane, so nothing was cleared, and
+ * every other panel failed the same way in the same moment for the same
+ * reason. A per-panel caption alone did not make that obvious.
+ */
+function describeActionFailure(action: string, error: unknown): string {
+  if (error instanceof TypeError) {
+    connectionIssue =
+      "AutoWebMCP cannot reach its local control plane, so nothing on this page can update right now. " +
+      "Start it (`npm run dev:semanticizer`) or confirm it is still running, then try again.";
+    return `${action} could not reach the control plane.`;
+  }
+  connectionIssue = undefined;
+  return error instanceof Error ? error.message : `${action} failed.`;
+}
 
 /**
  * Clears the current candidate/execution/validation pointers.
@@ -102,6 +130,14 @@ function escapeHtml(value: string): string {
     "'": "&#39;",
     '"': "&quot;"
   })[character] ?? character);
+}
+
+/** Unmissable on purpose: a dead connection is not one panel's problem. */
+function renderConnectionBanner(): string {
+  if (!connectionIssue) return "";
+  return `<div class="connection-banner" role="alert"><strong>Connection problem.</strong> ${escapeHtml(
+    connectionIssue
+  )}</div>`;
 }
 
 function describeObservation(observation: ObservationTrace["observations"][number]): string {
@@ -878,11 +914,13 @@ function render(): void {
         <div class="studio-links"><a href="/prospect/">Open SignalBase &#8599;</a><a href="/?control=1">WebMCP control</a></div>
         ${captureMode ? `<p id="capture-probe-status" class="runtime-status registered">rrweb probe active · raw events remain in memory and inputs are masked</p>` : ""}
       </section>
+      ${renderConnectionBanner()}
       ${renderTrainingStudio()}
     </main>`;
 
   document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", async () => {
     traceStatus = "Loading extension traces…";
+    connectionIssue = undefined;
     render();
     try {
       extensionTraces = await listTraces();
@@ -890,18 +928,19 @@ function render(): void {
         ? "Select a capture to review its normalized evidence."
         : "No traces yet. Start and stop a training session in the extension.";
     } catch (error) {
-      traceStatus = error instanceof Error ? error.message : "Could not reach the trace endpoint.";
+      traceStatus = describeActionFailure("Refreshing traces", error);
     }
     render();
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-trace-id]").forEach((button) => {
     button.addEventListener("click", async () => {
+      connectionIssue = undefined;
       try {
         selectedTrace = await getTrace(button.dataset.traceId ?? "");
         traceStatus = `Loaded ${selectedTrace.observations.length} observations from ${selectedTrace.application.host}.`;
       } catch (error) {
-        traceStatus = error instanceof Error ? error.message : "Could not load that trace.";
+        traceStatus = describeActionFailure("Loading that trace", error);
       }
       // A newly selected capture has its own capability, execution, and
       // validation story; the previous one's does not carry over.
@@ -915,6 +954,7 @@ function render(): void {
   document.querySelector<HTMLButtonElement>("#semanticize-extension-trace")?.addEventListener("click", async () => {
     if (!selectedTrace) return;
     traceStatus = "Proposing a bounded candidate capability from extension evidence…";
+    connectionIssue = undefined;
     render();
     try {
       const run = await semanticizeTrace({
@@ -954,7 +994,7 @@ function render(): void {
       traceStatus = "Candidate ready for human review.";
       semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
     } catch (error) {
-      traceStatus = error instanceof Error ? error.message : "Candidate generation failed.";
+      traceStatus = describeActionFailure("Candidate generation", error);
     }
     render();
   });
@@ -1027,13 +1067,14 @@ function render(): void {
   document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", async () => {
     if (!candidate) return;
     publishStatus = "Publishing…";
+    connectionIssue = undefined;
     render();
     try {
       const record = await publishCapability(candidate);
       publications = await listPublishedCapabilities();
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
-      publishStatus = error instanceof Error ? error.message : "Publishing failed.";
+      publishStatus = describeActionFailure("Publishing", error);
     }
     render();
   });
@@ -1041,6 +1082,7 @@ function render(): void {
   document.querySelector<HTMLButtonElement>("#generate-binding")?.addEventListener("click", async () => {
     if (!candidate || !selectedTrace) return;
     bindingStatus = "Looking for an execution path in the strongest evidence…";
+    connectionIssue = undefined;
     // A new suggestion supersedes whatever was validated for the previous
     // one; that proof does not carry over to a different candidate.
     clearExecutionState();
@@ -1053,7 +1095,7 @@ function render(): void {
         ? "Execution path suggested. It is a lead to validate, not a binding."
         : "No safe execution path was found from this evidence.";
     } catch (error) {
-      bindingStatus = error instanceof Error ? error.message : "Execution analysis failed.";
+      bindingStatus = describeActionFailure("Execution analysis", error);
     }
     render();
   });
@@ -1067,6 +1109,7 @@ function render(): void {
     if (!candidate || !selectedTrace || !bindingCandidate) return;
     bindingCandidate = { ...bindingCandidate, state: "accepted-for-validation" };
     validationStatus = "Validating the suggested execution path…";
+    connectionIssue = undefined;
     render();
 
     const mapping = resolveFieldMapping(candidate, selectedTrace);
@@ -1093,7 +1136,7 @@ function render(): void {
           ? "Validated. Accept it to make it the execution binding."
           : `Validation result: ${result.status}. No execution binding was created.`;
     } catch (error) {
-      validationStatus = error instanceof Error ? error.message : "Validation failed.";
+      validationStatus = describeActionFailure("Validation", error);
     }
     render();
   });
@@ -1124,6 +1167,7 @@ function render(): void {
     );
     if (!confirmed) return;
 
+    connectionIssue = undefined;
     try {
       const result = await resetControlPlane();
       extensionTraces = [];
@@ -1145,7 +1189,7 @@ function render(): void {
       publishStatus = "Nothing has been published yet.";
       comparisonStatus = `Cleared ${result.traces} traces and ${result.publications} publications.`;
     } catch (error) {
-      comparisonStatus = error instanceof Error ? error.message : "Reset failed.";
+      comparisonStatus = describeActionFailure("Reset", error);
     }
     render();
   });
@@ -1180,6 +1224,7 @@ function render(): void {
 
   document.querySelector<HTMLButtonElement>("#load-comparison")?.addEventListener("click", async () => {
     comparisonStatus = "Loading captures…";
+    connectionIssue = undefined;
     render();
     try {
       const summaries = await listTraces();
@@ -1187,28 +1232,30 @@ function render(): void {
       comparisonTraces = loaded;
       comparisonStatus = `${loaded.length} captures loaded. Compare the request each Save produced.`;
     } catch (error) {
-      comparisonStatus = error instanceof Error ? error.message : "Could not load captures.";
+      comparisonStatus = describeActionFailure("Loading captures", error);
     }
     render();
   });
 
   document.querySelector<HTMLButtonElement>("#refresh-publications")?.addEventListener("click", async () => {
+    connectionIssue = undefined;
     try {
       publications = await listPublishedCapabilities();
       publishStatus = publications.length ? "Published capabilities loaded." : "Nothing has been published yet.";
     } catch (error) {
-      publishStatus = error instanceof Error ? error.message : "Could not reach the control plane.";
+      publishStatus = describeActionFailure("Refreshing publications", error);
     }
     render();
   });
 
   document.querySelector<HTMLButtonElement>("#unpublish-all")?.addEventListener("click", async () => {
+    connectionIssue = undefined;
     try {
       const removed = await unpublishAll();
       publications = [];
       publishStatus = `Unpublished ${removed}. WebMCP has no unregister, so reload the taught site to clear its tool surface.`;
     } catch (error) {
-      publishStatus = error instanceof Error ? error.message : "Could not reach the control plane.";
+      publishStatus = describeActionFailure("Unpublish all", error);
     }
     render();
   });
@@ -1222,8 +1269,8 @@ void listPublishedCapabilities()
     if (records.length) publishStatus = "Published capabilities loaded.";
     render();
   })
-  .catch(() => {
-    publishStatus = "Control plane unreachable. Run `npm run dev:semanticizer` to publish.";
+  .catch((error) => {
+    publishStatus = describeActionFailure("Loading publications", error);
     render();
   });
 

@@ -21,3 +21,4 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 .lifecycle-stage.stage-blocked .stage-badge, .lifecycle-stage.stage-proposed .stage-badge, .lifecycle-stage.stage-not-analyzed .stage-badge, .lifecycle-stage.stage-not-started .stage-badge, .lifecycle-stage.stage-not-applicable .stage-badge, .lifecycle-stage.stage-inconclusive .stage-badge { color: #9fafca; }
 .lifecycle-section { margin: .9rem 0 0; padding: .85rem 1rem; border: 1px dashed #4a6394; border-radius: 9px; background: rgba(6,15,29,.4); }
 .lifecycle-section .capability-state { margin-top: .5rem; }
+.connection-banner { margin: 0 0 1.4rem; padding: .85rem 1.1rem; border: 1px solid #a15a4a; border-radius: 10px; background: rgba(224,138,122,.14); color: #f3d8d0; font-size: .92rem; line-height: 1.5; }.connection-banner strong { color: #f6c9bd; }
