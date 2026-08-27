@@ -1,6 +1,7 @@
 import { defaultPlatformIntelligenceProvider, type PlatformIntelligenceProvider } from "../../platformIntelligence";
 import { createSalesforceResolverAdapter } from "./salesforceAdapter";
 import { DEFAULT_RESOLUTION_POLICY, type ResolutionPolicy } from "./resolutionPolicy";
+import { DEFAULT_PAGE_STATE_POLICY, type PageStatePolicy } from "./pageState";
 import type { PlatformResolverAdapter } from "./engine";
 
 /* ------------------------------------------------------------------ *
@@ -17,7 +18,7 @@ import type { PlatformResolverAdapter } from "./engine";
  * No model is consulted; a DOM lookup must stay deterministic.
  * ------------------------------------------------------------------ */
 
-const ADAPTERS: Record<string, () => PlatformResolverAdapter> = {
+const ADAPTERS: Record<string, (pageState: PageStatePolicy) => PlatformResolverAdapter> = {
   "salesforce-lightning": createSalesforceResolverAdapter
 };
 
@@ -40,6 +41,24 @@ export function resolutionPolicyForPlatform(
   };
 }
 
+/**
+ * How this platform's record-edit state is recognized, from its pack. The
+ * conservative generic default applies when a pack declares nothing.
+ */
+export function pageStatePolicyForPlatform(
+  platform: string,
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): PageStatePolicy {
+  const declared = intelligence.getPageStateSemantics(platform);
+  if (!declared) return DEFAULT_PAGE_STATE_POLICY;
+  return {
+    editSurfaceComponents: [...declared.pageState.editSurface.componentEvidence],
+    minimumEditableFields: declared.pageState.editSurface.minimumEditableFields,
+    commitActionLabels: [...declared.pageState.editSurface.commitActionLabels],
+    dismissActionLabels: [...declared.pageState.editSurface.dismissActionLabels]
+  };
+}
+
 /** Which pack knowledge produced the policy in force, for execution evidence. */
 export function resolutionProvenanceForPlatform(
   platform: string,
@@ -48,7 +67,9 @@ export function resolutionProvenanceForPlatform(
   const declared = intelligence.getResolutionPolicy(platform);
   if (!declared) return undefined;
   const { packId, packVersion, knowledgeEntryIds } = declared.provenance;
-  return `Resolution policy from ${packId}@${packVersion} (${knowledgeEntryIds.join(", ")}).`;
+  const pageState = intelligence.getPageStateSemantics(platform);
+  const entryIds = [...knowledgeEntryIds, ...(pageState?.provenance.knowledgeEntryIds ?? [])];
+  return `Resolution policy from ${packId}@${packVersion} (${entryIds.join(", ")}).`;
 }
 
 /**
@@ -60,7 +81,8 @@ export function resolverAdapterForPlatform(
   platform: string,
   intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
 ): PlatformResolverAdapter | undefined {
-  const adapter = ADAPTERS[platform]?.();
-  if (!adapter) return undefined;
+  const factory = ADAPTERS[platform];
+  if (!factory) return undefined;
+  const adapter = factory(pageStatePolicyForPlatform(platform, intelligence));
   return { ...adapter, resolutionPolicy: resolutionPolicyForPlatform(platform, intelligence) };
 }

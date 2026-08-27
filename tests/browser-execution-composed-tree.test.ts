@@ -252,11 +252,15 @@ describe("end-to-end through nested components", () => {
         dialog.appendChild(document.createElement("record-edit-form")),
         `<label for="cd">*Close Date</label>
          <mirrored-value-host id="cd" name="CloseDate"></mirrored-value-host>
-         <button name="SaveEdit">Save</button>`
+         <label for="am">Amount</label>
+         <input id="am" name="Amount" />
+         <button name="SaveEdit">Save</button>
+         <button>Cancel</button>`
       );
       form.querySelector("button")!.addEventListener("click", () => {
-        dialog.removeAttribute("role");
-        dialog.removeAttribute("aria-modal");
+        // A real successful Lightning save removes the edit modal entirely,
+        // record-edit component and all.
+        dialog.remove();
       });
     });
 
@@ -283,6 +287,7 @@ describe("end-to-end through nested components", () => {
     });
 
     expect(result.status).toBe("succeeded");
-    expect(result.evidence).toContain("Entered the record's edit view before resolving targets.");
+    expect(result.checks.map((check) => `${check.name}:${check.status}`)).toContain("editable_state:pass");
+    expect(result.evidence.join("\n")).toMatch(/Resulting Salesforce page state: record-edit/);
   });
 });

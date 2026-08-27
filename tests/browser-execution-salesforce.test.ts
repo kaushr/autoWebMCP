@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import { createSalesforceResolverAdapter } from "../src/binding/browserExecution/salesforceAdapter";
 import type { ResolvedTarget } from "../src/binding/browserExecution/engine";
 import type { SemanticTarget } from "../src/binding/browserExecution/model";
-import { resolutionPolicyForPlatform } from "../src/binding/browserExecution/adapters";
+import { resolutionPolicyForPlatform, resolverAdapterForPlatform } from "../src/binding/browserExecution/adapters";
 
 /** The real policy Salesforce declares in its pack — not a test-local invention. */
 const SF = resolutionPolicyForPlatform("salesforce-lightning");
+/** The production composition root, carrying the pack's page-state semantics. */
+const salesforceAdapter = () => resolverAdapterForPlatform("salesforce-lightning")!;
 
 function mount(html: string): HTMLElement {
   document.body.innerHTML = "";
@@ -184,76 +186,102 @@ describe("Salesforce adapter — validation and edit-state detection", () => {
     expect(adapter.hasValidationError!(root, SF)).toBe(false);
   });
 
-  it("reports the edit surface as still open while a record-edit modal is present", () => {
-    const root = mount(`<div role="dialog" aria-modal="true">editing…</div>`);
-    const adapter = createSalesforceResolverAdapter();
+  it("reports the edit surface as still open while a genuine record-edit modal is present", () => {
+    const root = mount(EDIT_SURFACE_HTML);
+    const adapter = salesforceAdapter();
     expect(adapter.isEditStateClosed!(root, SF)).toBe(false);
   });
 
-  it("reports the edit surface as closed once no edit modal remains", () => {
-    const root = mount(`<div>record view</div>`);
-    const adapter = createSalesforceResolverAdapter();
+  it("reports the edit surface as closed once no record-edit surface remains — an unrelated leftover dialog does not count", () => {
+    const root = mount(`<div role="dialog" aria-modal="true">a docked utility panel</div>`);
+    const adapter = salesforceAdapter();
     expect(adapter.isEditStateClosed!(root, SF)).toBe(true);
   });
 });
 
-describe("Salesforce adapter — entering edit mode", () => {
-  it("declines — reports already-editable — when an edit surface is already open", async () => {
-    const root = mount(`<div role="dialog" aria-modal="true">already editing</div>`);
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(true);
-  });
+/**
+ * A genuine record-edit surface under the pack's semantics: a modal holding
+ * multiple editable record fields together with a Save commit action.
+ */
+const EDIT_SURFACE_HTML = `
+  <div role="dialog" aria-modal="true" id="edit-dialog">
+    <label for="cd">*Close Date</label><input id="cd" name="CloseDate" />
+    <label for="am">Amount</label><input id="am" name="Amount" />
+    <button>Save</button><button>Cancel</button>
+  </div>
+`;
 
-  it("does not mistake a hidden dialog elsewhere on the page for an already-open edit surface", async () => {
-    // The exact false positive a live Salesforce record view produced: an
-    // unrelated dialog-role container (e.g. a help panel, a pre-rendered
-    // modal for a different feature) sits in the DOM but hidden, and a
-    // presence-only check reads that as "already editing" — skipping the
-    // Edit click entirely, so the page never visibly changes and the field
-    // that would have appeared in a real edit form is never found.
+function appendEditSurface(target: Element): void {
+  const holder = document.createElement("div");
+  holder.innerHTML = EDIT_SURFACE_HTML;
+  target.appendChild(holder.firstElementChild!);
+}
+
+describe("Salesforce adapter — page-state model", () => {
+  it("case 1: record view with a visible unrelated dialog stays record-view — the live false positive", async () => {
+    // The exact live failure: a Lightning record page carrying a visible
+    // dialog-role surface (docked utility bar, panel) while in plain view.
     const root = mount(`
-      <div role="dialog" aria-modal="true" hidden>an unrelated hidden dialog</div>
+      <div role="dialog" aria-modal="true">a docked utility panel with text only</div>
       <button>Edit</button>
     `);
-    root.querySelector("button")!.addEventListener("click", () => {
-      const dialog = document.createElement("div");
-      dialog.setAttribute("role", "dialog");
-      dialog.setAttribute("aria-modal", "true");
-      dialog.textContent = "now editing";
-      root.appendChild(dialog);
-    });
+    root.querySelector("button")!.addEventListener("click", () => appendEditSurface(root));
+
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.initialState).toBe("record-view");
+    expect(transition.editActionInvoked).toBe(true);
+    expect(transition.ok).toBe(true);
+    expect(transition.finalState).toBe("record-edit");
+  });
+
+  it("case 2: a panel with one lone field and a Save button is not edit mode", async () => {
+    const root = mount(`
+      <div role="dialog" aria-modal="true">
+        <label for="n">Note</label><input id="n" />
+        <button>Save</button>
+      </div>
+    `);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.initialState).not.toBe("record-edit");
+    expect(transition.ok).toBe(false);
+  });
+
+  it("case 3a: a surface with multiple editable fields and Save qualifies structurally", async () => {
+    const root = mount(EDIT_SURFACE_HTML);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(true);
+    expect(transition.initialState).toBe("record-edit");
+  });
+
+  it("case 3b: Salesforce's record-edit component qualifies on its own identity", async () => {
+    const root = mount(`<lightning-record-edit-form>loading…</lightning-record-edit-form>`);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(true);
+    expect(transition.initialState).toBe("record-edit");
+  });
+
+  it("case 5: an Edit click whose surface never appears is a failed transition with diagnostics", async () => {
+    const root = mount(`<button>Edit</button>`); // no listener — clicking does nothing
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(false);
+    expect(transition.editActionResolved).toBe(true);
+    expect(transition.editActionInvoked).toBe(true);
+    expect(transition.finalState).not.toBe("record-edit");
+    expect(transition.diagnostics.join("\n")).toMatch(/Resulting Salesforce page state/);
+  }, 10000);
+
+  it("case 6: already in record-edit means no Edit click at all", async () => {
+    const root = mount(EDIT_SURFACE_HTML + `<button id="outer-edit">Edit</button>`);
     const clicked = { count: 0 };
-    root.querySelector("button")!.addEventListener("click", () => clicked.count++);
+    root.querySelector("#outer-edit")!.addEventListener("click", () => clicked.count++);
 
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(true);
-    expect(clicked.count).toBe(1);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(true);
+    expect(transition.editActionInvoked).toBe(false);
+    expect(clicked.count).toBe(0);
   });
 
-  it("clicks an accessible Edit control and waits for the edit surface to appear", async () => {
-    const root = mount(`<button>Edit</button>`);
-    root.querySelector("button")!.addEventListener("click", () => {
-      const dialog = document.createElement("div");
-      dialog.setAttribute("role", "dialog");
-      dialog.setAttribute("aria-modal", "true");
-      dialog.textContent = "now editing";
-      root.appendChild(dialog);
-    });
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(true);
-  });
-
-  it("reports failure, never a guess, when no accessible Edit control exists", async () => {
-    const root = mount(`<div>nothing to click here</div>`);
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(false);
-  });
-
-  it("finds and clicks an Edit control whose real button lives inside its own shadow root — the actual live-Salesforce structure", async () => {
-    // A `<lightning-button>`-style wrapper: the outer light-DOM tag is not
-    // itself a <button> or [role=button], and the real clickable native
-    // button lives one shadow boundary deeper, one this adapter does not
-    // otherwise own or traverse for any other purpose.
+  it("case 7: resolves an Edit control nested behind multiple shadow boundaries", async () => {
     const root = mount(`<record-action-bar></record-action-bar>`);
     const wrapper = root.querySelector("record-action-bar") as HTMLElement;
     const shadow = wrapper.attachShadow({ mode: "open" });
@@ -261,21 +289,44 @@ describe("Salesforce adapter — entering edit mode", () => {
     const buttonShell = shadow.querySelector("lightning-button-shell") as HTMLElement;
     const innerShadow = buttonShell.attachShadow({ mode: "open" });
     innerShadow.innerHTML = `<button>Edit</button>`;
+    innerShadow.querySelector("button")!.addEventListener("click", () => appendEditSurface(root));
 
-    innerShadow.querySelector("button")!.addEventListener("click", () => {
-      const dialog = document.createElement("div");
-      dialog.setAttribute("role", "dialog");
-      dialog.setAttribute("aria-modal", "true");
-      root.appendChild(dialog);
-    });
-
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(true);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(true);
   });
 
-  it("reports failure when Edit is clicked but the edit surface never appears", async () => {
-    const root = mount(`<button>Edit</button>`); // no listener — clicking does nothing
-    const adapter = createSalesforceResolverAdapter();
-    await expect(adapter.ensureEditable!(root, SF)).resolves.toBe(false);
-  }, 8000);
+  it("case 8: a qualifying surface whose fields sit behind shadow boundaries is still record-edit", async () => {
+    const root = mount(`<div role="dialog" aria-modal="true" id="edit-dialog"><button>Save</button></div>`);
+    const dialog = root.querySelector("#edit-dialog")!;
+    for (const name of ["CloseDate", "Amount"]) {
+      const host = document.createElement("record-field-wrapper-" + name.toLowerCase());
+      dialog.appendChild(host);
+      const inner = host.attachShadow({ mode: "open" });
+      inner.innerHTML = `<input name="${name}" />`;
+    }
+
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(true);
+    expect(transition.initialState).toBe("record-edit");
+  });
+
+  it("case 9: Save and Cancel buttons elsewhere on the page do not by themselves prove edit mode", async () => {
+    const root = mount(`
+      <button>Save</button><button>Cancel</button>
+      <label for="a">Something</label><input id="a" />
+      <label for="b">Other</label><input id="b" />
+      <div role="dialog" aria-modal="true">unrelated panel, no fields</div>
+    `);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(false);
+    expect(transition.initialState).not.toBe("record-edit");
+  });
+
+  it("reports failure, never a guess, when no accessible Edit control exists", async () => {
+    const root = mount(`<div>nothing to click here</div>`);
+    const transition = await salesforceAdapter().ensureEditable!(root, SF)!;
+    expect(transition.ok).toBe(false);
+    expect(transition.editActionResolved).toBe(false);
+    expect(transition.diagnostics.join("\n")).toMatch(/Edit action resolved: no/);
+  });
 });

@@ -155,22 +155,46 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
    * this call rather than needing its own.
    */
   if (binding.context.pageMode === "edit-or-record") {
-    const ensured = await adapter?.ensureEditable?.(root, policyFor(adapter));
-    if (ensured === true) {
-      evidence.push("Entered the record's edit view before resolving targets.");
-      // The edit surface appearing and its fields finishing rendering are
-      // two different moments — the real capture this binding was built
-      // from showed several seconds of application activity between them.
-      // Resolving immediately after the container appears risks looking
-      // for a field that has not rendered yet.
-      const settled = await waitForApplicationReaction({ root, ...options.reaction });
-      evidence.push(
-        settled.settled
-          ? `The edit view settled ${settled.elapsedMs}ms after opening.`
-          : `The edit view did not settle within ${settled.elapsedMs}ms; resolving targets anyway.`
-      );
-    } else if (ensured === false) {
-      warnings.push("Could not confirm the page was in an editable state before resolving targets.");
+    const transition = await adapter?.ensureEditable?.(root, policyFor(adapter));
+    if (transition && !transition.ok) {
+      // The page never reached the state the binding's targets exist in.
+      // Retrying field resolution against the wrong page state would spend
+      // the whole retry window failing for a reason resolution cannot see —
+      // this failure belongs to, and is reported at, the state layer.
+      checks.push({
+        name: "editable_state",
+        status: "fail",
+        detail: `The record edit state could not be established (initial: ${transition.initialState}, final: ${transition.finalState}).`
+      });
+      return {
+        status: "blocked",
+        checks,
+        evidence: [...evidence, ...transition.diagnostics],
+        warnings: ["Execution stopped before writing anything — the record edit state could not be established."],
+        executedAt: now()
+      };
+    }
+    if (transition) {
+      checks.push({
+        name: "editable_state",
+        status: "pass",
+        detail:
+          transition.initialState === "record-edit"
+            ? "The record was already in edit state."
+            : "Entered and proved the record edit state before resolving targets."
+      });
+      evidence.push(...transition.diagnostics);
+      if (transition.editActionInvoked) {
+        // The edit surface appearing and its fields finishing rendering are
+        // two different moments — the real capture this binding was built
+        // from showed several seconds of application activity between them.
+        const settled = await waitForApplicationReaction({ root, ...options.reaction });
+        evidence.push(
+          settled.settled
+            ? `The edit view settled ${settled.elapsedMs}ms after opening.`
+            : `The edit view did not settle within ${settled.elapsedMs}ms; resolving targets anyway.`
+        );
+      }
     }
   }
 

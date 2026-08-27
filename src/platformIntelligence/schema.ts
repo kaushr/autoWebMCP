@@ -21,6 +21,7 @@ export type KnowledgeCategory =
   | "supported-interface"
   | "component-framework-behavior"
   | "resolution-policy"
+  | "page-state-semantics"
   | "binding-knowledge"
   | "anti-pattern"
   | "reference";
@@ -178,6 +179,37 @@ export interface ReferenceEntry extends KnowledgeEntryBase {
   category: "reference";
 }
 
+/**
+ * What establishes that a record is genuinely being edited on this platform,
+ * as opposed to merely showing some dialog.
+ *
+ * Exists because a live Salesforce run proved the distinction matters: a
+ * Lightning record page carries visible dialog-role surfaces (docked
+ * utility bar, panels) while in plain read-only view, and an executor that
+ * read "visible dialog" as "record edit mode" skipped entering edit mode
+ * entirely. Like `resolution-policy`, this is declarative knowledge a
+ * runtime compiles once and applies mechanically — element identities and
+ * evidence thresholds, never DOM operations or selector chains.
+ */
+export interface PageStateSemanticsEntry extends KnowledgeEntryBase {
+  category: "page-state-semantics";
+  strength: "documented-fact" | "documented-policy" | "validated-platform-rule";
+  pageState: {
+    /** A generic visible dialog must never, alone, be read as record-edit. */
+    genericDialogIsNotEditEvidence: true;
+    editSurface: {
+      /** Tag names that themselves signify this platform's record-edit component. */
+      componentEvidence: string[];
+      /** Structural qualification: at least this many editable fields inside the surface… */
+      minimumEditableFields: number;
+      /** …together with a commit action carrying one of these accessible labels. */
+      commitActionLabels: string[];
+      /** Supporting (never sufficient) evidence: a dismiss action with one of these labels. */
+      dismissActionLabels: string[];
+    };
+  };
+}
+
 export type KnowledgeEntry =
   | DocumentedFactEntry
   | ObservationSemanticsEntry
@@ -188,6 +220,7 @@ export type KnowledgeEntry =
   | SupportedInterfaceEntry
   | ComponentFrameworkBehaviorEntry
   | ResolutionPolicyEntry
+  | PageStateSemanticsEntry
   | BindingKnowledgeEntry
   | AntiPatternEntry
   | ReferenceEntry;

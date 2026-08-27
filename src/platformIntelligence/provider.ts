@@ -7,6 +7,7 @@ import type {
   KnowledgeEntry,
   PlatformIntelligencePack,
   PlatformIntelligenceTrace,
+  PageStateSemanticsEntry,
   PolicyEntry,
   ResolutionPolicyEntry,
   SourceReference,
@@ -29,6 +30,13 @@ export interface SupportedInterfaceQuery {
   family?: string;
 }
 
+/** Page-state semantics plus the provenance of the knowledge that produced them. */
+export interface PageStateIntelligence {
+  platform: string;
+  pageState: PageStateSemanticsEntry["pageState"];
+  provenance: PlatformIntelligenceTrace;
+}
+
 /** A resolution policy plus the provenance of the knowledge that produced it. */
 export interface ResolutionPolicyIntelligence {
   platform: string;
@@ -46,6 +54,12 @@ export interface PlatformIntelligenceProvider {
    * silently given another platform's traversal rules.
    */
   getResolutionPolicy(platformId: string): ResolutionPolicyIntelligence | undefined;
+  /**
+   * What establishes record-edit state on this platform. `undefined` means
+   * the pack declares nothing and the runtime keeps its conservative
+   * generic default.
+   */
+  getPageStateSemantics(platformId: string): PageStateIntelligence | undefined;
   getSupportedInterfaces(platformId: string, query?: SupportedInterfaceQuery): SupportedInterfaceEntry[];
   getBindingKnowledge(platformId: string, transport?: TransportObservation): BindingKnowledgeEntry[];
   getBindingPolicy(platformId: string, transport?: TransportObservation): BindingPolicyIntelligence | undefined;
@@ -106,6 +120,16 @@ export function createPlatformIntelligenceProvider(
       );
       if (!entry) return undefined;
       return { platform: platformId, resolution: entry.resolution, provenance: traceFor(pack, [entry]) };
+    },
+
+    getPageStateSemantics(platformId) {
+      const pack = byPlatform.get(platformId);
+      if (!pack) return undefined;
+      const entry = active(pack.knowledge).find(
+        (candidate): candidate is PageStateSemanticsEntry => candidate.category === "page-state-semantics"
+      );
+      if (!entry) return undefined;
+      return { platform: platformId, pageState: entry.pageState, provenance: traceFor(pack, [entry]) };
     },
 
     getSupportedInterfaces(platformId, query = {}) {

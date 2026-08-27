@@ -9,6 +9,14 @@ import {
 } from "./engine";
 import { queryComposedTree, queryComposedTreeFirst } from "./composedTree";
 import type { ResolutionPolicy } from "./resolutionPolicy";
+import {
+  DEFAULT_PAGE_STATE_POLICY,
+  type EditableTransition,
+  type PageState,
+  type PageStateAssessment,
+  type PageStateEvidence,
+  type PageStatePolicy
+} from "./pageState";
 
 /* ------------------------------------------------------------------ *
  * Salesforce Lightning resolver adapter.
@@ -43,7 +51,6 @@ import type { ResolutionPolicy } from "./resolutionPolicy";
  * ------------------------------------------------------------------ */
 
 const SLDS_VALIDATION_SELECTOR = '[role="alert"], [aria-invalid="true"], .slds-has-error, .error';
-const SLDS_EDIT_SURFACE_SELECTOR = '[role="dialog"], [aria-modal="true"], lightning-record-edit-form';
 const DATE_PICKER_TRIGGER_SELECTOR =
   'button[aria-label*="date picker" i], button[aria-label*="calendar" i], button[title*="date picker" i]';
 const DATE_PICKER_SURFACE_SELECTOR = '[role="dialog"], [role="application"], [role="grid"]';
@@ -251,17 +258,150 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
 const EDIT_WAIT_TIMEOUT_MS = 5_000;
 const EDIT_WAIT_POLL_MS = 100;
 
+/* --------------------------- page state ----------------------------- *
+ * "A visible dialog exists" is not a page state. A live Lightning record
+ * page carried visible dialog-role surfaces (docked utility bar, panels)
+ * while sitting in plain read-only view, and reading any of them as "the
+ * record is being edited" skipped the Edit click entirely. What actually
+ * establishes record-edit here comes from the Salesforce pack's
+ * `sf-record-edit-surface-semantics` entry, compiled into the
+ * `PageStatePolicy` this adapter is constructed with.
+ * -------------------------------------------------------------------- */
+
+const DIALOG_SURFACE_SELECTOR = '[role="dialog"], [aria-modal="true"]';
+const EDITABLE_FIELD_SELECTOR =
+  'input:not([type="hidden"]), select, textarea, [role="textbox"], [contenteditable="true"]';
+const SURFACE_ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"]';
+
+/** Composed-tree containment: walks parents, hopping from a shadow root to its host. */
+function composedContains(ancestor: Element, node: Element): boolean {
+  let current: Element | null = node;
+  let hops = 0;
+  while (current && hops < 60) {
+    if (current === ancestor) return true;
+    if (current.parentElement) current = current.parentElement;
+    else {
+      const treeRoot = current.getRootNode();
+      current = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
+    }
+    hops++;
+  }
+  return false;
+}
+
 /**
- * Whether an edit surface is genuinely open right now — present in the DOM
- * *and visible*. Presence alone is not enough: Lightning, like most UI
- * frameworks, pre-renders dialog containers and keeps them hidden until
- * triggered, so an unrelated hidden dialog elsewhere on a plain record-view
- * page can otherwise look identical to a real open edit form. Shadow-
- * piercing, since a hidden dialog belonging to some other component is not
- * guaranteed to be in the light DOM either.
+ * Editable record fields inside a surface, counted as *field units*: a
+ * component host that owns a value counts once, and native controls are
+ * counted only when no counted host already contains them — otherwise one
+ * `lightning-input` wrapping one `<input>` would count as two fields and a
+ * lone search box would satisfy a multiple-fields threshold by itself.
  */
-function isEditSurfacePresent(root: ParentNode, policy: ResolutionPolicy): boolean {
-  return queryComposedTree(root, SLDS_EDIT_SURFACE_SELECTOR, policy).some(isVisible);
+function countEditableFields(surface: Element, resolution: ResolutionPolicy): number {
+  const allHosts = queryComposedTree(surface, "*", resolution).filter(
+    (element) => isVisible(element) && isPotentialFieldHost(element, resolution)
+  );
+  const topHosts = allHosts.filter(
+    (host) => !allHosts.some((other) => other !== host && composedContains(other, host))
+  );
+  const natives = queryComposedTree(surface, EDITABLE_FIELD_SELECTOR, resolution)
+    .filter(isVisible)
+    .filter((native) => !topHosts.some((host) => composedContains(host, native)));
+  return topHosts.length + natives.length;
+}
+
+function surfaceHasActionLabelled(
+  surface: Element,
+  labels: readonly string[],
+  resolution: ResolutionPolicy
+): boolean {
+  const wanted = new Set(labels.map((label) => label.toLowerCase()));
+  return queryComposedTree(surface, SURFACE_ACTION_SELECTOR, resolution)
+    .filter(isVisible)
+    .some((action) => wanted.has(normalizeLabel(accessibleName(action) ?? "")));
+}
+
+function editComponentEvidenceIn(
+  surface: Element,
+  pageState: PageStatePolicy,
+  resolution: ResolutionPolicy
+): string[] {
+  if (pageState.editSurfaceComponents.length === 0) return [];
+  const tags = new Set(pageState.editSurfaceComponents.map((tag) => tag.toLowerCase()));
+  const found = new Set<string>();
+  if (tags.has(surface.tagName.toLowerCase())) found.add(surface.tagName.toLowerCase());
+  for (const descendant of queryComposedTree(surface, pageState.editSurfaceComponents.join(", "), resolution)) {
+    found.add(descendant.tagName.toLowerCase());
+  }
+  return [...found];
+}
+
+function findEditAction(root: ParentNode, resolution: ResolutionPolicy): HTMLElement | undefined {
+  const action = queryComposedTree(root, 'button, [role="button"], a', resolution)
+    .filter(isVisible)
+    .find((element) => normalizeLabel(accessibleName(element) ?? "") === "edit");
+  return action instanceof HTMLElement ? action : undefined;
+}
+
+/**
+ * Classifies the page: `record-edit` only on the pack's evidence — the
+ * platform's record-edit component, or a surface holding at least the
+ * declared minimum of editable fields together with a commit action.
+ * `record-view` when nothing qualifies but an Edit action is offered
+ * (which is what a view page does); `unknown` otherwise. A generic dialog
+ * alone never qualifies, no matter how visible.
+ */
+function assessSalesforcePageState(
+  root: ParentNode,
+  resolution: ResolutionPolicy,
+  pageState: PageStatePolicy
+): PageStateAssessment {
+  const surfaceSelector =
+    pageState.editSurfaceComponents.length > 0
+      ? `${DIALOG_SURFACE_SELECTOR}, ${pageState.editSurfaceComponents.join(", ")}`
+      : DIALOG_SURFACE_SELECTOR;
+  const allSurfaces = queryComposedTree(root, surfaceSelector, resolution).filter(isVisible);
+  // Nested dialog markers (a modal that is also aria-modal, wrappers inside
+  // wrappers) describe one surface, not several.
+  const surfaces = allSurfaces.filter(
+    (surface) => !allSurfaces.some((other) => other !== surface && composedContains(other, surface))
+  );
+
+  let best: PageStateEvidence = {
+    editableFieldCount: 0,
+    commitActionFound: false,
+    dismissActionFound: false,
+    editComponentEvidence: [],
+    unrelatedDialogsIgnored: surfaces.length
+  };
+  for (const surface of surfaces) {
+    const evidence: PageStateEvidence = {
+      editableFieldCount: countEditableFields(surface, resolution),
+      commitActionFound: surfaceHasActionLabelled(surface, pageState.commitActionLabels, resolution),
+      dismissActionFound: surfaceHasActionLabelled(surface, pageState.dismissActionLabels, resolution),
+      editComponentEvidence: editComponentEvidenceIn(surface, pageState, resolution),
+      unrelatedDialogsIgnored: surfaces.length - 1
+    };
+    const qualifies =
+      evidence.editComponentEvidence.length > 0 ||
+      (evidence.editableFieldCount >= pageState.minimumEditableFields && evidence.commitActionFound);
+    if (qualifies) return { state: "record-edit", surface, evidence };
+    if (evidence.editableFieldCount > best.editableFieldCount) best = evidence;
+  }
+
+  const state: PageState = findEditAction(root, resolution) ? "record-view" : "unknown";
+  return { state, evidence: best };
+}
+
+function describeEvidence(evidence: PageStateEvidence): string {
+  return (
+    `editable fields found: ${evidence.editableFieldCount}, ` +
+    `Save action found: ${evidence.commitActionFound ? "yes" : "no"}, ` +
+    `Cancel action found: ${evidence.dismissActionFound ? "yes" : "no"}, ` +
+    `record-edit component evidence: ${
+      evidence.editComponentEvidence.length ? evidence.editComponentEvidence.join(", ") : "none"
+    }, ` +
+    `unrelated dialogs ignored: ${evidence.unrelatedDialogsIgnored}`
+  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -269,28 +409,73 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Opens the record's edit surface if it is not already open, by finding and
- * clicking an accessible "Edit" control — never a fixed screen position —
- * then polling for the edit surface to actually appear. Not a data write:
- * this only changes which form is showing, which is why it is safe to run
- * automatically as part of an already-confirmed execution, without asking
- * for a second approval to do it.
+ * View → edit as a proven transition. Clicking Edit is not success; the
+ * postcondition is a re-assessment that classifies the page as
+ * `record-edit` under the pack's semantics. Anything less returns a failed
+ * transition carrying the full diagnostic trail, so execution stops at
+ * this layer instead of hunting for fields on a page that never changed.
+ * Not a data write: nothing here sets a value or commits anything.
  */
-async function ensureSalesforceEditable(root: ParentNode, policy: ResolutionPolicy): Promise<boolean> {
-  if (isEditSurfacePresent(root, policy)) return true;
+async function ensureSalesforceEditable(
+  root: ParentNode,
+  resolution: ResolutionPolicy,
+  pageState: PageStatePolicy
+): Promise<EditableTransition> {
+  const initial = assessSalesforcePageState(root, resolution, pageState);
+  const diagnostics: string[] = [
+    `Initial Salesforce page state: ${initial.state}`,
+    `Edit-state evidence: ${describeEvidence(initial.evidence)}`
+  ];
 
-  const editButton = queryComposedTree(root, 'button, [role="button"], a', policy)
-    .filter(isVisible)
-    .find((element) => normalizeLabel(accessibleName(element) ?? "") === "edit");
-  if (!(editButton instanceof HTMLElement)) return false;
-  editButton.click();
+  if (initial.state === "record-edit") {
+    return {
+      ok: true,
+      initialState: "record-edit",
+      finalState: "record-edit",
+      editActionResolved: false,
+      editActionInvoked: false,
+      diagnostics
+    };
+  }
+
+  const editAction = findEditAction(root, resolution);
+  diagnostics.push(`Edit action resolved: ${editAction ? "yes" : "no"}`);
+  if (!editAction) {
+    return {
+      ok: false,
+      initialState: initial.state,
+      finalState: initial.state,
+      editActionResolved: false,
+      editActionInvoked: false,
+      diagnostics
+    };
+  }
+
+  editAction.click();
+  diagnostics.push("Edit action invoked: yes");
 
   const deadline = Date.now() + EDIT_WAIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (isEditSurfacePresent(root, policy)) return true;
+  let final = initial;
+  for (;;) {
+    final = assessSalesforcePageState(root, resolution, pageState);
+    if (final.state === "record-edit" || Date.now() >= deadline) break;
     await sleep(EDIT_WAIT_POLL_MS);
   }
-  return false;
+
+  diagnostics.push(
+    `Application reaction observed: ${final.state !== initial.state ? "yes" : "no"}`,
+    `Resulting Salesforce page state: ${final.state}`,
+    `Edit-state evidence: ${describeEvidence(final.evidence)}`
+  );
+
+  return {
+    ok: final.state === "record-edit",
+    initialState: initial.state,
+    finalState: final.state,
+    editActionResolved: true,
+    editActionInvoked: true,
+    diagnostics
+  };
 }
 
 /**
@@ -330,12 +515,14 @@ function findFieldHost(
   return undefined;
 }
 
-export function createSalesforceResolverAdapter(): PlatformResolverAdapter {
+export function createSalesforceResolverAdapter(
+  pageState: PageStatePolicy = DEFAULT_PAGE_STATE_POLICY
+): PlatformResolverAdapter {
   return {
     id: "salesforce-lightning",
 
-    ensureEditable(root: ParentNode, policy: ResolutionPolicy): Promise<boolean> {
-      return ensureSalesforceEditable(root, policy);
+    ensureEditable(root: ParentNode, policy: ResolutionPolicy): Promise<EditableTransition> {
+      return ensureSalesforceEditable(root, policy, pageState);
     },
 
     /**
@@ -369,7 +556,11 @@ export function createSalesforceResolverAdapter(): PlatformResolverAdapter {
     },
 
     isEditStateClosed(root: ParentNode, policy: ResolutionPolicy): boolean {
-      return !isEditSurfacePresent(root, policy);
+      // The same pack-defined semantics that establish edit mode also
+      // establish leaving it: only a genuine record-edit surface counts as
+      // "still open", so a leftover unrelated dialog cannot misreport an
+      // unsaved form after a successful save.
+      return assessSalesforcePageState(root, policy, pageState).state !== "record-edit";
     },
 
     readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {

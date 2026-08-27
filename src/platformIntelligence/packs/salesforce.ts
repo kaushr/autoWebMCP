@@ -5,7 +5,7 @@ export const SALESFORCE_PLATFORM_ID = "salesforce-lightning";
 
 export const salesforceIntelligencePack: PlatformIntelligencePack = {
   packId: "salesforce-intelligence-pack",
-  packVersion: "0.2.0",
+  packVersion: "0.3.0",
   schemaVersion: PLATFORM_INTELLIGENCE_SCHEMA_VERSION,
   platform: {
     id: SALESFORCE_PLATFORM_ID,
@@ -99,6 +99,25 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       sourceReferenceIds: ["sf-lwc-event-propagation", "awmcp-salesforce-recording", "awmcp-platform-intelligence"],
       lifecycle: { status: "active", since: "0.2.0" },
       tags: ["lightning", "shadow-dom", "resolution", "execution"]
+    },
+    {
+      id: "sf-record-edit-surface-semantics",
+      category: "page-state-semantics",
+      strength: "validated-platform-rule",
+      summary:
+        "A visible dialog is not evidence that a record is being edited: Lightning record pages carry dialog-role surfaces (docked utility bar, panels) in plain read-only view. A record-edit surface is established by Salesforce's record-edit component, or structurally by a surface holding multiple editable record fields together with a Save commit action; a Cancel action is supporting evidence only.",
+      pageState: {
+        genericDialogIsNotEditEvidence: true,
+        editSurface: {
+          componentEvidence: ["lightning-record-edit-form", "records-record-edit", "record-edit-form"],
+          minimumEditableFields: 2,
+          commitActionLabels: ["save"],
+          dismissActionLabels: ["cancel"]
+        }
+      },
+      sourceReferenceIds: ["sf-lwc-event-propagation", "awmcp-salesforce-recording"],
+      lifecycle: { status: "active", since: "0.3.0" },
+      tags: ["lightning", "page-state", "record-edit", "execution"]
     },
     {
       id: "sf-missing-value-is-not-no-value",

@@ -7,6 +7,7 @@
 
 export interface ExecutionCheckResult {
   name:
+    | "editable_state"
     | "target_resolved"
     | "value_set"
     | "commit_invoked"

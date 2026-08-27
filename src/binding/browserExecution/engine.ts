@@ -1,6 +1,7 @@
 import type { FieldValueKind, SemanticTarget, VerificationCheck } from "./model";
 import type { ExecutionCheckResult } from "./result";
 import { DEFAULT_RESOLUTION_POLICY, type IdentitySignal, type ResolutionPolicy } from "./resolutionPolicy";
+import type { EditableTransition } from "./pageState";
 import {
   composedClosest,
   ownerScope,
@@ -9,6 +10,7 @@ import {
 } from "./composedTree";
 
 export type { ResolutionPolicy } from "./resolutionPolicy";
+export type { EditableTransition, PageState, PageStateAssessment, PageStatePolicy } from "./pageState";
 
 /* ------------------------------------------------------------------ *
  * Generic browser execution engine.
@@ -65,14 +67,18 @@ export interface PlatformResolverAdapter {
   resolutionPolicy?: ResolutionPolicy;
   /**
    * Brings the page to the state a binding's `context.pageMode` expects
-   * before anything is resolved — e.g. opening a record's edit form. Not a
-   * write in itself (nothing here sets a value or commits anything), so it
-   * runs automatically under an already-confirmed execution rather than
-   * needing its own separate approval. Returns `true` once the expected
-   * state is confirmed present, `false` if it tried and could not get
-   * there, `undefined` to decline (the page is already assumed ready).
+   * before anything is resolved — e.g. opening a record's edit form — and
+   * PROVES it: the returned transition's `ok` asserts the postcondition
+   * "the page is now in record-edit state as this platform defines it",
+   * never merely "an edit control was clicked". Not a data write (nothing
+   * here sets a value or commits anything), so it runs under the
+   * confirmation already given for the execution. `undefined` declines —
+   * the platform has no page-state concept and the page is assumed ready.
    */
-  ensureEditable?(root: ParentNode, policy: ResolutionPolicy): Promise<boolean> | boolean | undefined;
+  ensureEditable?(
+    root: ParentNode,
+    policy: ResolutionPolicy
+  ): Promise<EditableTransition> | EditableTransition | undefined;
   resolveTarget?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): ResolvedTarget | undefined;
   setFieldValue?(
     resolved: ResolvedTarget,

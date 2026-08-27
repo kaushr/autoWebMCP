@@ -59,7 +59,10 @@ function mountEditForm(options: { rejectSave?: boolean } = {}): HTMLElement {
     <div role="dialog" aria-modal="true" id="edit-dialog">
       <label for="cd">Close Date</label>
       <mock-lightning-datepicker id="cd" name="CloseDate"></mock-lightning-datepicker>
+      <label for="am">Amount</label>
+      <input id="am" name="Amount" />
       <button id="save">Save</button>
+      <button>Cancel</button>
     </div>
   `;
   const save = document.querySelector("#save") as HTMLButtonElement;
@@ -96,7 +99,10 @@ function mountPickerOnlyEditForm(): HTMLElement {
       <span id="cd" role="textbox" aria-label="Close Date">
         <button aria-label="Date picker" id="picker-trigger"></button>
       </span>
+      <label for="am">Amount</label>
+      <input id="am" name="Amount" />
       <button id="save">Save</button>
+      <button>Cancel</button>
     </div>
     <div role="dialog" id="calendar">
       <h2 id="month-heading">December 2026</h2>
@@ -144,6 +150,7 @@ describe("executeConfirmed — full lifecycle", () => {
 
     expect(result.status).toBe("succeeded");
     expect(result.checks.map((check) => `${check.name}:${check.status}`)).toEqual([
+      "editable_state:pass",
       "target_resolved:pass",
       "value_set:pass",
       "commit_invoked:pass",
@@ -186,8 +193,41 @@ describe("executeConfirmed — full lifecycle", () => {
     expect(result.checks.find((check) => check.name === "validation_clear")?.status).toBe("fail");
   });
 
-  it("blocks before writing anything when a target cannot be resolved", async () => {
-    document.body.innerHTML = `<div>nothing relevant here</div>`;
+  it("blocks before writing anything when a target cannot be resolved on a genuine edit surface", async () => {
+    // A real record-edit surface that simply lacks the target field: the
+    // edit state is proven, and blocking is then honestly attributed to
+    // target resolution rather than page state.
+    document.body.innerHTML = `
+      <div role="dialog" aria-modal="true">
+        <label for="a">Stage</label><input id="a" name="StageName" />
+        <label for="b">Amount</label><input id="b" name="Amount" />
+        <button>Save</button>
+      </div>
+    `;
+    const result = await executeConfirmed({
+      root: document,
+      binding: BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      resolveRetryMs: 50
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.checks.map((check) => `${check.name}:${check.status}`)).toEqual([
+      "editable_state:pass",
+      "target_resolved:fail"
+    ]);
+  });
+
+  it("case 10: a failed edit transition blocks at the state layer — no field mutation, no resolution retries", async () => {
+    // Plain record view whose Edit control opens nothing (the live shape:
+    // wrong page state). Execution must stop at editable_state, never touch
+    // the input elsewhere on the page, and never enter the retry loop.
+    document.body.innerHTML = `
+      <button>Edit</button>
+      <label for="cd">Close Date</label><input id="cd" name="CloseDate" value="untouched" />
+    `;
     const result = await executeConfirmed({
       root: document,
       binding: BINDING,
@@ -199,9 +239,11 @@ describe("executeConfirmed — full lifecycle", () => {
 
     expect(result.status).toBe("blocked");
     expect(result.checks).toEqual([
-      { name: "target_resolved", status: "fail", detail: expect.stringContaining("close_date") }
+      { name: "editable_state", status: "fail", detail: expect.stringContaining("record edit state") }
     ]);
-  });
+    expect((document.querySelector("#cd") as HTMLInputElement).value).toBe("untouched");
+    expect(result.evidence.join("\n")).toMatch(/Resulting Salesforce page state/);
+  }, 15000);
 
   it("blocks when a value cannot be set, without invoking the commit action", async () => {
     document.body.innerHTML = `
@@ -243,7 +285,10 @@ function mountRecordViewWithEditButton(): HTMLElement {
       <div role="dialog" aria-modal="true" id="edit-dialog">
         <label for="cd">Close Date</label>
         <mock-lightning-datepicker id="cd" name="CloseDate"></mock-lightning-datepicker>
+        <label for="am">Amount</label>
+        <input id="am" name="Amount" />
         <button id="save">Save</button>
+        <button>Cancel</button>
       </div>
     `;
     document.querySelector("#save")!.addEventListener("click", () => {
@@ -267,7 +312,8 @@ describe("executeConfirmed — entering edit mode automatically", () => {
     });
 
     expect(result.status).toBe("succeeded");
-    expect(result.evidence).toContain("Entered the record's edit view before resolving targets.");
+    expect(result.checks.map((check) => `${check.name}:${check.status}`)).toContain("editable_state:pass");
+    expect(result.evidence.join("\n")).toMatch(/Resulting Salesforce page state: record-edit/);
   });
 
   it("does not attempt to click Edit when the binding's pageMode does not call for it", async () => {
