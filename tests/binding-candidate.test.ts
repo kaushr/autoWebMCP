@@ -102,6 +102,12 @@ describe("Salesforce: the observed transport is a lead, never a binding", () => 
     expect(prepared.policy.maximumEligibility).toBe("needs-validation");
     expect(prepared.policy.preferredBindingFamily).toBe("salesforce-record-update");
     expect(prepared.policy.warnings.join(" ")).toMatch(/never be replayed directly/i);
+    expect(prepared.policy.platformIntelligence?.packId).toBe("salesforce-intelligence-pack");
+    expect(prepared.policy.platformIntelligence?.packVersion).toBe("0.1.0");
+    expect(prepared.policy.platformIntelligence?.knowledgeEntryIds).toContain("sf-aura-private-internal");
+    expect(prepared.policy.platformIntelligence?.knowledgeEntryIds).toContain(
+      "sf-recordui-update-record-suggests-record-update"
+    );
   });
 
   it("refuses to let a model upgrade eligibility past the policy ceiling", () => {
@@ -174,6 +180,7 @@ describe("Generic REST", () => {
     expect(prepared.policy.preferredBindingFamily).toBe("rest-resource-update");
     expect(prepared.policy.maximumEligibility).toBe("needs-validation");
     expect(prepared.input.causalCandidates[0].method).toBe("PATCH");
+    expect(prepared.policy.platformIntelligence).toBeUndefined();
   });
 
   it("never reaches supported-candidate without validation", () => {
@@ -248,5 +255,18 @@ describe("Eligibility ceiling", () => {
     const notes = defaultBindingPolicyProvider.notesFor(GENERIC, undefined);
     expect(notes.transportClass).toBe("in-process");
     expect(notes.maximumEligibility).toBe("unresolved");
+  });
+
+  it("keeps the Salesforce eligibility ceiling for unrecognized transports", () => {
+    const notes = defaultBindingPolicyProvider.notesFor(SALESFORCE, {
+      method: "GET",
+      pathPattern: "/opaque/lightning/request",
+      origin: "https://acme.lightning.force.com",
+      status: 200
+    });
+
+    expect(notes.transportClass).toBe("unknown");
+    expect(notes.maximumEligibility).toBe("needs-validation");
+    expect(notes.platformIntelligence?.knowledgeEntryIds).toContain("sf-observed-transport-requires-validation");
   });
 });
