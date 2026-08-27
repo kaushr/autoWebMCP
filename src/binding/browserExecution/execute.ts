@@ -272,6 +272,8 @@ export interface InspectFieldsOptions {
   reaction?: { timeoutMs?: number; quietMs?: number };
   /** How long restoration waits for the page to leave edit mode. Tests override it to stay fast. */
   restoreTimeoutMs?: number;
+  /** How long to wait for the page to reach edit state. Unrecognized surfaces otherwise burn the full default. */
+  editWaitMs?: number;
 }
 
 export interface InspectOptions {
@@ -280,6 +282,7 @@ export interface InspectOptions {
   adapter?: PlatformResolverAdapter;
   reaction?: { timeoutMs?: number; quietMs?: number };
   restoreTimeoutMs?: number;
+  editWaitMs?: number;
 }
 
 /**
@@ -329,13 +332,22 @@ export async function inspectFieldDomains(options: InspectFieldsOptions): Promis
 
   /* --- page state: enter edit only when we can own the transition ------- */
   if (result.initialPageState === "record-view" && options.mayEnterEditMode) {
-    const transition = await introspector?.ensureEditable?.(root, policy);
+    const transition = await introspector?.ensureEditable?.(root, policy, options.editWaitMs);
     if (transition) {
       result.evidence.push(...transition.diagnostics);
       // Ownership is recorded from what we DID, not from where we ended up.
-      result.ownership.enteredEditMode = transition.editActionInvoked && transition.finalState === "record-edit";
+      // Ownership follows the ACT, not the outcome. Requiring a
+      // successfully classified result meant that failing to recognize the
+      // edit surface also meant failing to clean it up — so a live run
+      // clicked Edit, could not read the modal it had just opened, and then
+      // walked away leaving the user's record in edit mode. If we invoked
+      // it, we own it, whatever the page became.
+      result.ownership.enteredEditMode = transition.editActionInvoked;
       if (!transition.ok) {
-        const why = `the record's edit state could not be established (initial: ${transition.initialState}, final: ${transition.finalState})`;
+        const evidence = transition.diagnostics.filter((line) => line.startsWith("Edit-state evidence")).pop();
+      const why =
+        `the record's edit state could not be established (initial: ${transition.initialState}, ` +
+        `final: ${transition.finalState})${evidence ? `. ${evidence}` : ""}`;
         for (const field of fields) {
           result.unresolved[field.name] = `The live control could not be inspected because ${why}.`;
         }
@@ -450,7 +462,8 @@ export function inspectValueDomains(options: InspectOptions): Promise<DomainInsp
     mayEnterEditMode: options.binding.context.pageMode === "edit-or-record",
     ...(readOnlyIntrospector(options.adapter) ? { introspector: readOnlyIntrospector(options.adapter) } : {}),
     ...(options.reaction ? { reaction: options.reaction } : {}),
-    ...(options.restoreTimeoutMs !== undefined ? { restoreTimeoutMs: options.restoreTimeoutMs } : {})
+    ...(options.restoreTimeoutMs !== undefined ? { restoreTimeoutMs: options.restoreTimeoutMs } : {}),
+    ...(options.editWaitMs !== undefined ? { editWaitMs: options.editWaitMs } : {})
   });
 }
 
@@ -475,7 +488,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     const transition = await adapter?.ensureEditable?.(root, policyFor(adapter));
     // Ownership is recorded from what we DID, so an abandoned run undoes
     // only a session it opened itself.
-    ownedEditSession = Boolean(transition?.editActionInvoked && transition.finalState === "record-edit");
+    ownedEditSession = Boolean(transition?.editActionInvoked);
     if (transition && !transition.ok) {
       // The page never reached the state the binding's targets exist in.
       // Retrying field resolution against the wrong page state would spend

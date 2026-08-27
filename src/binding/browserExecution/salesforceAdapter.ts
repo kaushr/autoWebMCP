@@ -852,7 +852,8 @@ function sleep(ms: number): Promise<void> {
 async function ensureSalesforceEditable(
   root: ParentNode,
   resolution: ResolutionPolicy,
-  pageState: PageStatePolicy
+  pageState: PageStatePolicy,
+  timeoutMs = EDIT_WAIT_TIMEOUT_MS
 ): Promise<EditableTransition> {
   const initial = assessSalesforcePageState(root, resolution, pageState);
   const diagnostics: string[] = [
@@ -887,7 +888,7 @@ async function ensureSalesforceEditable(
   editAction.click();
   diagnostics.push("Edit action invoked: yes");
 
-  const deadline = Date.now() + EDIT_WAIT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   let final = initial;
   for (;;) {
     final = assessSalesforcePageState(root, resolution, pageState);
@@ -1118,8 +1119,8 @@ export function createSalesforceResolverAdapter(
   return {
     id: "salesforce-lightning",
 
-    ensureEditable(root: ParentNode, policy: ResolutionPolicy): Promise<EditableTransition> {
-      return ensureSalesforceEditable(root, policy, pageState);
+    ensureEditable(root: ParentNode, policy: ResolutionPolicy, timeoutMs?: number): Promise<EditableTransition> {
+      return ensureSalesforceEditable(root, policy, pageState, timeoutMs);
     },
 
     /**

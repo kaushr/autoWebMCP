@@ -456,3 +456,82 @@ describe("O — introspection changes no lifecycle state of its own", () => {
     expect(serialized).not.toMatch(/accepted|publish|confirmed/i);
   });
 });
+
+describe("an Edit we opened but could not classify is still ours to close", () => {
+  /**
+   * The live case: AutoWebMCP clicked Edit, Salesforce opened its edit
+   * modal, the page-state assessment did not recognize it, and ownership —
+   * which required a successfully classified result — concluded the
+   * transition was not ours. So the user's record was left sitting in edit
+   * mode by an operation that only meant to read.
+   */
+  function mountUnrecognizedEditSurface(): { root: HTMLElement; cancelled: number; saves: number } {
+    const state = { cancelled: 0, saves: 0 };
+    document.body.innerHTML = `<div id="page"></div>`;
+    const page = document.querySelector<HTMLElement>("#page")!;
+
+    const renderView = (): void => {
+      page.innerHTML = `<div><h1>PS Project Test</h1><button id="edit">Edit</button></div>`;
+      page.querySelector<HTMLButtonElement>("#edit")!.addEventListener("click", () => {
+        // An edit surface the assessment cannot qualify: no recognized
+        // component, and only one editable field beside its actions.
+        page.innerHTML = `
+          <div class="opaque-modal">
+            <h2>Edit PS Project Test</h2>
+            <input aria-label="Quantity" />
+            <button id="save">Save</button>
+            <button id="cancel">Cancel</button>
+          </div>
+          <button id="edit">Edit</button>`;
+        page.querySelector<HTMLButtonElement>("#save")!.addEventListener("click", () => {
+          state.saves++;
+        });
+        page.querySelector<HTMLButtonElement>("#cancel")!.addEventListener("click", () => {
+          state.cancelled++;
+          renderView();
+        });
+      });
+    };
+    renderView();
+    return {
+      root: document.body,
+      get cancelled() {
+        return state.cancelled;
+      },
+      get saves() {
+        return state.saves;
+      }
+    };
+  }
+
+  it("owns the transition because it invoked Edit, not because it recognized the result", async () => {
+    const page = mountUnrecognizedEditSurface();
+    const result = await inspectValueDomains({
+      root: page.root,
+      binding,
+      adapter: adapter(),
+      reaction: { quietMs: 5, timeoutMs: 100 },
+      restoreTimeoutMs: 150,
+      editWaitMs: 150
+    });
+
+    expect(result.ownership.enteredEditMode).toBe(true);
+    // And having owned it, it closes it rather than walking away.
+    expect(page.cancelled).toBe(1);
+    expect(page.saves).toBe(0);
+  });
+
+  it("explains why the surface was not recognized, rather than only that it was not", async () => {
+    const page = mountUnrecognizedEditSurface();
+    const result = await inspectValueDomains({
+      root: page.root,
+      binding,
+      adapter: adapter(),
+      reaction: { quietMs: 5, timeoutMs: 100 },
+      restoreTimeoutMs: 150,
+      editWaitMs: 150
+    });
+    expect(result.unresolved.stage).toMatch(/Edit-state evidence/);
+    expect(result.unresolved.stage).toMatch(/editable fields found/);
+  });
+});

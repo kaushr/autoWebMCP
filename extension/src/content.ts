@@ -493,7 +493,8 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
       binding: request.binding,
       adapter: resolverAdapterForPlatform(request.binding.platform),
       reaction: { quietMs: 200, timeoutMs: 1_500 },
-      restoreTimeoutMs: 3_000
+      restoreTimeoutMs: 3_000,
+      editWaitMs: 3_000
     });
     console.debug("[AutoWebMCP] content: inspection finished", inspection);
     return { ok: true, inspection };

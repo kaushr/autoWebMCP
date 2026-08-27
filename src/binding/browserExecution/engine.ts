@@ -79,7 +79,9 @@ export interface PlatformResolverAdapter {
    */
   ensureEditable?(
     root: ParentNode,
-    policy: ResolutionPolicy
+    policy: ResolutionPolicy,
+    /** How long to wait for the page to reach the edit state before giving up. */
+    timeoutMs?: number
   ): Promise<EditableTransition> | EditableTransition | undefined;
   resolveTarget?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): ResolvedTarget | undefined;
   setFieldValue?(
