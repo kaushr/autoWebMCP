@@ -48,6 +48,7 @@ import { applicationIntelligenceForPlatform } from "./binding/browserExecution/a
 import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
 import type { DomainInspection } from "./binding/browserExecution/execute";
 import { assessExecutionReadiness } from "./training/executionReadiness";
+import { planValueDomainAcquisition, type ValueDomainSource } from "./training/valueDomainResolution";
 import {
   beginOperation,
   failed,
@@ -91,6 +92,17 @@ let liveValueDomains: Record<string, string[]> = {};
 let liveDomainProblems: Record<string, string> = {};
 /** Drives the prominent warning: a state we changed and could not prove we put back. */
 let liveDomainRestorationFailed = false;
+/** Where each acquired domain came from. Kept for provenance even though acquisition is invisible. */
+let liveDomainSources: Record<string, ValueDomainSource> = {};
+/** The full decision trail, for Admin / Debug. */
+let domainAcquisitionTrail: string[] = [];
+/**
+ * Which binding has already had its domains acquired.
+ *
+ * Acquisition starts from rendering, so without this every re-render would
+ * re-open the application.
+ */
+let domainAcquisitionFor: string | undefined;
 
 /** One slot per async action, so every click is visibly acknowledged. */
 let operations: OperationRegistry = {};
@@ -148,6 +160,69 @@ async function withBusy(kind: OperationKind, work: () => Promise<void>): Promise
     }
     render();
   }
+}
+
+/**
+ * Satisfies the "which values does this field accept" need automatically.
+ *
+ * Called from rendering rather than from a click: the need is one the
+ * system identifies for itself, and asking the user to press a button to
+ * start it made them the orchestrator of an acquisition they have no
+ * special ability to perform. They are the escalation path, not the first
+ * resort.
+ *
+ * Guarded twice: once against a second run for the same binding (rendering
+ * happens constantly), and once against concurrency by the operation
+ * registry.
+ */
+async function acquireValueDomains(): Promise<void> {
+  const binding = browserBindingCandidate?.proposal.binding;
+  if (!binding || !candidate) return;
+  if (domainAcquisitionFor === binding.id || isWorking(operations, "acquire-domains")) return;
+
+  const fields = buildTestFormFields(candidate, binding, liveValueDomains);
+  const plan = planValueDomainAcquisition(fields, binding);
+  domainAcquisitionTrail = plan.trail;
+  if (plan.acquirable.length === 0) return;
+
+  // Claim this binding before awaiting, so a re-render mid-flight cannot
+  // start a second acquisition for the same need.
+  domainAcquisitionFor = binding.id;
+  const forCapability = candidate.id;
+
+  await runOperation("acquire-domains", `Loading valid ${describeNeeds(plan.acquirable)} choices…`, async () => {
+    const acquisition = await extensionBridgeExecutionClient.acquireDomains(binding);
+    // The user may have moved to another trace while this was in flight.
+    if (candidate?.id !== forCapability) return { message: "" };
+
+    if (!acquisition.ok) {
+      liveDomainProblems = {};
+      liveDomainRestorationFailed = false;
+      domainAcquisitionTrail = [...domainAcquisitionTrail, `Live application acquisition failed: ${acquisition.detail}`];
+      throw new Error(acquisition.detail);
+    }
+
+    liveValueDomains = acquisition.inspection.options;
+    liveDomainProblems = acquisition.inspection.unresolved;
+    liveDomainSources = Object.fromEntries(
+      Object.keys(acquisition.inspection.options).map((name) => [name, "live-application-state" as const])
+    );
+    liveDomainRestorationFailed =
+      acquisition.inspection.restoration.page === "unproven" ||
+      acquisition.inspection.restoration.page === "failed" ||
+      acquisition.inspection.restoration.control === "unproven";
+    domainAcquisitionTrail = [...domainAcquisitionTrail, ...acquisition.inspection.evidence];
+
+    return {
+      message: describeInspection(acquisition.inspection),
+      ...(liveDomainRestorationFailed ? { warning: true } : {})
+    };
+  });
+}
+
+/** "Stage" / "Stage and Region", for the busy line. */
+function describeNeeds(needs: readonly { label: string }[]): string {
+  return needs.map((need) => need.label).join(" and ");
 }
 
 /** The busy/result line for one action, announced to assistive technology. */
@@ -334,6 +409,9 @@ function clearExecutionState(): void {
   liveValueDomains = {};
   liveDomainProblems = {};
   liveDomainRestorationFailed = false;
+  liveDomainSources = {};
+  domainAcquisitionTrail = [];
+  domainAcquisitionFor = undefined;
   operations = {};
   browserBindingStatus = "";
   browserBindingValidation = undefined;
@@ -418,6 +496,29 @@ function renderTraceCard(trace: TraceSummary): string {
  * what the person calls this capture and nothing else — the session
  * identity, events, observations, and evidence are untouched by design.
  */
+/**
+ * How the valid choices were established, for Admin / Debug.
+ *
+ * The user never sees this — acquisition is meant to feel like ordinary
+ * form preparation — but the reasoning is retained: what was needed, which
+ * sources were considered, which one answered, and what the live
+ * inspection did to the application.
+ */
+function renderDomainProvenance(): string {
+  if (domainAcquisitionTrail.length === 0) return "";
+  const sources = Object.entries(liveDomainSources)
+    .map(([name, source]) => `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(source)}</li>`)
+    .join("");
+  return `<details class="admin-raw">
+    <summary>Value-domain acquisition</summary>
+    ${sources ? `<ul class="reasons">${sources}</ul>` : ""}
+    <ul class="need-path">${domainAcquisitionTrail.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>
+    <div class="studio-actions">
+      <button type="button" class="secondary" data-acquire-domains="debug">Read choices from application</button>
+    </div>
+  </details>`;
+}
+
 function renderTraceDetailsEditor(): string {
   if (!selectedTrace) return "";
   const recording = selectedTrace.recording;
@@ -860,16 +961,29 @@ function renderTestControl(field: TestFormField): string {
       // or not anyone has enumerated it, and offering free text would invite
       // exactly the arbitrary business value the application will refuse.
       if (field.domainUnknown) {
+        // Acquisition runs by itself, so the control reports the state of
+        // that work rather than offering the user a job to start.
+        const acquiring = isWorking(operations, "acquire-domains");
+        const failure = operations["acquire-domains"]?.status === "failed";
         const why = liveDomainProblems[field.name];
-        return `<select data-test-input="${escapeHtml(field.name)}" disabled>
-            <option value="">Valid values are not known</option>
+        return `<select data-test-input="${escapeHtml(field.name)}" disabled aria-busy="${acquiring}">
+            <option value="">${escapeHtml(acquiring ? "Loading valid choices…" : "Valid values are not known")}</option>
           </select>
-          <small class="domain-unknown">${escapeHtml(
-            `${field.label} is a fixed set of choices. ` +
-              (why
-                ? `The application's own list could not be read: ${why}`
-                : "No metadata supplied its values and the live control has not been read yet.")
-          )}</small>`;
+          <small class="domain-unknown">${
+            acquiring
+              ? `<span class="spinner" aria-hidden="true"></span>${escapeHtml(`Loading valid ${field.label} choices…`)}`
+              : escapeHtml(
+                  failure || why
+                    ? `Valid ${field.label} choices could not be determined automatically.` +
+                      (why ? ` ${why}` : "")
+                    : `${field.label} is a fixed set of choices whose values are not known yet.`
+                )
+          }</small>
+          ${
+            !acquiring && (failure || why)
+              ? `<button type="button" class="secondary" data-acquire-domains="retry">Try again</button>`
+              : ""
+          }`;
       }
       return `<select data-test-input="${escapeHtml(field.name)}">
         <option value="">Choose…</option>
@@ -891,32 +1005,14 @@ function renderBrowserTestForm(
   binding: NonNullable<BrowserBindingCandidateRecord["proposal"]["binding"]>
 ): string {
   const fields = buildTestFormFields(capability, binding, liveValueDomains);
-  const needsLiveDomain = fields.some((field) => field.domainUnknown);
   const readiness = assessExecutionReadiness(fields, binding);
-  const acquiring = isWorking(operations, "acquire-domains");
   const testing = isWorking(operations, "run-browser-test");
+  // The form is where the need becomes concrete, so it is where resolving
+  // it begins. Guarded inside against re-entry from repeated renders.
+  void acquireValueDomains();
   return `<div class="test-form">
     <p class="eyebrow">Test execution</p>
-    ${
-      needsLiveDomain
-        ? `<div class="acquire-domain">
-             <p class="semanticizer-status">${escapeHtml(
-               `${fields.filter((field) => field.domainUnknown).map((field) => field.label).join(" and ")} ` +
-                 `${fields.filter((field) => field.domainUnknown).length === 1 ? "is a fixed set" : "are fixed sets"} of choices. ` +
-                 "AutoWebMCP needs the valid choices for this record before it can safely test the capability."
-             )}</p>
-             <div class="studio-actions">
-               <button type="button" id="read-live-domains" class="secondary" ${acquiring ? "disabled" : ""}>${
-                 acquiring ? "Getting choices…" : "Get valid choices"
-               }</button>
-             </div>
-             ${renderOperationStatus(
-               "acquire-domains",
-               "Opens the record's edit view, reads what each fixed-choice field currently offers, then closes it again. Nothing is written or saved."
-             )}
-           </div>`
-        : renderOperationStatus("acquire-domains")
-    }
+    ${renderOperationStatus("acquire-domains")}
     ${fields
       .map(
         (field) => `<label>${escapeHtml(field.label)}${field.required ? " *" : ""}
@@ -926,9 +1022,9 @@ function renderBrowserTestForm(
       .join("")}
     ${browserTestErrors.length ? `<p class="ambiguity">${browserTestErrors.map(escapeHtml).join(" · ")}</p>` : ""}
     <div class="studio-actions">
-      <button type="button" id="run-browser-test" ${readiness.canRun && !testing ? "" : "disabled"}>${
-        testing ? "Running test…" : "Run test"
-      }</button>
+      <button type="button" id="run-browser-test" ${
+        readiness.canRun && !testing && !isWorking(operations, "acquire-domains") ? "" : "disabled"
+      }>${testing ? "Running test…" : "Run test"}</button>
       ${
         readiness.canRun
           ? renderOperationStatus("run-browser-test")
@@ -1429,9 +1525,9 @@ function renderComparison(): string {
 
 function renderAdminDebug(): string {
   const body = selectedTrace
-    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}${renderReset()}`
+    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderDomainProvenance()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}${renderReset()}`
     : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
-       ${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderExportPanel()}${renderComparison()}${renderReset()}`;
+       ${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderDomainProvenance()}${renderExportPanel()}${renderComparison()}${renderReset()}`;
 
   return `<details class="admin-debug">
     <summary>Admin / Debug</summary>
@@ -1876,36 +1972,14 @@ function render(): void {
     });
   }
 
-  // Ask the application what its fixed-choice fields currently offer. This
-  // reads only: it opens the edit view where the controls exist, opens each
-  // picklist to see the choices, and dismisses it. Nothing is written and
-  // no save is invoked, so it needs no execution confirmation.
-  // Ask the application what its fixed-choice fields currently offer. This
-  // reads only: it opens the edit view where the controls exist, opens each
-  // picklist to see the choices, and closes it again. Nothing is written and
-  // no save is invoked, so it needs no execution confirmation.
-  document.querySelector<HTMLButtonElement>("#read-live-domains")?.addEventListener("click", () => {
-    const binding = browserBindingCandidate?.proposal.binding;
-    if (!binding) return;
-    void runOperation("acquire-domains", "Getting valid choices from the application…", async () => {
-      const acquisition = await extensionBridgeExecutionClient.acquireDomains(binding);
-      if (!acquisition.ok) {
-        liveDomainProblems = {};
-        liveDomainRestorationFailed = false;
-        throw new Error(acquisition.detail);
-      }
-      liveValueDomains = acquisition.inspection.options;
-      liveDomainProblems = acquisition.inspection.unresolved;
-      liveDomainRestorationFailed =
-        acquisition.inspection.restoration.page === "unproven" ||
-        acquisition.inspection.restoration.page === "failed" ||
-        acquisition.inspection.restoration.control === "unproven";
-      return {
-        message: describeInspection(acquisition.inspection),
-        ...(liveDomainRestorationFailed ? { warning: true } : {})
-      };
+  // Retrying, and the Admin / Debug affordance, both re-enter the same
+  // automatic acquisition. There is no separate manual mechanism.
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-acquire-domains]")) {
+    button.addEventListener("click", () => {
+      domainAcquisitionFor = undefined;
+      void acquireValueDomains();
     });
-  });
+  }
 
   document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", () =>
     void withBusy("run-browser-test", async () => {
