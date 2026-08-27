@@ -9,6 +9,13 @@ import {
   type BindingInferenceRun
 } from "./training/bindingInference";
 import { isInvestigable } from "./binding/model";
+import { observedRecordType, resolveFieldMapping } from "./binding/fieldMapping";
+import { defaultValidators } from "./binding/validators";
+import {
+  acceptedBinding,
+  runBindingValidation,
+  type BindingValidationRecord
+} from "./binding/validation";
 import {
   buildDebugBundle,
   debugBundleFilename,
@@ -59,6 +66,9 @@ let exportStatus = "";
 let bindingRuns: BindingInferenceRun[] = [];
 let bindingCandidate: BindingCandidateRecord | undefined;
 let bindingStatus = "";
+let validationRuns: BindingValidationRecord[] = [];
+let validation: BindingValidationRecord | undefined;
+let validationStatus = "";
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 
@@ -199,6 +209,59 @@ function renderBindingPicker(capability: SemanticCapability): string {
   }</p>`;
 }
 
+const CHECK_MARK: Record<string, string> = { pass: "PASS", fail: "FAIL", blocked: "BLOCKED", skipped: "skipped" };
+
+/**
+ * Proof, or an honest account of why there is none. A validated result is
+ * offered for acceptance rather than installed: proving a mechanism works is a
+ * different judgement from deciding it should be used.
+ */
+function renderValidation(): string {
+  const record = validation;
+  const result = record?.result;
+
+  const body = result
+    ? `<dl class="capability-state">
+        <div><dt>Status</dt><dd>${escapeHtml(result.status)}</dd></div>
+        <div><dt>Adapter</dt><dd><code>${escapeHtml(result.adapter)}</code></dd></div>
+        <div><dt>Execution binding</dt><dd>${
+          record?.state === "accepted" ? "accepted" : result.binding ? "awaiting acceptance" : "none"
+        }</dd></div>
+      </dl>
+      <ul class="reasons">${result.checks
+        .map(
+          (check) =>
+            `<li class="check-${escapeHtml(check.status)}"><strong>${escapeHtml(
+              CHECK_MARK[check.status] ?? check.status
+            )}</strong> ${escapeHtml(check.name)} — ${escapeHtml(check.detail)}</li>`
+        )
+        .join("")}</ul>
+      ${result.evidence.length ? `<ul class="reasons">${result.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
+      ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}
+      ${
+        result.requirements.length
+          ? `<p class="semanticizer-status">Required before this can be validated: ${result.requirements
+              .map(escapeHtml)
+              .join("; ")}.</p>`
+          : ""
+      }`
+    : "";
+
+  return `<div class="binding-validation">
+    <p class="eyebrow">Binding validation</p>
+    ${body}
+    <div class="studio-actions">
+      <button type="button" id="validate-binding" class="secondary">${result ? "Re-validate binding" : "Validate binding"}</button>
+      ${
+        result?.binding && record?.state !== "accepted"
+          ? `<button type="button" id="accept-binding">Accept validated binding</button>`
+          : ""
+      }
+      <p class="semanticizer-status">${escapeHtml(validationStatus)}</p>
+    </div>
+  </div>`;
+}
+
 /**
  * The proposal step between confirmation and a binding.
  *
@@ -239,9 +302,12 @@ function renderBindingCandidate(confirmed: boolean, bound: boolean): string {
         The execution binding stays unset and publication stays blocked.</p>`
     : "";
 
+  const validationBlock = proposal && isInvestigable(proposal) ? renderValidation() : "";
+
   return `<div class="binding-candidate">
     <p class="eyebrow">Binding candidate</p>
     ${body}
+    ${validationBlock}
     <div class="studio-actions">
       <button type="button" id="generate-binding" class="secondary">${
         proposal ? "Regenerate binding candidate" : "Suggest execution binding"
@@ -267,7 +333,9 @@ function renderCapabilityState(capability: SemanticCapability, confirmed: boolea
   return `<dl class="capability-state">
     <div><dt>Learned from</dt><dd>${escapeHtml(source?.label ?? "Unknown application")}</dd></div>
     <div><dt>Semantic capability</dt><dd>${confirmed ? "Confirmed" : "Awaiting confirmation"}</dd></div>
-    <div><dt>Execution binding</dt><dd>${bound ? "Resolved" : "Not discovered"}</dd></div>
+    <div><dt>Execution binding</dt><dd>${
+      acceptedBinding(validation) ? "Validated and accepted" : bound ? "Resolved" : "Not discovered"
+    }</dd></div>
     <div><dt>Publication</dt><dd>${confirmed && bound ? "Ready" : "Blocked"}</dd></div>
   </dl>`;
 }
@@ -487,6 +555,8 @@ function currentDebugBundle(): DebugBundle | undefined {
     publications,
     bindingRuns,
     bindingCandidate,
+    validationRuns,
+    validation,
     exportedAt: new Date().toISOString()
   });
 }
@@ -592,6 +662,44 @@ function renderBindingRuns(): string {
   );
 }
 
+function renderValidationRuns(): string {
+  if (validationRuns.length === 0) {
+    return panel(
+      "Binding validation runs",
+      "none yet",
+      `<p class="semanticizer-status">Validate a binding candidate to record a run.</p>`
+    );
+  }
+
+  const runs = validationRuns
+    .map(
+      (record, index) => `<details class="admin-run">
+        <summary>Run #${index + 1} · <code>${escapeHtml(record.result.adapter)}</code> ·
+          ${escapeHtml(record.result.status)}</summary>
+        <p class="semanticizer-status">capability <code>${escapeHtml(record.result.capabilityId)}</code> ·
+          ${escapeHtml(record.result.sourceApplication.label)} · ${escapeHtml(record.result.validatedAt)} ·
+          state ${escapeHtml(record.state)}</p>
+        <details class="admin-raw" open><summary>Checks</summary>${json(record.result.checks)}</details>
+        <details class="admin-raw"><summary>Evidence and requirements</summary>${json({
+          evidence: record.result.evidence,
+          warnings: record.result.warnings,
+          requirements: record.result.requirements
+        })}</details>
+        <details class="admin-raw"><summary>Resulting binding</summary>${
+          record.result.binding ? json(record.result.binding) : "<p class=empty>No binding was created.</p>"
+        }</details>
+      </details>`
+    )
+    .join("");
+
+  return panel(
+    "Binding validation runs",
+    `${validationRuns.length} · ${validation?.state ?? "none"}`,
+    `<p class="semanticizer-status">Deterministic proof, or an account of why there is none. A validated
+      mechanism still requires human acceptance before it becomes the execution binding.</p>${runs}`
+  );
+}
+
 function renderReset(): string {
   return panel(
     "Reset",
@@ -666,9 +774,9 @@ function renderComparison(): string {
 
 function renderAdminDebug(): string {
   const body = selectedTrace
-    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderBindingRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}${renderReset()}`
+    ? `${renderTraceIdentity(selectedTrace)}${renderCaptureStream(selectedTrace)}${renderNormalizedPanel(selectedTrace)}${renderEvidencePanel(selectedTrace)}${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderLifecyclePanel()}${renderExportPanel()}${renderComparison()}${renderReset()}`
     : `<p class="semanticizer-status">Select a Teach Mode capture to inspect what was observed and transformed.</p>
-       ${renderSemanticizerRuns()}${renderBindingRuns()}${renderExportPanel()}${renderComparison()}${renderReset()}`;
+       ${renderSemanticizerRuns()}${renderBindingRuns()}${renderValidationRuns()}${renderExportPanel()}${renderComparison()}${renderReset()}`;
 
   return `<details class="admin-debug">
     <summary>Admin / Debug</summary>
@@ -680,7 +788,12 @@ function renderAdminDebug(): string {
 
 function renderTrainingStudio(): string {
   const confirmed = Boolean(candidate?.provenance.confirmedByHuman);
-  const bound = candidate ? Boolean(resolveAdvertisedBinding(candidate)) : false;
+  // Two routes to a binding, both requiring a human: selecting one the
+  // application advertises, or accepting one validation proved. Neither is
+  // weakened by the other, and a mere candidate is neither.
+  const bound = candidate
+    ? Boolean(resolveAdvertisedBinding(candidate)) || Boolean(acceptedBinding(validation))
+    : false;
   const candidateEditor = candidate
     ? `<form id="candidate-editor" class="candidate-editor">
         <div class="panel-heading"><div><p class="eyebrow">Candidate capability</p><h2>Review before publication</h2></div><span>Human confirmation required</span></div>
@@ -914,6 +1027,48 @@ function render(): void {
     render();
   });
 
+  document.querySelector<HTMLButtonElement>("#validate-binding")?.addEventListener("click", async () => {
+    if (!candidate || !selectedTrace || !bindingCandidate) return;
+    validationStatus = "Validating the proposed mechanism…";
+    render();
+
+    const mapping = resolveFieldMapping(candidate, selectedTrace);
+    const recordType = observedRecordType(selectedTrace);
+    try {
+      const result = await runBindingValidation(
+        {
+          capabilityId: candidate.id,
+          capabilityInputs: candidate.inputs.map((input) => ({ name: input.name, required: input.required })),
+          sourceApplication: candidate.provenance.sourceApplication ?? { id: "unknown", label: "Unknown application" },
+          candidate: bindingCandidate.proposal,
+          fieldMapping: mapping.mapping,
+          fieldMappingAmbiguities: mapping.ambiguities,
+          ...(recordType ? { observedRecordType: recordType } : {}),
+          validatedAt: new Date().toISOString()
+        },
+        defaultValidators
+      );
+
+      validation = { state: result.status === "validated" ? "validated" : "none", result };
+      validationRuns = [...validationRuns, validation];
+      validationStatus =
+        result.status === "validated"
+          ? "Mechanism validated. Accept it to make it the execution binding."
+          : `Validation returned ${result.status}. No execution binding was created.`;
+    } catch (error) {
+      validationStatus = error instanceof Error ? error.message : "Validation failed.";
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#accept-binding")?.addEventListener("click", () => {
+    if (!validation?.result.binding) return;
+    // Technical proof and product approval are different decisions.
+    validation = { ...validation, state: "accepted" };
+    validationStatus = "Validated binding accepted. It is now this capability's execution binding.";
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#accept-binding-candidate")?.addEventListener("click", () => {
     if (!bindingCandidate) return;
     // Recorded only. The execution binding stays unset until a human selects a
@@ -945,6 +1100,9 @@ function render(): void {
       semanticizerRuns = [];
       bindingRuns = [];
       bindingCandidate = undefined;
+      validation = undefined;
+      validationRuns = [];
+      validationStatus = "";
       candidate = undefined;
       ambiguities = [];
       publications = [];

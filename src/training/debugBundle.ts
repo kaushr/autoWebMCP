@@ -3,6 +3,7 @@ import type { SemanticCapability } from "../semantic/model";
 import type { PublicationRecord } from "../webmcp/publication";
 import type { SemanticizerRun } from "./semanticizer";
 import type { BindingCandidateRecord, BindingInferenceRun } from "./bindingInference";
+import type { BindingValidationRecord } from "../binding/validation";
 import { resolveAdvertisedBinding } from "./bindingProvider";
 import { sourceApplicationFor } from "./sourceApplication";
 
@@ -10,7 +11,7 @@ import { sourceApplicationFor } from "./sourceApplication";
  * Bumped when the shape changes. Deliberately a plain string with no migration
  * machinery: the format will move, and a reader can branch on it.
  */
-export const DEBUG_BUNDLE_VERSION = "2";
+export const DEBUG_BUNDLE_VERSION = "3";
 
 export interface DebugBundleInput {
   trace: ObservationTrace;
@@ -20,6 +21,8 @@ export interface DebugBundleInput {
   publications?: readonly PublicationRecord[];
   bindingRuns?: readonly BindingInferenceRun[];
   bindingCandidate?: BindingCandidateRecord;
+  validationRuns?: readonly BindingValidationRecord[];
+  validation?: BindingValidationRecord;
   exportedAt: string;
 }
 
@@ -45,6 +48,9 @@ export interface DebugBundle {
   bindingInferenceRuns: BindingInferenceRun[];
   bindingCandidate: BindingCandidateRecord["proposal"] | null;
   bindingCandidateState: BindingCandidateRecord["state"];
+  bindingValidationRuns: BindingValidationRecord["result"][];
+  validatedBinding: NonNullable<BindingValidationRecord["result"]["binding"]> | null;
+  bindingValidationState: BindingValidationRecord["state"];
   capabilityLifecycle: {
     candidate: SemanticCapability | null;
     ambiguities: string[];
@@ -127,6 +133,19 @@ export function buildDebugBundle(input: DebugBundleInput): DebugBundle {
     bindingCandidateState:
       ownCandidate && input.bindingCandidate?.proposal.capabilityId === ownCandidate.id
         ? input.bindingCandidate.state
+        : "none",
+    bindingValidationRuns: (input.validationRuns ?? [])
+      .filter((record) => ownCandidate && record.result.capabilityId === ownCandidate.id)
+      .map((record) => record.result),
+    // A binding exists here only once a human accepted it. Validation alone
+    // never populates this field, which is what publication reads.
+    validatedBinding:
+      ownCandidate && input.validation?.state === "accepted" && input.validation.result.binding
+        ? input.validation.result.binding
+        : null,
+    bindingValidationState:
+      ownCandidate && input.validation?.result.capabilityId === ownCandidate.id
+        ? input.validation.state
         : "none",
     capabilityLifecycle: {
       candidate: ownCandidate ?? null,

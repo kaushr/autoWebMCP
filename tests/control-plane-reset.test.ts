@@ -61,7 +61,7 @@ describe("Control-plane reset", () => {
   });
 });
 
-describe("Debug bundle version 2", () => {
+describe("Debug bundle version 3", () => {
   function trace(): ObservationTrace {
     const session = new CaptureSession("sess-binding", 0, {
       host: "acme.lightning.force.com",
@@ -105,8 +105,11 @@ describe("Debug bundle version 2", () => {
       exportedAt: "2026-08-27T05:01:00.000Z"
     });
 
-    expect(DEBUG_BUNDLE_VERSION).toBe("2");
-    expect(bundle.exportVersion).toBe("2");
+    expect(DEBUG_BUNDLE_VERSION).toBe("3");
+    expect(bundle.exportVersion).toBe("3");
+    expect(bundle.bindingValidationRuns).toEqual([]);
+    expect(bundle.validatedBinding).toBeNull();
+    expect(bundle.bindingValidationState).toBe("none");
     expect(bundle.bindingInferenceRuns).toHaveLength(1);
     expect(bundle.bindingCandidateState).toBe("none");
     expect(bundle.bindingCandidate).toBeNull();
