@@ -506,8 +506,20 @@ function renderTraceCard(trace: TraceSummary): string {
  */
 function renderDomainProvenance(): string {
   if (domainAcquisitionTrail.length === 0) return "";
+  // The values themselves, not merely their provenance: inspecting what
+  // AutoWebMCP believes the domain to be must not require running a test.
   const sources = Object.entries(liveDomainSources)
-    .map(([name, source]) => `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(source)}</li>`)
+    .map(
+      ([name, source]) =>
+        `<li><code>${escapeHtml(name)}</code> — ${escapeHtml(source)}` +
+        `${
+          liveValueDomains[name]?.length
+            ? `<ul class="reasons">${liveValueDomains[name]
+                .map((value) => `<li><code>${escapeHtml(value)}</code></li>`)
+                .join("")}</ul>`
+            : ""
+        }</li>`
+    )
     .join("");
   return `<details class="admin-raw">
     <summary>Value-domain acquisition</summary>

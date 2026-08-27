@@ -3,12 +3,13 @@ import {
   accessibleName,
   isVisible,
   normalizeLabel,
+  waitForApplicationReaction,
   type FieldWriteOutcome,
   type OptionReadOutcome,
   type PlatformResolverAdapter,
   type ResolvedTarget
 } from "./engine";
-import { queryComposedTree, queryComposedTreeFirst } from "./composedTree";
+import { composedMatchWithin, queryComposedTree, queryComposedTreeFirst } from "./composedTree";
 import type { ResolutionPolicy } from "./resolutionPolicy";
 import {
   DEFAULT_PAGE_STATE_POLICY,
@@ -81,6 +82,10 @@ const MONTH_NAV_MAX_CLICKS = 24;
 const COMBOBOX_TRIGGER_SELECTOR =
   '[role="combobox"], button[aria-haspopup="listbox"], input[aria-haspopup="listbox"]';
 const LISTBOX_SELECTOR = '[role="listbox"]';
+/** How long to let a picklist settle after a choice before reading it back. */
+const SELECTION_QUIET_MS = 40;
+const SELECTION_TIMEOUT_MS = 2_000;
+const SELECTION_POLL_MS = 40;
 const OPTION_SELECTOR = '[role="option"]';
 
 function isCustomElement(element: Element): boolean {
@@ -122,14 +127,22 @@ function isPotentialFieldHost(element: Element, policy: ResolutionPolicy): boole
  * at `host.shadowRoot` finds nothing and silently falls through to a weaker
  * strategy.
  */
+/**
+ * A native control at or beneath the resolved element.
+ *
+ * Deliberately composed-subtree and self-inclusive. The previous version
+ * required `host.shadowRoot` and searched only inside it, which meant that
+ * whenever resolution landed exactly on the control — the common case for
+ * a plain `<input>` carrying the field's accessible name — every strategy
+ * that depends on this declined, and the caller fell through to a
+ * last-resort path that then failed for an unrelated-sounding reason.
+ */
 function nativeControlWithin(
   host: Element,
   selector: string,
   policy: ResolutionPolicy
 ): HTMLInputElement | undefined {
-  const shadow = host.shadowRoot;
-  if (!shadow) return undefined;
-  const native = queryComposedTreeFirst(shadow, selector, policy);
+  const native = composedMatchWithin(host, selector, policy);
   return native instanceof HTMLInputElement ? native : undefined;
 }
 
@@ -141,9 +154,7 @@ function nativeControlWithin(
  * which is a control by ARIA and not by tag.
  */
 function controlWithin(host: Element, selector: string, policy: ResolutionPolicy): Element | undefined {
-  const shadow = host.shadowRoot;
-  if (!shadow) return undefined;
-  return queryComposedTreeFirst(shadow, selector, policy);
+  return composedMatchWithin(host, selector, policy);
 }
 
 function nativeDateInputWithin(root: Element, policy: ResolutionPolicy): HTMLInputElement | undefined {
@@ -252,9 +263,56 @@ function setDateViaPicker(
   return { ok: true, detail: "Value set by selecting the labelled day in the date-picker calendar." };
 }
 
-/** The option's own accessible name, as a human reads it in the list. */
+/**
+ * The option's own label, as a human reads it in the list.
+ *
+ * Whitespace-collapsed, because a live picklist produced
+ * `"stage completeEngage"` — a run-together blob from an element whose
+ * `textContent` swept up a label and several sibling options. That string
+ * then travelled all the way into an execution request as if it were a
+ * business value.
+ */
 function optionLabel(option: Element): string {
-  return (accessibleName(option) ?? option.textContent ?? "").trim();
+  return (accessibleName(option) ?? option.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The options a listbox actually offers, as opposed to every element
+ * carrying the option role.
+ *
+ * A container that itself claims `role="option"` while holding more
+ * options is not something a human can choose; reading its text yields the
+ * concatenation of everything beneath it. Selectability is therefore
+ * checked structurally — an option that contains another option is a
+ * wrapper — rather than by trusting the role attribute alone.
+ */
+function selectableOptions(listbox: Element, policy: ResolutionPolicy): Element[] {
+  const all = queryComposedTree(listbox, OPTION_SELECTOR, policy).filter(isVisible);
+  return all.filter((option) => !all.some((other) => other !== option && composedContains(option, other)));
+}
+
+/**
+ * Whether a discovered domain is structurally believable.
+ *
+ * The last line of defence for the same defect: if extraction still
+ * produced a value that reads as several other values run together, the
+ * whole domain is suspect, and presenting it as a set of choices would
+ * hand the user a business value the application never offered. Better to
+ * report the domain as unresolved than to be confidently wrong about it.
+ */
+export function suspiciousDomain(values: readonly string[]): string | undefined {
+  const clean = values.map((value) => value.trim()).filter(Boolean);
+  if (clean.length !== values.length) return "some options had no readable label";
+
+  for (const value of clean) {
+    const contained = clean.filter((other) => other !== value && value.toLowerCase().includes(other.toLowerCase()));
+    // Containing one other option is ordinary ("Closed Won" inside "Closed
+    // Won - Renewal"). Containing two or more is a concatenation.
+    if (contained.length >= 2) {
+      return `"${value}" appears to be several options run together (${contained.join(", ")})`;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -267,8 +325,7 @@ function optionLabel(option: Element): string {
  * successfully and then report having no combobox inside it.
  */
 function comboboxTriggerFor(host: Element, policy: ResolutionPolicy): Element | undefined {
-  if (host.matches(COMBOBOX_TRIGGER_SELECTOR)) return host;
-  return queryComposedTreeFirst(host, COMBOBOX_TRIGGER_SELECTOR, policy);
+  return composedMatchWithin(host, COMBOBOX_TRIGGER_SELECTOR, policy);
 }
 
 /** What the combobox currently displays, for read-back after selecting. */
@@ -289,7 +346,11 @@ function readComboboxDisplayValue(host: Element, policy: ResolutionPolicy): stri
  * the authority on what is legal for this record right now, which may be
  * narrower than any metadata said.
  */
-function setPicklistValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
+async function setPicklistValue(
+  resolved: ResolvedTarget,
+  value: string,
+  policy: ResolutionPolicy
+): Promise<FieldWriteOutcome> {
   const host = resolved.element;
   const root: ParentNode = host.ownerDocument ?? host;
 
@@ -307,7 +368,7 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
     return { ok: false, detail: "Activating the combobox did not open a recognizable option list." };
   }
 
-  const options = queryComposedTree(listbox, OPTION_SELECTOR, policy).filter(isVisible);
+  const options = selectableOptions(listbox, policy);
   const wanted = normalizeLabel(value);
   const matches = options.filter((option) => normalizeLabel(optionLabel(option)) === wanted);
 
@@ -331,7 +392,29 @@ function setPicklistValue(resolved: ResolvedTarget, value: string, policy: Resol
   }
   matches[0].click();
 
-  const shown = readComboboxDisplayValue(host, policy);
+  // Lightning repaints the control asynchronously, so reading it back in
+  // the same tick reports the value it had a moment ago — a live run failed
+  // exactly that way, reporting "still shows Collaborate" after a correct
+  // selection.
+  //
+  // The document-level application-reaction primitive is not enough on its
+  // own here: a MutationObserver watching the document does not see
+  // mutations inside a shadow root, and this component repaints inside two.
+  // So the value is re-read until it settles, exactly as `ensureEditable`
+  // polls for its page state. This is a bounded wait for an observable
+  // condition, not a fixed sleep: it returns the instant the value appears.
+  await waitForApplicationReaction({
+    root: host.ownerDocument ?? host,
+    quietMs: SELECTION_QUIET_MS,
+    timeoutMs: SELECTION_TIMEOUT_MS
+  });
+
+  const deadline = Date.now() + SELECTION_TIMEOUT_MS;
+  let shown = readComboboxDisplayValue(host, policy);
+  while (shown !== undefined && normalizeLabel(shown) !== wanted && Date.now() < deadline) {
+    await sleep(SELECTION_POLL_MS);
+    shown = readComboboxDisplayValue(host, policy);
+  }
   if (shown && normalizeLabel(shown) !== wanted) {
     return { ok: false, detail: `The picklist still shows "${shown}" after selecting "${value}".` };
   }
@@ -378,23 +461,23 @@ function readPicklistOptions(host: Element, policy: ResolutionPolicy): OptionRea
 
     const listbox =
       queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+    // Canonical label first, then dedupe: two spellings of the same
+    // whitespace are one option, not two.
     const labels = listbox
-      ? [
-          ...new Set(
-            queryComposedTree(listbox, OPTION_SELECTOR, policy)
-              .filter(isVisible)
-              .map(optionLabel)
-              .filter((label): label is string => Boolean(label))
-          )
-        ]
+      ? [...new Set(selectableOptions(listbox, policy).map(optionLabel).filter(Boolean))]
       : [];
+    const suspicious = labels.length > 0 ? suspiciousDomain(labels) : undefined;
 
     return {
-      ...(labels.length > 0 ? { options: labels } : {}),
+      ...(labels.length > 0 && !suspicious ? { options: labels } : {}),
       openedByUs,
       // Whatever happened above, a control WE opened must be put back.
       ...dismissCombobox(trigger, root, policy, openedByUs),
-      detail: labels.length > 0 ? `Read ${labels.length} offered values.` : "The control opened but offered no readable values."
+      detail: suspicious
+        ? `The values read from this control do not look like a list of choices: ${suspicious}.`
+        : labels.length > 0
+          ? `Read ${labels.length} offered values.`
+          : "The control opened but offered no readable values."
     };
   } catch (error) {
     // A read that throws still owns whatever it opened.
@@ -497,8 +580,32 @@ function findActionLabelled(
   return action instanceof HTMLElement ? action : undefined;
 }
 
+/**
+ * Describes what a resolved element actually is, for a failure that has to
+ * be diagnosable without another live run.
+ *
+ * A live regression reported only "No date-picker trigger control was
+ * found near the field" — true, and useless: it named the last strategy
+ * rather than saying which element had been resolved or why the three
+ * earlier strategies declined.
+ */
+function describeResolvedTarget(resolved: ResolvedTarget, policy: ResolutionPolicy): string {
+  const element = resolved.element;
+  const nativeAnywhere = composedMatchWithin(element, "input, select, textarea", policy);
+  return [
+    `resolved <${element.tagName.toLowerCase()}> via ${resolved.strategy}`,
+    `accessible name ${JSON.stringify(accessibleName(element) ?? null)}`,
+    `application identifier ${JSON.stringify(element.getAttribute("name") ?? element.getAttribute("id") ?? null)}`,
+    `own shadow root: ${element.shadowRoot ? "yes" : "no"}`,
+    `native input in composed subtree: ${nativeAnywhere ? `<${nativeAnywhere.tagName.toLowerCase()}>` : "none"}`
+  ].join("; ");
+}
+
 function setDateValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
   const element = resolved.element;
+  // Each strategy records why it declined, so a failure explains the whole
+  // chain rather than only its last link.
+  const attempts: string[] = [];
 
   // 1. A native `<input type="date">` reachable through the shadow root —
   //    genuinely expects ISO, and writing to the real control a human would
@@ -507,8 +614,9 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
   const nativeDate = nativeDateInputWithin(element, policy);
   if (nativeDate) {
     writeNativeInput(nativeDate, value);
-    return { ok: true, detail: "Value set via the native date input inside the component's shadow root." };
+    return { ok: true, detail: "Value set via the native date input in the field's composed subtree." };
   }
+  attempts.push("native date input: none found in the composed subtree");
 
   // 2. Any other native input inside the shadow root — a live Salesforce
   //    field proved this one the hard way: writing raw ISO through a
@@ -519,17 +627,19 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
   //    input expects what a human would actually type — the locale display
   //    format — so that is what this strategy writes.
   const anyNative = anyNativeInputWithin(element, policy);
+  if (!anyNative) attempts.push("any native input: none found in the composed subtree");
   if (anyNative) {
     const parsed = parseIsoDate(value);
     const formatted = parsed ? `${parsed.month}/${parsed.day}/${parsed.year}` : value;
     writeNativeInput(anyNative, formatted);
-    return { ok: true, detail: "Value set via the shadow-internal input's formatted display value." };
+    return { ok: true, detail: "Value set via the field's own text input, in the display format it expects." };
   }
 
   // 3. The host's own mirrored value property — a real mechanism for
   //    components that keep their shadow root closed, but tried only after
   //    a reachable native input, per the evidence above: this path cannot
   //    be trusted to reformat what it is given.
+  if (!hasMirroredValueProperty(element)) attempts.push("mirrored value property: not exposed by the resolved element");
   if (hasMirroredValueProperty(element)) {
     try {
       (element as unknown as { value: string }).value = value;
@@ -537,14 +647,21 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
       element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       return { ok: true, detail: "Value set via the component's mirrored value property." };
     } catch {
-      // Falls through — some hosts expose `value` as read-only.
+      attempts.push("mirrored value property: present but read-only");
     }
   }
 
   // 4. The date-picker UI itself, semantically.
   const parsed = parseIsoDate(value);
   if (!parsed) return { ok: false, detail: `"${value}" is not a recognized ISO date (yyyy-mm-dd).` };
-  return setDateViaPicker(resolved, parsed, policy);
+  const viaPicker = setDateViaPicker(resolved, parsed, policy);
+  if (viaPicker.ok) return viaPicker;
+  return {
+    ok: false,
+    detail:
+      `${viaPicker.detail} Strategies attempted — ${attempts.join("; ")}; ` +
+      `date picker: ${viaPicker.detail.toLowerCase()} Target: ${describeResolvedTarget(resolved, policy)}.`
+  };
 }
 
 const EDIT_WAIT_TIMEOUT_MS = 5_000;
@@ -986,8 +1103,10 @@ export function createSalesforceResolverAdapter(
       value: string,
       valueKind: FieldValueKind,
       policy: ResolutionPolicy
-    ): FieldWriteOutcome | undefined {
+    ): FieldWriteOutcome | Promise<FieldWriteOutcome> | undefined {
       if (valueKind === "date") return setDateValue(resolved, value, policy);
+      // Asynchronous by necessity: a picklist selection is only verifiable
+      // once the component has settled.
       if (valueKind === "select") return setPicklistValue(resolved, value, policy);
       return undefined;
     },

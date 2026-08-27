@@ -96,6 +96,25 @@ export function queryComposedTreeFirst(
 }
 
 /**
+ * The first composed-tree match, considering the root element ITSELF.
+ *
+ * A semantic resolver is allowed to land on whatever element carries the
+ * field's identity — sometimes a component host, sometimes a light-DOM
+ * wrapper, sometimes the native control itself. Downstream control
+ * discovery must not assume which: searching only *inside* the resolved
+ * element silently fails when the resolution was exact, which is how a
+ * date field that resolved perfectly reported having no date control.
+ */
+export function composedMatchWithin(
+  root: Element,
+  selector: string,
+  policy: ResolutionPolicy
+): Element | undefined {
+  if (root.matches(selector)) return root;
+  return queryComposedTreeFirst(root, selector, policy);
+}
+
+/**
  * `closest`, continued across shadow boundaries by stepping from a shadow
  * root to its host. Native `closest` stops at the boundary, which silently
  * loses any ancestor context a component is nested inside — the enclosing
