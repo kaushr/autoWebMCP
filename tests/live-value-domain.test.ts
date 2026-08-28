@@ -293,6 +293,66 @@ describe("reading never grabs a different field's still-open listbox", () => {
   });
 });
 
+describe("writing never selects an option in a different field's still-open listbox", () => {
+  it("waits for Stage's own listbox instead of clicking a same-labelled option belonging to another field", async () => {
+    // Reproduces a live failure directly: selecting "Confirm" reported
+    // success — a matching option was found and clicked — but the
+    // picklist still showed the old value afterward. Consistent with the
+    // exact mechanism proven for reading: this field's own listbox had
+    // not rendered yet, and the click landed on a same-labelled option
+    // in some OTHER field's listbox that was already open nearby.
+    const root = mount(`
+      <records-record-edit>
+        <label for="type-trigger">Type</label>
+        <button id="type-trigger" role="combobox" aria-haspopup="listbox" aria-expanded="true"></button>
+        <div role="listbox" aria-label="Type">
+          <a role="option">Confirm</a>
+          <a role="option">SMB</a>
+        </div>
+        <label for="stage-trigger">*Stage</label>
+        <button id="stage-trigger" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="stage-listbox"></button>
+      </records-record-edit>
+    `);
+    const wrongOptionClicks: string[] = [];
+    root.querySelector('[aria-label="Type"] [role="option"]')!.addEventListener("click", (e) => {
+      wrongOptionClicks.push((e.currentTarget as Element).textContent ?? "");
+    });
+
+    const stageTrigger = root.querySelector<HTMLButtonElement>("#stage-trigger")!;
+    let stageSelection: string | undefined;
+    stageTrigger.addEventListener("click", () => {
+      stageTrigger.setAttribute("aria-expanded", "true");
+      // Arrives one tick after the click, not in it.
+      setTimeout(() => {
+        const real = document.createElement("div");
+        real.setAttribute("role", "listbox");
+        real.setAttribute("id", "stage-listbox");
+        real.setAttribute("aria-label", "Stage");
+        real.innerHTML = `<a role="option">Collaborate</a><a role="option">Confirm</a>`;
+        for (const item of real.querySelectorAll('[role="option"]')) {
+          item.addEventListener("click", () => {
+            stageSelection = item.textContent ?? "";
+            stageTrigger.textContent = stageSelection;
+            stageTrigger.setAttribute("aria-expanded", "false");
+            real.remove();
+          });
+        }
+        stageTrigger.after(real);
+      }, 0);
+    });
+
+    const resolved = resolveSemanticTarget(root, STAGE, adapter());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    const outcome = await setFieldValue(resolved.target, "Confirm", "select", adapter());
+    expect(outcome.ok).toBe(true);
+    expect(stageSelection).toBe("Confirm");
+    // The decoy option in the unrelated Type listbox must never be clicked.
+    expect(wrongOptionClicks).toEqual([]);
+  });
+});
+
 describe("the whole-binding inspection", () => {
   it("collects domains for closed-domain inputs and commits nothing", async () => {
     const page = mountPicklist(["Prospecting", "Closed Won"]);

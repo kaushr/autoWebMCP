@@ -361,6 +361,37 @@ describe("3 — the date control is found wherever it sits beneath the target", 
     expect(outcome.ok).toBe(true);
   });
 
+  it("does not report success until the page's own reaction to the write has settled", async () => {
+    // Reproduces a live failure directly: Close Date was written, success
+    // was reported, and the very next read-back — which happens
+    // immediately after this resolves — still showed the old value.
+    // `setPicklistValue` already had to solve exactly this for picklists;
+    // this proves the date write got the same fix, not just that it
+    // compiles. A delayed mutation, fired well after the synchronous
+    // write, stands in for Lightning's own asynchronous re-render; if the
+    // function returned before waiting for it, `reacted` would still be
+    // false the instant `setFieldValue` resolves.
+    const root = mount(
+      EDIT_SHELL(`<label for="cd">*Close Date</label><records-record-field id="cd"><lightning-input></lightning-input></records-record-field>`)
+    );
+    const inputShadow = shadow(root.querySelector("lightning-input")!, `<input name="CloseDate" type="text" class="slds-input" /><span class="marker"></span>`);
+    const input = inputShadow.querySelector("input")!;
+    const marker = inputShadow.querySelector(".marker")!;
+    let reacted = false;
+    input.addEventListener("input", () => {
+      setTimeout(() => {
+        reacted = true;
+        marker.textContent = "reacted";
+      }, 20);
+    });
+
+    const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+    expect(outcome.ok).toBe(true);
+    expect(reacted).toBe(true);
+  });
+
   it("a genuine failure now explains every strategy it tried", async () => {
     const root = mount(
       EDIT_SHELL(`<label for="cd">*Close Date</label><records-record-field id="cd"><span>no control here</span></records-record-field>`)

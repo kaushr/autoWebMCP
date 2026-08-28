@@ -337,10 +337,18 @@ async function setPicklistValue(
   }
   trigger.click();
 
-  // The listbox is often portalled out of the field's own subtree, so a
-  // miss inside the host is not a failure until the document also has none.
-  const listbox =
-    queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+  // Reading the listbox in the same tick as the click, with an unscoped
+  // fallback to any `[role="listbox"]` on the page, was proven wrong for
+  // introspection: with another field's listbox already open and this
+  // one not yet rendered, the wrong one gets read. Writing has the
+  // identical exposure, and worse: a live run selected an option
+  // labelled "Confirm" and the picklist never changed — consistent with
+  // clicking a same-labelled option belonging to a completely different
+  // field's still-open listbox instead of this one's own, which had not
+  // rendered yet. `waitForOwnListbox` resolves through `aria-controls`
+  // when the trigger declares it, exclusively, and waits for that
+  // specific id rather than accepting whatever listbox exists first.
+  const listbox = await waitForOwnListbox(trigger, host, root, policy);
   if (!listbox) {
     return { ok: false, detail: "Activating the combobox did not open a recognizable option list." };
   }
@@ -652,11 +660,31 @@ function describeResolvedTarget(resolved: ResolvedTarget, policy: ResolutionPoli
   ].join("; ");
 }
 
-function setDateValue(resolved: ResolvedTarget, value: string, policy: ResolutionPolicy): FieldWriteOutcome {
+async function setDateValue(
+  resolved: ResolvedTarget,
+  value: string,
+  policy: ResolutionPolicy
+): Promise<FieldWriteOutcome> {
   const element = resolved.element;
   // Each strategy records why it declined, so a failure explains the whole
   // chain rather than only its last link.
   const attempts: string[] = [];
+
+  // A live run wrote Close Date this way and reported success, but the
+  // very next read-back — which happens immediately after this returns —
+  // still showed the old value. `setPicklistValue` already had to solve
+  // exactly this: Lightning's own re-render from a dispatched input/change
+  // event is not guaranteed to have happened by the time this function
+  // returns, so a caller that reads back in the same tick sees the value
+  // this function had a moment ago. Every native write below now waits
+  // for the page to settle before reporting success, the same way the
+  // picklist write already does.
+  const settle = () =>
+    waitForApplicationReaction({
+      root: element.ownerDocument ?? element,
+      quietMs: SELECTION_QUIET_MS,
+      timeoutMs: SELECTION_TIMEOUT_MS
+    });
 
   // 1. A native `<input type="date">` reachable through the shadow root —
   //    genuinely expects ISO, and writing to the real control a human would
@@ -665,6 +693,7 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
   const nativeDate = nativeDateInputWithin(element, policy);
   if (nativeDate) {
     writeNativeInput(nativeDate, value);
+    await settle();
     return { ok: true, detail: "Value set via the native date input in the field's composed subtree." };
   }
   attempts.push("native date input: none found in the composed subtree");
@@ -683,6 +712,7 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
     const parsed = parseIsoDate(value);
     const formatted = parsed ? `${parsed.month}/${parsed.day}/${parsed.year}` : value;
     writeNativeInput(anyNative, formatted);
+    await settle();
     return { ok: true, detail: "Value set via the field's own text input, in the display format it expects." };
   }
 
@@ -696,6 +726,7 @@ function setDateValue(resolved: ResolvedTarget, value: string, policy: Resolutio
       (element as unknown as { value: string }).value = value;
       element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
       element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      await settle();
       return { ok: true, detail: "Value set via the component's mirrored value property." };
     } catch {
       attempts.push("mirrored value property: present but read-only");
