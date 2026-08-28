@@ -137,6 +137,38 @@ describe("B — the live case: a rich edit form with no known tag and no dialog 
     expect(assessment.evidence.editableFieldCount).toBe(12);
   });
 
+  it("resolves record-edit against the real captured DOM shape, not a synthetic approximation", () => {
+    // Captured directly from a live org's DevTools (Elements panel outerHTML,
+    // with the modal open): `records-form-footer` (Save/Cancel/Save & New)
+    // and `records-lwc-record-layout` (every field) are direct siblings
+    // under `.record-body-container`, each with its own open shadow root —
+    // `outerHTML` cannot show shadow content, which is exactly why this
+    // needed a live capture rather than a guess. Confirms both the
+    // expansion-climb fix and the field-count dedup fix together against
+    // the actual shape, not an invented approximation of it.
+    document.body.innerHTML = `
+      <div class="record-body-container">
+        <div class="record-layout-container">
+          <records-lwc-record-layout class="record-layout-container-bottom-padding"></records-lwc-record-layout>
+        </div>
+        <records-form-footer class="slds-docked-form-footer fixedFooter slds-modal__footer"></records-form-footer>
+      </div>
+    `;
+    const layout = document.querySelector("records-lwc-record-layout")!;
+    layout.attachShadow({ mode: "open" }).innerHTML = Array.from(
+      { length: 16 },
+      (_, i) => `<mock-field id="f${i}"></mock-field>`
+    ).join("");
+    const footer = document.querySelector("records-form-footer")!;
+    footer.attachShadow({ mode: "open" }).innerHTML =
+      `<button>Cancel</button><button>Save &amp; New</button><button>Save</button>`;
+
+    const assessment = productionAdapter().assessPageState!(document.body, SF)!;
+    expect(assessment.state).toBe("record-edit");
+    expect(assessment.evidence.editableFieldCount).toBe(16);
+    expect(assessment.evidence.matchedPattern?.id).toBe("sf-record-edit-structural-semantics");
+  });
+
   it("does not stop climbing at an early plateau one hop short of where the real field cluster merges in", () => {
     // Reproduces the live failure exactly: footer (Save/Cancel) and body
     // (every field) are siblings several wrapper levels apart, with one
