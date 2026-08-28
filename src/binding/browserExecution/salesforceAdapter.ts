@@ -1,6 +1,7 @@
 import type { FieldValueKind, SemanticTarget } from "./model";
 import {
   accessibleName,
+  cssEscapeId,
   isVisible,
   normalizeLabel,
   waitForApplicationReaction,
@@ -16,6 +17,7 @@ import {
   hasMirroredValueProperty,
   isPotentialFieldHost,
   nativeControlWithin,
+  ownerScope,
   queryComposedTree,
   queryComposedTreeFirst
 } from "./composedTree";
@@ -97,6 +99,9 @@ const SELECTION_QUIET_MS = 40;
 const SELECTION_TIMEOUT_MS = 2_000;
 const SELECTION_POLL_MS = 40;
 const OPTION_SELECTOR = '[role="option"]';
+/** How long to wait for a combobox's own listbox to actually appear after opening it, before reading. */
+const LISTBOX_APPEAR_TIMEOUT_MS = 1_500;
+const LISTBOX_APPEAR_POLL_MS = 40;
 
 // isCustomElement, hasMirroredValueProperty, isPotentialFieldHost,
 // nativeControlWithin, and controlWithin now live in composedTree.ts —
@@ -411,7 +416,70 @@ async function setPicklistValue(
  * and dismisses it. No option is activated, no value is written, and
  * nothing is committed.
  */
-function readPicklistOptions(host: Element, policy: ResolutionPolicy): OptionReadOutcome {
+/**
+ * The listbox this exact trigger controls, by the ARIA contract rather
+ * than by guessing.
+ *
+ * `aria-controls` on the trigger names the listbox's own id directly — a
+ * live capture of the real markup confirmed Salesforce sets it
+ * (`aria-controls="dropdown-element-1476"` pointing at
+ * `id="dropdown-element-1476"`). Resolving through it is unambiguous: no
+ * scope to guess, no risk of finding some *other* still-open combobox's
+ * listbox instead. The id is scoped to the trigger's own root — same
+ * reasoning `accessibleName`'s `aria-labelledby` handling already applies
+ * to `<label for>` and `aria-labelledby`.
+ */
+function ariaControlledListbox(trigger: Element): Element | undefined {
+  const id = trigger.getAttribute("aria-controls");
+  if (!id) return undefined;
+  return ownerScope(trigger).querySelector(`#${cssEscapeId(id)}`) ?? undefined;
+}
+
+/**
+ * Waits for this trigger's own listbox to actually appear, rather than
+ * reading whatever `[role="listbox"]` happens to exist the instant after
+ * the click.
+ *
+ * Reading in the same tick as the click was proven wrong: a fixture with
+ * one field's listbox still open and a second field's listbox not yet
+ * rendered had the second field's read return the first field's options
+ * entirely — Lightning can fetch a picklist's valid values asynchronously
+ * before rendering them, exactly like the async repaint `setPicklistValue`
+ * already has to wait out.
+ *
+ * When the trigger declares `aria-controls`, that id is the ONLY thing
+ * waited for — no fallback to a generic scan at any point. Waiting alone
+ * does not fix the race if the fallback itself accepts a wrong answer on
+ * its very first check: an unscoped `[role="listbox"]` search finds
+ * whatever OTHER field's popup happens to be open immediately, before the
+ * real one has rendered, defeating the wait entirely. A declared
+ * `aria-controls` that has not resolved yet means "not rendered yet," not
+ * "look elsewhere" — so it is checked on every poll, since Salesforce may
+ * set the attribute before the element it names exists in the tree, but
+ * never abandoned for a generic guess. Only when no `aria-controls` is
+ * declared at all does the host-then-document scan apply, as the
+ * best-effort fallback for a platform shape that doesn't give a better
+ * signal.
+ */
+async function waitForOwnListbox(
+  trigger: Element,
+  host: Element,
+  root: ParentNode,
+  policy: ResolutionPolicy
+): Promise<Element | undefined> {
+  const hasAriaControls = trigger.hasAttribute("aria-controls");
+  const deadline = Date.now() + LISTBOX_APPEAR_TIMEOUT_MS;
+  for (;;) {
+    const found = hasAriaControls
+      ? ariaControlledListbox(trigger)
+      : (queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy));
+    if (found) return found;
+    if (Date.now() >= deadline) return undefined;
+    await sleep(LISTBOX_APPEAR_POLL_MS);
+  }
+}
+
+async function readPicklistOptions(host: Element, policy: ResolutionPolicy): Promise<OptionReadOutcome> {
   const root: ParentNode = host.ownerDocument ?? host;
   const trigger = comboboxTriggerFor(host, policy);
   if (!(trigger instanceof HTMLElement)) {
@@ -431,8 +499,7 @@ function readPicklistOptions(host: Element, policy: ResolutionPolicy): OptionRea
       openedByUs = true;
     }
 
-    const listbox =
-      queryComposedTreeFirst(host, LISTBOX_SELECTOR, policy) ?? queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
+    const listbox = await waitForOwnListbox(trigger, host, root, policy);
     // Canonical label first, then dedupe: two spellings of the same
     // whitespace are one option, not two.
     const labels = listbox
@@ -464,6 +531,18 @@ function readPicklistOptions(host: Element, policy: ResolutionPolicy): OptionRea
 /** Whether the popup is currently showing, by the control's own ARIA state or a visible listbox. */
 function isComboboxOpen(trigger: Element, root: ParentNode, policy: ResolutionPolicy): boolean {
   if (trigger.getAttribute("aria-expanded") === "true") return true;
+  // A trigger that declares aria-controls is trusted completely: present
+  // and visible means open, anything else means not open. The same
+  // unscoped "any listbox anywhere" check below was proven wrong for
+  // reading options — it is exactly as wrong here, for the same reason:
+  // a different field's listbox being open elsewhere on the page would
+  // make this trigger look open when it never was, and the code would
+  // then skip clicking it and read that other field's options as this
+  // field's own.
+  if (trigger.hasAttribute("aria-controls")) {
+    const controlled = ariaControlledListbox(trigger);
+    return Boolean(controlled && isVisible(controlled));
+  }
   const listbox = queryComposedTreeFirst(root, LISTBOX_SELECTOR, policy);
   return Boolean(listbox && isVisible(listbox));
 }
@@ -1137,7 +1216,7 @@ export function createSalesforceResolverAdapter(
       return assessSalesforcePageState(root, policy, pageState).state !== "record-edit";
     },
 
-    readFieldOptions(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): OptionReadOutcome {
+    async readFieldOptions(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): Promise<OptionReadOutcome> {
       const element = findFieldHost(root, target, policy) ?? resolveFieldElement(root, target, policy);
       if (!element) {
         return {

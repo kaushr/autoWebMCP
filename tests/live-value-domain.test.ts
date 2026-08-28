@@ -198,18 +198,18 @@ describe("C — neither source: constrained, and honest about it", () => {
 /* ------------------------- live introspection ------------------------- */
 
 describe("F & H — reading the live domain through nested shadow roots", () => {
-  it("F — reads the offered values across two shadow boundaries", () => {
+  it("F — reads the offered values across two shadow boundaries", async () => {
     const page = mountPicklist(["Prospecting", "Negotiation/Review", "Closed Won"]);
-    expect(readSemanticOptions(page.root, STAGE, adapter()).options).toEqual([
+    expect((await readSemanticOptions(page.root, STAGE, adapter())).options).toEqual([
       "Prospecting",
       "Negotiation/Review",
       "Closed Won"
     ]);
   });
 
-  it("H — changes nothing: no option selected, no save invoked, popup left closed", () => {
+  it("H — changes nothing: no option selected, no save invoked, popup left closed", async () => {
     const page = mountPicklist(["Prospecting", "Closed Won"]);
-    readSemanticOptions(page.root, STAGE, adapter());
+    await readSemanticOptions(page.root, STAGE, adapter());
 
     expect(page.selections).toEqual([]);
     expect(page.saves).toBe(0);
@@ -221,14 +221,75 @@ describe("F & H — reading the live domain through nested shadow roots", () => 
     expect(trigger.textContent).toBe("Select an Option");
   });
 
-  it("G — duplicate option labels collapse rather than producing a repeated choice", () => {
+  it("G — duplicate option labels collapse rather than producing a repeated choice", async () => {
     const page = mountPicklist(["Closed Won", "Closed Won", "Prospecting"]);
-    expect(readSemanticOptions(page.root, STAGE, adapter()).options).toEqual(["Closed Won", "Prospecting"]);
+    expect((await readSemanticOptions(page.root, STAGE, adapter())).options).toEqual(["Closed Won", "Prospecting"]);
   });
 
-  it("reports nothing rather than an empty domain when the control cannot be read", () => {
+  it("reports nothing rather than an empty domain when the control cannot be read", async () => {
     const root = mount(`<records-record-edit><label for="s">*Stage</label><input id="s" /></records-record-edit>`);
-    expect(readSemanticOptions(root, STAGE, adapter()).options).toBeUndefined();
+    expect((await readSemanticOptions(root, STAGE, adapter())).options).toBeUndefined();
+  });
+});
+
+describe("reading never grabs a different field's still-open listbox", () => {
+  it("waits for this field's own listbox instead of reading whatever [role=listbox] exists the instant after the click", async () => {
+    // Reproduces a live failure directly: Stage's options came back as
+    // another field's values entirely. Lightning can fetch a picklist's
+    // valid values asynchronously before rendering them — the same
+    // async repaint `setPicklistValue` already accounts for on the write
+    // side — so a synchronous read, in the same tick as the click, can
+    // find a DIFFERENT field's listbox still open nearby instead of its
+    // own, which hasn't rendered yet.
+    const root = mount(`
+      <records-record-edit>
+        <label for="type-trigger">Type</label>
+        <button id="type-trigger" role="combobox" aria-haspopup="listbox" aria-expanded="true"></button>
+        <div role="listbox" aria-label="Type">
+          <a role="option">Enterprise</a>
+          <a role="option">SMB</a>
+        </div>
+        <label for="stage-trigger">*Stage</label>
+        <button id="stage-trigger" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="stage-listbox"></button>
+      </records-record-edit>
+    `);
+    const stageTrigger = root.querySelector<HTMLButtonElement>("#stage-trigger")!;
+    stageTrigger.addEventListener("click", () => {
+      stageTrigger.setAttribute("aria-expanded", "true");
+      // Arrives one tick after the click, not in it.
+      setTimeout(() => {
+        const real = document.createElement("div");
+        real.setAttribute("role", "listbox");
+        real.setAttribute("id", "stage-listbox");
+        real.setAttribute("aria-label", "Stage");
+        real.innerHTML = `<a role="option">Establish</a><a role="option">Engage</a>`;
+        stageTrigger.after(real);
+      }, 0);
+    });
+
+    const read = await readSemanticOptions(root, STAGE, adapter());
+    expect(read.options).toEqual(["Establish", "Engage"]);
+  });
+
+  it("resolves through aria-controls directly when the trigger declares it, ahead of any generic scan", async () => {
+    // The real captured markup this fixed: aria-controls="dropdown-
+    // element-1476" on the trigger, pointing straight at the listbox's
+    // own id — unambiguous, no scope or timing to get wrong.
+    const root = mount(`
+      <records-record-edit>
+        <div role="listbox" aria-label="decoy">
+          <a role="option">Wrong Value</a>
+        </div>
+        <label for="stage-trigger">*Stage</label>
+        <button id="stage-trigger" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="the-real-one"></button>
+        <div role="listbox" id="the-real-one" aria-label="Stage">
+          <a role="option">Establish</a>
+          <a role="option">Engage</a>
+        </div>
+      </records-record-edit>
+    `);
+    const read = await readSemanticOptions(root, STAGE, adapter());
+    expect(read.options).toEqual(["Establish", "Engage"]);
   });
 });
 
@@ -337,7 +398,7 @@ describe("7 — the DOM element's tag never overrides the field's semantic type"
     expect(trigger.textContent).toBe("Closed Won");
   });
 
-  it("reads the live options from that same bare-button control", () => {
+  it("reads the live options from that same bare-button control", async () => {
     const root = mount(`
       <records-record-edit>
         <label for="stage-field">*Stage</label>
@@ -359,7 +420,7 @@ describe("7 — the DOM element's tag never overrides the field's semantic type"
       }
     });
 
-    expect(readSemanticOptions(root, STAGE, adapter()).options).toEqual(["Qualify", "Closed Won"]);
+    expect((await readSemanticOptions(root, STAGE, adapter())).options).toEqual(["Qualify", "Closed Won"]);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
 });

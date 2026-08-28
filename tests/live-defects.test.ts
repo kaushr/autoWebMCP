@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   compareObservedValue,
   readSemanticOptions,
@@ -103,7 +103,10 @@ function mountWrapperPicklist(): { root: HTMLElement; saves: number } {
 
 describe("1 — a container carrying the option role is not a choice", () => {
   const page = mountWrapperPicklist();
-  const read = readSemanticOptions(page.root, STAGE, adapter());
+  let read: Awaited<ReturnType<typeof readSemanticOptions>>;
+  beforeAll(async () => {
+    read = await readSemanticOptions(page.root, STAGE, adapter());
+  });
 
   it("returns only the leaf options a human could actually select", () => {
     expect(read.options).toEqual(["Engage", "Collaborate", "Complete"]);
@@ -126,7 +129,7 @@ describe("1 — a container carrying the option role is not a choice", () => {
 });
 
 describe("an option never inherits the field's own label", () => {
-  it("reads the option's own text even when it sits inside the field's <label>", () => {
+  it("reads the option's own text even when it sits inside the field's <label>", async () => {
     // The shape the live capture recorded: `lightning-base-combobox-item`
     // whose reported label was "*Stage" — the field's label, inherited
     // through the generic accessible-name computation's ancestor-label
@@ -162,7 +165,7 @@ describe("an option never inherits the field's own label", () => {
       }
     });
 
-    const read = readSemanticOptions(root, STAGE, adapter());
+    const read = await readSemanticOptions(root, STAGE, adapter());
     expect(read.options).toEqual(["Engage", "Collaborate", "Complete"]);
     expect(read.options?.some((option) => option.includes("Stage"))).toBe(false);
   });

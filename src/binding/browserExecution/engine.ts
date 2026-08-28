@@ -110,7 +110,11 @@ export interface PlatformResolverAdapter {
    * it could PROVE the control was dismissed again, because a read that
    * silently leaves a popup hanging is not the same as a clean one.
    */
-  readFieldOptions?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): OptionReadOutcome | undefined;
+  readFieldOptions?(
+    root: ParentNode,
+    target: SemanticTarget,
+    policy: ResolutionPolicy
+  ): OptionReadOutcome | Promise<OptionReadOutcome> | undefined;
   /**
    * Returns the page to its non-editing state, undoing an edit-mode
    * transition AutoWebMCP itself caused.
@@ -162,7 +166,8 @@ function textOf(node: Element | null | undefined): string | undefined {
   return text ? text : undefined;
 }
 
-function cssEscapeId(id: string): string {
+/** Escapes an id for use in a `#id` CSS selector. Shared so every id-reference lookup in this codebase escapes the same way. */
+export function cssEscapeId(id: string): string {
   return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id.replace(/([^\w-])/g, "\\$1");
 }
 
@@ -460,12 +465,12 @@ export async function setFieldValue(
  * Generic by design — the engine knows only "closed domain", and how to
  * open a particular platform's control belongs to its adapter.
  */
-export function readSemanticOptions(
+export async function readSemanticOptions(
   root: ParentNode,
   target: SemanticTarget,
   adapter?: Pick<PlatformResolverAdapter, "id" | "resolutionPolicy" | "readFieldOptions" | "resolveTarget">
-): OptionReadOutcome {
-  const fromAdapter = adapter?.readFieldOptions?.(root, target, policyFor(adapter));
+): Promise<OptionReadOutcome> {
+  const fromAdapter = await adapter?.readFieldOptions?.(root, target, policyFor(adapter));
   if (fromAdapter) return fromAdapter;
 
   // The generic case: a real `<select>` lists its own options and needs no

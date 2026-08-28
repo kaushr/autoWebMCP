@@ -370,7 +370,7 @@ export async function inspectFieldDomains(options: InspectFieldsOptions): Promis
   /* --- the read itself, control state owned per field -------------------- */
   try {
     for (const field of fields) {
-      const read = readSemanticOptions(root, field.target, introspector);
+      const read = await readSemanticOptions(root, field.target, introspector);
       if (read.openedByUs) result.ownership.openedControls.push(field.name);
       if (read.dismissAttempted && !read.dismissProven) {
         result.restoration.control = "unproven";
