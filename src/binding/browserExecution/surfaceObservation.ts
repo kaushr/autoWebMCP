@@ -179,16 +179,31 @@ function describeSurface(
 
 /**
  * Where a visible action's own surface plausibly ends: walk up the
- * composed tree from the action, expanding outward while doing so still
- * captures more editable field units, and stopping the moment it stops
- * capturing more (or a bounded number of hops is reached). This is what
- * finds "the form this Save button belongs to" without knowing anything
- * about what a form looks like on any particular platform — it only uses
- * the structural fact that a commit-shaped action and the fields it
- * commits are usually near each other in the composed tree, which is what
- * let a real, sixteen-field Salesforce edit form become observable even
- * though its own container carried no dialog role and no known component
- * tag at all.
+ * composed tree from the action, up to a bounded number of hops, and keep
+ * whichever ancestor along the way contains the most editable field
+ * units. This is what finds "the form this Save button belongs to"
+ * without knowing anything about what a form looks like on any particular
+ * platform — it only uses the structural fact that a commit-shaped action
+ * and the fields it commits are usually near each other in the composed
+ * tree, which is what let a real, sixteen-field Salesforce edit form
+ * become observable even though its own container carried no dialog role
+ * and no known component tag at all.
+ *
+ * The climb does NOT stop at the first hop that fails to capture more
+ * fields than the hop before it. An earlier version did, on the
+ * assumption that field count grows steadily while climbing — which
+ * proved false against a real Lightning modal: its footer (Save/Cancel)
+ * and its scrollable body (every field) are typically siblings several
+ * wrapper levels apart, not parent and child. Climbing from Save can pick
+ * up one incidental field early, hit a wrapper level that adds nothing,
+ * and — under the old logic — read that flat hop as "boundary found" and
+ * stop right there, one hop short of the level that would have merged in
+ * the entire field-rich body. A live run reproduced exactly that: a
+ * winning candidate of one field, next to a genuine Save and Cancel,
+ * while the real form's sixteen fields sat one hop further up. The fix is
+ * to keep climbing the full bounded budget regardless of a flat hop, and
+ * remember the best count seen anywhere along the way — a later jump is
+ * not missed just because an earlier hop happened not to grow.
  */
 function expandFromAction(
   action: Element,
@@ -212,13 +227,12 @@ function expandFromAction(
     // page one candidate.
     if (!parent || parent === documentRoot || parent.tagName === "BODY" || parent.tagName === "HTML") break;
     const count = within(parent, units).length;
+    // Strictly greater only: a tie keeps the earlier, tighter ancestor,
+    // so a run of flat hops after the real boundary never widens the
+    // result past where it needs to be.
     if (count > bestCount) {
       best = parent;
       bestCount = count;
-    } else if (bestCount > 0) {
-      // Plateaued: widening the boundary stopped capturing more fields, so
-      // the last boundary that did is the tightest honest fit.
-      break;
     }
     current = parent;
   }

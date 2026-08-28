@@ -136,6 +136,37 @@ describe("B — the live case: a rich edit form with no known tag and no dialog 
     expect(assessment.evidence.matchedPattern?.strength).toBe("observed-pattern");
     expect(assessment.evidence.editableFieldCount).toBe(12);
   });
+
+  it("does not stop climbing at an early plateau one hop short of where the real field cluster merges in", () => {
+    // Reproduces the live failure exactly: footer (Save/Cancel) and body
+    // (every field) are siblings several wrapper levels apart, with one
+    // incidental field structurally near the footer — the shape that made
+    // an earlier version of the climb stop with "editable fields found: 1"
+    // while the real form's fields sat one hop further up.
+    const fields = Array.from(
+      { length: 16 },
+      (_, i) => `<label for="f${i}">Field ${i}</label><input id="f${i}" />`
+    ).join("");
+    const root = mount(`
+      <div class="modal-outer">
+        <div class="modal-header">Edit PS Project Test</div>
+        <div class="modal-content">
+          <div class="modal-body-wrap"><div class="modal-body">${fields}</div></div>
+          <div class="modal-footer-outer">
+            <div class="modal-footer-inner">
+              <input id="near-footer-decoy" />
+              <div class="modal-footer"><button>Save</button><button>Cancel</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const assessment = productionAdapter().assessPageState!(root, SF)!;
+    expect(assessment.state).toBe("record-edit");
+    // 16 real fields plus the one incidental decoy near the footer — the
+    // whole cluster, not the 1-field plateau a prior version stopped at.
+    expect(assessment.evidence.editableFieldCount).toBe(17);
+  });
 });
 
 describe("C & N — an unrelated Aura error banner is observed, never treated as an edit surface", () => {
