@@ -43,6 +43,38 @@ function post(message: Record<string, unknown>): void {
   window.postMessage({ source: STUDIO_BRIDGE_SOURCE, direction: "response", ...message }, window.location.origin);
 }
 
+/**
+ * Whether this bridge's own connection to the extension is still alive.
+ *
+ * A page that keeps its Studio tab open across an extension reload (or a
+ * disable/re-enable) keeps running this exact script instance, but the
+ * `chrome.runtime` it captured no longer refers to anything real —
+ * `chrome.runtime` itself can go fully `undefined`, not just throw when
+ * called. A live run hit exactly that: the bridge threw synchronously on
+ * `chrome.runtime.sendMessage(...)`, after the 20-second watchdog below
+ * was already armed, so the real cause sat invisible in
+ * `chrome://extensions`'s error log while the Studio UI waited out the
+ * full watchdog to report a generic, misattributed timeout. Checked
+ * before every call so the actual cause reaches the Studio immediately.
+ */
+function bridgeConnectionLost(): boolean {
+  return typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function";
+}
+
+const STALE_BRIDGE_MESSAGE =
+  "This tab's connection to the Teach Mode extension was reset — most likely by an extension reload or " +
+  "update while this tab stayed open. Reload this tab (not just the extension) to reconnect.";
+
+/** `chrome.runtime.sendMessage`, but a torn-down context rejects instead of throwing synchronously. */
+function callBackground(message: Record<string, unknown>): Promise<unknown> {
+  if (bridgeConnectionLost()) return Promise.reject(new Error(STALE_BRIDGE_MESSAGE));
+  try {
+    return chrome.runtime.sendMessage(message);
+  } catch (error) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data as AnyRequest | undefined;
@@ -98,8 +130,7 @@ window.addEventListener("message", (event) => {
     };
 
     console.debug("[AutoWebMCP] bridge: forwarding inspect request to the service worker.");
-    chrome.runtime
-      .sendMessage({ type: "browser-binding:inspect", request: { binding } })
+    callBackground({ type: "browser-binding:inspect", request: { binding } })
       .then((response: unknown) => {
         console.debug("[AutoWebMCP] bridge: service worker answered", response);
         settle(
@@ -125,11 +156,10 @@ window.addEventListener("message", (event) => {
     const respond = (response: Omit<StudioBridgeExecuteResponse, "source" | "direction" | "requestId">): void => {
       post({ requestId, ...response });
     };
-    chrome.runtime
-      .sendMessage({
-        type: "browser-binding:execute",
-        request: { binding: data.binding, inputs: data.inputs ?? {}, confirmed: true }
-      })
+    callBackground({
+      type: "browser-binding:execute",
+      request: { binding: data.binding, inputs: data.inputs ?? {}, confirmed: true }
+    })
       .then((response: unknown) => respond(response as BrowserBindingExecuteResponse))
       .catch((error: unknown) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     return;
