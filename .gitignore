@@ -18,3 +18,6 @@ salesforce/.sfdx/
 
 # Built browser extension
 dist-extension/
+
+# Generated architecture write-ups kept local, not part of the repo's own docs
+docs/SYSTEM_OVERVIEW.md
