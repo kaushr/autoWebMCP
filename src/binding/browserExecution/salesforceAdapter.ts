@@ -1210,6 +1210,32 @@ function resolveFieldElement(
 }
 
 /** A native control carrying the field's own accessible name or identifier. */
+/**
+ * Reads a field's current value directly from an already-identified
+ * element, in the same native-input-first order the write itself tries
+ * strategies in, so a value is never read from a different source than
+ * the one written. Shared by the known-element path and the
+ * fresh-resolution fallback, so there is exactly one definition of "how
+ * to read this element", not two that could drift.
+ */
+function readFieldValueFromElement(element: Element, policy: ResolutionPolicy): string | undefined {
+  const nativeDate = nativeDateInputWithin(element, policy);
+  if (nativeDate) return nativeDate.value;
+  // A combobox's committed value (or, failing that, its displayed label)
+  // is what was written and therefore what must be compared. Checked
+  // after the native date input, whose ISO value is more precise than any
+  // display string a component renders over it.
+  const combobox = readComboboxDisplayValue(element, policy);
+  if (combobox) return combobox;
+  const anyNative = anyNativeInputWithin(element, policy);
+  if (anyNative) return anyNative.value;
+  if (hasMirroredValueProperty(element)) {
+    const value = (element as unknown as { value?: unknown }).value;
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
 function resolveNativeControl(
   root: ParentNode,
   target: SemanticTarget,
@@ -1298,7 +1324,24 @@ export function createSalesforceResolverAdapter(
       return assessSalesforcePageState(root, policy, pageState);
     },
 
-    readFieldValue(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined {
+    readFieldValue(
+      root: ParentNode,
+      target: SemanticTarget,
+      policy: ResolutionPolicy,
+      knownElement?: Element
+    ): string | undefined {
+      // Read from the element the write actually operated on, while it is
+      // still connected. A live run committed Stage correctly — the
+      // control's own `data-value` became "Confirm" — and the transaction
+      // still reported "Engage", because this method re-resolved from
+      // scratch and fell all the way through to the record view behind the
+      // open modal. Nothing below can distinguish "the modal's Stage" from
+      // "the record's Stage" once resolution has failed; not re-resolving
+      // in the first place is what keeps the two apart.
+      if (knownElement?.isConnected) {
+        const direct = readFieldValueFromElement(knownElement, policy);
+        if (direct !== undefined) return direct;
+      }
       // The control may not be wrapped in a component at all. Reading has
       // the same shape problem writing had: assuming a host meant a plain
       // input carrying the field's own name could not be read back, so a
@@ -1310,23 +1353,7 @@ export function createSalesforceResolverAdapter(
       // native-input-first order, so a value is never read from a different
       // source than the one written.
       const element = findFieldHost(root, target, policy);
-      if (element) {
-        const nativeDate = nativeDateInputWithin(element, policy);
-        if (nativeDate) return nativeDate.value;
-        // A combobox's displayed text is the selected option's label, which
-        // is what was written and therefore what must be compared. Checked
-        // after the native date input, whose ISO value is more precise than
-        // any display string a component renders over it.
-        const combobox = readComboboxDisplayValue(element, policy);
-        if (combobox) return combobox;
-        const anyNative = anyNativeInputWithin(element, policy);
-        if (anyNative) return anyNative.value;
-        if (hasMirroredValueProperty(element)) {
-          const value = (element as unknown as { value?: unknown }).value;
-          if (typeof value === "string") return value;
-        }
-        return undefined;
-      }
+      if (element) return readFieldValueFromElement(element, policy);
       // After a successful save the edit field no longer exists; the record
       // view displays the persisted value instead. Reading it there is what
       // lets a proven save become fully verified rather than stopping at

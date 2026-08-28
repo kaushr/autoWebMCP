@@ -508,3 +508,69 @@ describe("writing a date into a text control assumes a locale", () => {
     expect(compareObservedValue("2026-11-01", "2026-11-01")).toBe("match");
   });
 });
+
+/* ------- 4. read-back must not fall through to the record view ------- */
+
+describe("4 — verification reads the control that was written, not the record behind the modal", () => {
+  it("a committed picklist change is not reported as rejected because re-resolution found the record view", async () => {
+    // The live shape, faithfully: the Stage trigger is a PLAIN
+    // <button role="combobox">, not a custom element, and the target
+    // carries no applicationIdentifier — so `resolveNativeControl` finds
+    // nothing and `findFieldHost` (which requires a custom element with a
+    // resolvable accessible name) finds nothing either. Read-back then
+    // fell all the way through to `readRecordViewDisplayValue`, which
+    // scans the whole document and finds the record view still sitting
+    // behind the open modal, showing the unsaved, persisted value.
+    //
+    // A live run committed Stage correctly — the control's own data-value
+    // became "Confirm" — and the transaction still reported "Engage" and
+    // blocked the save. Close Date never hit this only because its
+    // applicationIdentifier pins it to the real input on the first try.
+    document.body.innerHTML = `
+      <div class="record-view-behind">
+        <div><span>Stage</span><span>Engage</span></div>
+      </div>
+      <records-record-edit>
+        <div><span>Stage</span></div>
+        <button role="combobox" aria-label="Stage" aria-expanded="false"
+                aria-controls="dd-1" data-value="Engage">Engage</button>
+        <div role="listbox" id="dd-1">
+          <div role="option">Engage</div><div role="option">Confirm</div>
+        </div>
+        <input aria-label="Amount" /><input aria-label="Opportunity Name" />
+        <button>Save</button><button>Cancel</button>
+      </records-record-edit>`;
+    const root = document.body;
+    const trigger = root.querySelector<HTMLElement>('[role="combobox"]')!;
+    for (const option of root.querySelectorAll('#dd-1 [role="option"]')) {
+      option.addEventListener("click", () => {
+        // A real commit updates both the label and data-value.
+        trigger.textContent = option.textContent ?? "";
+        trigger.setAttribute("data-value", option.textContent ?? "");
+      });
+    }
+
+    const resolved = resolveSemanticTarget(root, STAGE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+
+    const outcome = await setFieldValue(resolved.target, "Confirm", "select", adapter());
+    expect(outcome.ok).toBe(true);
+
+    // The trap itself, asserted rather than merely avoided: re-resolving
+    // from scratch reaches past the modal and reports the record's
+    // persisted value, which is what blocked the save on a live run.
+    const reResolved = adapter()!.readFieldValue!(root, STAGE, adapter()!.resolutionPolicy!);
+    expect(reResolved).toBe("Engage");
+
+    // Reading the control that was actually written reports the truth.
+    const readBack = adapter()!.readFieldValue!(root, STAGE, adapter()!.resolutionPolicy!, resolved.target.element);
+    expect(readBack).toBe("Confirm");
+  });
+
+  it("still reads the record view after a save, when the edit control is genuinely gone", () => {
+    document.body.innerHTML = `<div><span>Stage</span><span>Confirm</span></div>`;
+    const gone = document.createElement("button"); // never connected
+    const readBack = adapter()!.readFieldValue!(document.body, STAGE, adapter()!.resolutionPolicy!, gone);
+    expect(readBack).toBe("Confirm");
+  });
+});

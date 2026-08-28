@@ -98,8 +98,27 @@ export interface PlatformResolverAdapter {
    */
   assessValidation?(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment | undefined;
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
-  /** Reads a field's current on-screen value back, for verification. `undefined` means unreadable. */
-  readFieldValue?(root: ParentNode, target: SemanticTarget, policy: ResolutionPolicy): string | undefined;
+  /**
+   * Reads a field's current on-screen value back, for verification.
+   * `undefined` means unreadable.
+   *
+   * `knownElement` — the element a write just operated on — is read
+   * directly when it is still connected, instead of re-resolving from
+   * scratch. A live run proved the need: a Stage write committed
+   * correctly (`data-value` became "Confirm") while the transaction's
+   * fresh re-resolution returned the *persisted* value, because Stage
+   * carries no application identifier and its trigger is a plain
+   * `<button role="combobox">` rather than a custom element — so
+   * resolution fell through to the record view still visible behind the
+   * open modal. Close Date never hit this, because its
+   * `applicationIdentifier` pins it to the real input on the first try.
+   */
+  readFieldValue?(
+    root: ParentNode,
+    target: SemanticTarget,
+    policy: ResolutionPolicy,
+    knownElement?: Element
+  ): string | undefined;
   /**
    * Reads the values a closed-domain control is currently offering,
    * without changing anything.

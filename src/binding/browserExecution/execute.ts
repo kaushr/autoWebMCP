@@ -573,7 +573,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
 
     // What the record held before we touched it — an observation, never to
     // be confused with what was asked for.
-    const beforeValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    const beforeValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
     const transaction: InputTransaction = {
       name: input.semanticInput,
       ...(input.applicationField?.apiName ? { apiName: input.applicationField.apiName } : {}),
@@ -589,7 +589,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
 
     // A write that reports success is not the same as a field that holds
     // the value: the date strategies wrote and returned, proving nothing.
-    const afterWriteValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    const afterWriteValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
     if (afterWriteValue !== undefined) transaction.afterWriteValue = afterWriteValue;
     const comparison = afterWriteValue === undefined ? "incomparable" : compareObservedValue(requestedValue, afterWriteValue);
     transaction.verified = comparison === "match" ? "yes" : comparison === "mismatch" ? "no" : "unreadable";
@@ -649,9 +649,17 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   // What the record holds now that the save has settled — the fourth fact,
   // and the only one that speaks to what was actually persisted.
   for (const transaction of transactions) {
-    const input = resolved.find(({ input: candidate }) => candidate.semanticInput === transaction.name)?.input;
-    if (!input) continue;
-    const afterSaveValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter));
+    const entry = resolved.find(({ input: candidate }) => candidate.semanticInput === transaction.name);
+    if (!entry) continue;
+    // Passed for symmetry; after a genuine save the edit control is gone,
+    // so this falls through to the record view — which is exactly what
+    // post-save verification wants to read.
+    const afterSaveValue = adapter?.readFieldValue?.(
+      root,
+      entry.input.semanticTarget,
+      policyFor(adapter),
+      entry.target.element
+    );
     if (afterSaveValue !== undefined) transaction.afterSaveValue = afterSaveValue;
   }
   evidence.push(...transactions.map(describeTransaction));
