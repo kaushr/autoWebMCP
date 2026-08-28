@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { withResolvedValueDomains } from "../src/webmcp/publication";
 import { sourceApplicationFor } from "../src/training/sourceApplication";
 import { findRelevantContactsProposal, referenceCapabilities } from "../src/prospect/capabilities";
 import { bindingActionFor, invokeProspectBinding, prospectBindings } from "../src/prospect/bindings";
@@ -211,5 +212,47 @@ describe("Agent readiness states", () => {
       label: "Agent capabilities: 1 published",
       detail: "Find Relevant Contacts"
     });
+  });
+});
+
+describe("a published contract carries the value domain that was resolved", () => {
+  const base: SemanticCapability = {
+    id: "update_opportunity",
+    name: "Update opportunity",
+    description: "Change an opportunity.",
+    inputs: [
+      { name: "stage", description: "The stage to set.", type: "string", required: true },
+      { name: "close_date", description: "The close date to set.", type: "date", required: false },
+      { name: "note", description: "Free text.", type: "string", required: false }
+    ],
+    outputs: [],
+    provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true },
+    safety: { readOnly: false, requiresConfirmation: true }
+  };
+
+  it("fills a constrained input's legal values, so an agent does not have to guess", () => {
+    const enriched = withResolvedValueDomains(base, { stage: ["Engage", "Confirm", "Closed Won"] });
+    expect(enriched.inputs.find((i) => i.name === "stage")?.enum).toEqual(["Engage", "Confirm", "Closed Won"]);
+    // An unconstrained input is left exactly as it was.
+    expect(enriched.inputs.find((i) => i.name === "note")?.enum).toBeUndefined();
+    expect(enriched.inputs.find((i) => i.name === "close_date")?.enum).toBeUndefined();
+  });
+
+  it("never invents a domain, and never overrides one the contract already declares", () => {
+    expect(withResolvedValueDomains(base, {}).inputs).toEqual(base.inputs);
+    expect(withResolvedValueDomains(base, { stage: [] }).inputs).toEqual(base.inputs);
+
+    const declared: SemanticCapability = {
+      ...base,
+      inputs: base.inputs.map((i) => (i.name === "stage" ? { ...i, enum: ["Only This"] } : i))
+    };
+    expect(withResolvedValueDomains(declared, { stage: ["Something", "Else"] }).inputs.find((i) => i.name === "stage")?.enum)
+      .toEqual(["Only This"]);
+  });
+
+  it("reaches the compiled tool schema, which is the only thing an agent reads", () => {
+    const enriched = withResolvedValueDomains(base, { stage: ["Engage", "Confirm"] });
+    const tool = compileCapability({ ...enriched, binding: { application: "salesforce-lightning", action: "x" } }, () => ({}));
+    expect(tool.inputSchema.properties.stage.enum).toEqual(["Engage", "Confirm"]);
   });
 });

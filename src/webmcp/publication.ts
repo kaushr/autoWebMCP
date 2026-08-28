@@ -41,6 +41,36 @@ export function assertPublishable(capability: SemanticCapability): SemanticCapab
   return capability;
 }
 
+/**
+ * Carries a resolved value domain into the contract that gets published.
+ *
+ * An agent calling a published tool has only its input schema to go on. A
+ * constrained field published without its legal values invites a guess,
+ * and the execution layer then (correctly) refuses anything the live
+ * control does not offer — so the agent fails on a value it had no way of
+ * knowing was wrong. The first live publication had exactly this shape:
+ * `stage` went out as a bare string while the six values Salesforce
+ * actually offers had already been resolved during testing and then
+ * discarded.
+ *
+ * Only fills a domain that is genuinely known and not already declared;
+ * it never invents one, and never overrides a contract that already
+ * carries its own.
+ */
+export function withResolvedValueDomains(
+  capability: SemanticCapability,
+  domains: Readonly<Record<string, readonly string[]>>
+): SemanticCapability {
+  return {
+    ...capability,
+    inputs: capability.inputs.map((input) => {
+      const values = domains[input.name];
+      if (input.enum || !values || values.length === 0) return input;
+      return { ...input, enum: [...values] };
+    })
+  };
+}
+
 export function parsePublicationRecord(value: unknown): PublicationRecord {
   if (typeof value !== "object" || value === null) throw new Error("A publication record is required.");
   const record = value as Partial<PublicationRecord>;

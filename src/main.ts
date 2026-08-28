@@ -38,6 +38,7 @@ import {
   listPublishedCapabilities,
   publishCapability,
   unpublishAll,
+  withResolvedValueDomains,
   type PublicationRecord
 } from "./webmcp/publication";
 import { registerHelloControl } from "./webmcp/hello";
@@ -1654,6 +1655,11 @@ function render(): void {
           <div><dt>document.modelContext</dt><dd>${document.modelContext ? "available" : "unavailable"}</dd></div>
           <div><dt>crossOriginIsolated</dt><dd>${String(window.crossOriginIsolated)}</dd></div>
           <div><dt>Registration</dt><dd>${registration}</dd></div>
+          <div><dt>Published tools registered</dt><dd>${
+            browserExecutionRegistered.size
+              ? [...browserExecutionRegistered].map((id) => escapeHtml(id)).join(", ")
+              : "none yet"
+          }</dd></div>
         </dl>
         <a href="/">Return to Prospect Intelligence</a>
       </main>`;
@@ -1859,7 +1865,21 @@ function render(): void {
     connectionIssue = undefined;
     render();
     try {
-      const record = await publishCapability(candidate, acceptedBrowserBinding(browserBindingValidation));
+      // Whatever the value domains resolved to — the org's own tenant
+      // metadata, or what the live control offered — belongs in the
+      // contract an agent will read. Resolving them and then publishing a
+      // bare string is how the first live publication shipped a `stage`
+      // input with no legal values on it.
+      const accepted = acceptedBrowserBinding(browserBindingValidation);
+      const domains: Record<string, string[]> = {};
+      for (const input of accepted?.inputs ?? []) {
+        const declared = input.applicationField?.options;
+        if (declared?.length) domains[input.semanticInput] = [...declared];
+      }
+      for (const [name, values] of Object.entries(liveValueDomains)) {
+        if (values.length) domains[name] = [...values];
+      }
+      const record = await publishCapability(withResolvedValueDomains(candidate, domains), accepted);
       publications = await listPublishedCapabilities();
       syncBrowserExecutionRegistrations();
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
