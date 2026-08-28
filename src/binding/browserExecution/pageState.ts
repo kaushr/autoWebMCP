@@ -56,6 +56,14 @@ export interface PageStateEvidence {
   matchedPattern?: { id: string; strength: string };
   /** Other observed candidates that did not qualify, kept for diagnosis — an unrelated error banner included, never silently dropped. */
   otherSurfaces?: Array<{ heading?: string; roles: string[]; editableFieldCount: number }>;
+  /**
+   * The hop-by-hop field count seen while climbing from an action toward
+   * the best (but non-qualifying) surface, when that surface was found by
+   * expansion. Exists so a shortfall is diagnosable directly from what the
+   * climb actually saw — how deep the real nesting goes, and whether the
+   * bounded hop budget ran out before reaching it — rather than guessed at.
+   */
+  expansionTrace?: Array<{ element: string; editableFieldCount: number }>;
 }
 
 export interface PageStateAssessment {

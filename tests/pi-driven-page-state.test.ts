@@ -169,6 +169,33 @@ describe("B — the live case: a rich edit form with no known tag and no dialog 
   });
 });
 
+describe("the expansion climb's own hop-by-hop trail is diagnosable, not just its final answer", () => {
+  it("reports the field count seen at every hop when a real cluster sits beyond the reachable ancestors", () => {
+    // Wraps the Save/Cancel footer in ten neutral levels — deliberately at
+    // the hop budget — with the real field-rich body one level further out
+    // than the climb can reach. This is exactly the shape a shortfall would
+    // take if a real platform's nesting genuinely exceeds the bounded
+    // budget: the trace must show the climb ran out, not just that it
+    // failed.
+    const fields = Array.from(
+      { length: 16 },
+      (_, i) => `<label for="f${i}">Field ${i}</label><input id="f${i}" />`
+    ).join("");
+    let markup = `<div class="footer"><input id="decoy" /><button>Save</button><button>Cancel</button></div>`;
+    for (let i = 0; i < 10; i++) markup = `<div class="wrap-${i}">${markup}</div>`;
+    markup = `<div class="real-boundary">${fields}${markup}</div>`;
+    const root = mount(markup);
+
+    const assessment = productionAdapter().assessPageState!(root, SF)!;
+    expect(assessment.state).not.toBe("record-edit");
+    expect(assessment.evidence.expansionTrace).toBeDefined();
+    expect(assessment.evidence.expansionTrace!.length).toBeGreaterThan(1);
+    // The trace itself proves the climb never saw more than the one decoy
+    // field — the diagnostic a live shortfall needs, not a guess about it.
+    expect(assessment.evidence.expansionTrace!.every((step) => step.editableFieldCount <= 1)).toBe(true);
+  });
+});
+
 describe("C & N — an unrelated Aura error banner is observed, never treated as an edit surface", () => {
   it("does not qualify as record-edit, and is not silently dropped from diagnostics", () => {
     // The actual live shape this investigation found: role="dialog",

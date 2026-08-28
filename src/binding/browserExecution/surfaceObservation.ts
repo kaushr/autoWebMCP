@@ -43,6 +43,13 @@ export interface SurfaceAction {
   label: string;
 }
 
+/** One step of an action-anchored expansion climb, kept for diagnosis. */
+export interface ExpansionStep {
+  /** A short, neutral descriptor — tag name, id, and first couple of classes. Never a durable selector. */
+  element: string;
+  editableFieldCount: number;
+}
+
 /** A neutral, exportable description of a candidate surface — facts, not DOM references. */
 export interface SurfaceFacts {
   heading?: string;
@@ -54,6 +61,15 @@ export interface SurfaceFacts {
   roles: string[];
   /** Tag names of every custom element found at or beneath the surface root. */
   componentIdentities: string[];
+  /**
+   * Present only for a surface discovered by climbing from an action: the
+   * hop-by-hop field count seen along the way, from the action itself up
+   * to wherever the climb stopped. Exists so a failure to find the real
+   * form is diagnosable directly — how deep the real nesting actually is,
+   * and whether the bounded hop budget was the thing that ran out —
+   * rather than guessed at from outside.
+   */
+  expansionTrace?: ExpansionStep[];
 }
 
 export interface SurfaceObservation {
@@ -152,12 +168,20 @@ function rolesOf(root: Element): string[] {
   return roles;
 }
 
+/** A short, neutral descriptor for diagnostics — never a durable selector. */
+function describeElement(element: Element): string {
+  const classes = element.classList.length > 0 ? `.${[...element.classList].slice(0, 2).join(".")}` : "";
+  const id = element.id ? `#${element.id}` : "";
+  return `${element.tagName.toLowerCase()}${id}${classes}`;
+}
+
 function describeSurface(
   root: Element,
   id: string,
   units: readonly EditableFieldUnit[],
   actions: readonly SurfaceAction[],
-  policy: ResolutionPolicy
+  policy: ResolutionPolicy,
+  expansionTrace?: ExpansionStep[]
 ): SurfaceObservation {
   const fieldUnits = within(root, units);
   const surfaceActions = within(root, actions);
@@ -172,7 +196,8 @@ function describeSurface(
       editableFieldCount: fieldUnits.length,
       actionLabels: [...new Set(surfaceActions.map((action) => action.label))],
       roles: rolesOf(root),
-      componentIdentities: componentIdentitiesWithin(root, policy)
+      componentIdentities: componentIdentitiesWithin(root, policy),
+      ...(expansionTrace ? { expansionTrace } : {})
     }
   };
 }
@@ -210,10 +235,11 @@ function expandFromAction(
   units: readonly EditableFieldUnit[],
   documentRoot: ParentNode,
   policy: ResolutionPolicy
-): Element {
+): { best: Element; trace: ExpansionStep[] } {
   let best = action;
   let bestCount = within(action, units).length;
   let current: Element = action;
+  const trace: ExpansionStep[] = [{ element: describeElement(action), editableFieldCount: bestCount }];
   for (let hop = 0; hop < MAX_EXPANSION_HOPS; hop++) {
     const parent = composedParent(current);
     // The traversal root itself — and `<body>`/`<html>` specifically, since
@@ -227,6 +253,7 @@ function expandFromAction(
     // page one candidate.
     if (!parent || parent === documentRoot || parent.tagName === "BODY" || parent.tagName === "HTML") break;
     const count = within(parent, units).length;
+    trace.push({ element: describeElement(parent), editableFieldCount: count });
     // Strictly greater only: a tie keeps the earlier, tighter ancestor,
     // so a run of flat hops after the real boundary never widens the
     // result past where it needs to be.
@@ -237,7 +264,7 @@ function expandFromAction(
     current = parent;
   }
   void policy; // reserved for a future traversal-policy-sensitive expansion rule
-  return best;
+  return { best, trace };
 }
 
 function dedupeByContainment(elements: readonly Element[]): Element[] {
@@ -262,12 +289,23 @@ export function observeSurfaces(root: ParentNode, policy: ResolutionPolicy): Sur
   const actions = allActions(root, policy);
 
   const candidates = new Set<Element>();
+  const traces = new Map<Element, ExpansionStep[]>();
   for (const element of queryComposedTree(root, DIALOG_ROLE_SELECTOR, policy)) candidates.add(element);
   for (const element of queryComposedTree(root, "*", policy)) {
     if (isCustomElement(element)) candidates.add(element);
   }
-  for (const action of actions) candidates.add(expandFromAction(action.element, units, root, policy));
+  for (const action of actions) {
+    const { best, trace } = expandFromAction(action.element, units, root, policy);
+    candidates.add(best);
+    // Several actions can land on the same candidate after dedup; keep
+    // whichever trace actually climbed further, since that is the more
+    // informative one to see when diagnosing a shortfall.
+    const existing = traces.get(best);
+    if (!existing || trace.length > existing.length) traces.set(best, trace);
+  }
 
   const deduped = dedupeByContainment([...candidates]).filter(isVisible);
-  return deduped.map((element, index) => describeSurface(element, `surface-${index}`, units, actions, policy));
+  return deduped.map((element, index) =>
+    describeSurface(element, `surface-${index}`, units, actions, policy, traces.get(element))
+  );
 }

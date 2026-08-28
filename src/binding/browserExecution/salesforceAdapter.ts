@@ -739,7 +739,8 @@ function assessSalesforcePageState(
       dismissActionFound,
       editComponentEvidence,
       unrelatedDialogsIgnored: surfaces.length - 1,
-      surfacesObserved: surfaces.length
+      surfacesObserved: surfaces.length,
+      ...(surface.facts.expansionTrace ? { expansionTrace: surface.facts.expansionTrace } : {})
     };
 
     const matched = pageState.patterns.find((pattern) =>
@@ -800,7 +801,13 @@ function describeEvidence(evidence: PageStateEvidence): string {
           )
           .join("; ")}.`
       : "";
-  return `${base}${pattern}.${others}`;
+  const trace =
+    evidence.expansionTrace && evidence.expansionTrace.length > 0
+      ? ` Expansion climb from the nearest action: ${evidence.expansionTrace
+          .map((step) => `${step.element} (${step.editableFieldCount})`)
+          .join(" -> ")}.`
+      : "";
+  return `${base}${pattern}.${others}${trace}`;
 }
 
 function sleep(ms: number): Promise<void> {
