@@ -301,6 +301,37 @@ describe("H & I — field counting is exactly the definition execution itself tr
     const withField = surfaces.find((s) => s.facts.editableFieldCount > 0);
     expect(withField?.facts.editableFieldCount).toBe(1);
   });
+
+  it("a layout wrapper containing several genuinely separate fields does not swallow them", () => {
+    // Live-evidence-driven: a real Salesforce edit form reported "editable
+    // fields found: 1" for a candidate that visibly had many. The
+    // mechanism, reproduced here: `isPotentialFieldHost` correctly needs to
+    // search a candidate's whole composed subtree to find a real field's
+    // own native control several component boundaries down — but that same
+    // breadth means a layout/grouping element wrapping several genuinely
+    // separate fields (or a single unrelated native input anywhere inside
+    // it) also satisfies the predicate, purely by containing one. Keeping
+    // the outermost match in that case collapsed three independent fields
+    // plus one unrelated input into "one field, the wrapper."
+    mount(`
+      <lightning-layout>
+        <div class="quick-filter"><input placeholder="filter" /></div>
+        <mock-field id="f1"></mock-field>
+        <mock-field id="f2"></mock-field>
+        <mock-field id="f3"></mock-field>
+      </lightning-layout>
+    `);
+    const surfaces = observeSurfaces(document.body, SF);
+    const withFields = surfaces.filter((s) => s.facts.editableFieldCount > 0);
+    // Three real fields, plus the filter input now correctly standing on
+    // its own instead of being owned by (and hidden inside) the wrapper.
+    expect(withFields.reduce((sum, s) => sum + s.facts.editableFieldCount, 0)).toBe(4);
+    // The wrapper itself must never be the thing counted as "the field" —
+    // that is exactly the collapse this fixture reproduces.
+    expect(withFields.some((s) => s.root.tagName === "LIGHTNING-LAYOUT" && s.facts.editableFieldCount === 1)).toBe(
+      false
+    );
+  });
 });
 
 describe("J & K — Platform Intelligence actually controls the outcome", () => {

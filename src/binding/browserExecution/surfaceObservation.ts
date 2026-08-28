@@ -102,12 +102,28 @@ const MAX_EXPANSION_HOPS = 10;
  * a multi-field threshold by itself. Computed once, document-wide, so every
  * candidate surface's count is a `composedContains` filter over the same
  * set rather than a repeated, possibly-inconsistent re-scan.
+ *
+ * Dedup keeps the INNERMOST qualifying host among any nesting relationship,
+ * not the outermost. `isPotentialFieldHost` deliberately searches a
+ * candidate's whole composed subtree for a native control — needed because
+ * a real Lightning field is often two or three component boundaries deep
+ * (`lightning-input` renders `lightning-primitive-input-*`, which renders
+ * the real `<input>`) — but that same breadth means a *layout or grouping*
+ * component wrapping several genuinely separate fields, or one unrelated
+ * native control anywhere in its subtree (a filter box, a search input),
+ * also satisfies the predicate purely by containing one. Keeping the
+ * outermost match in that case collapses every real field nested inside
+ * it into "one field, the wrapper" — proven directly: a layout element
+ * wrapping three independent fields plus one unrelated native input
+ * counted as exactly one field, and the three real ones vanished. A host
+ * that itself contains another qualifying host is almost always such a
+ * container, not a field — so it is the one dropped.
  */
 function allFieldUnits(root: ParentNode, policy: ResolutionPolicy): EditableFieldUnit[] {
   const hosts = queryComposedTree(root, "*", policy).filter(
     (element) => isVisible(element) && isPotentialFieldHost(element, policy)
   );
-  const topHosts = hosts.filter((host) => !hosts.some((other) => other !== host && composedContains(other, host)));
+  const topHosts = hosts.filter((host) => !hosts.some((other) => other !== host && composedContains(host, other)));
   const natives = queryComposedTree(root, NATIVE_FIELD_SELECTOR, policy)
     .filter(isVisible)
     .filter((native) => !topHosts.some((host) => composedContains(host, native)));
