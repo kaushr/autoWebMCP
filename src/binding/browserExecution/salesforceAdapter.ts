@@ -309,6 +309,13 @@ function comboboxTriggerFor(host: Element, policy: ResolutionPolicy): Element | 
 function readComboboxDisplayValue(host: Element, policy: ResolutionPolicy): string | undefined {
   const trigger = comboboxTriggerFor(host, policy);
   if (!trigger) return undefined;
+  // The component's own committed value, when it exposes one, outranks the
+  // label it is rendering. Those are two different facts, and a live run
+  // proved they can disagree: the trigger displayed "Confirm" while the
+  // field's real value was still "Collaborate". Verification must compare
+  // against what was committed, not what was painted.
+  const committed = trigger.getAttribute("data-value");
+  if (committed !== null && committed.trim()) return committed.trim();
   if (trigger instanceof HTMLInputElement) return trigger.value || undefined;
   const text = (trigger.textContent ?? "").trim();
   return text || undefined;
@@ -400,14 +407,37 @@ async function setPicklistValue(
     await sleep(SELECTION_POLL_MS);
     shown = readComboboxDisplayValue(host, policy);
   }
+  // The trigger's own `data-value` is the value the component has actually
+  // committed, as distinct from the label it happens to be rendering. A
+  // live run reported the display reading "Confirm" while the field's real
+  // value never moved off "Collaborate" — a gap the display-only check
+  // cannot see, because the two are genuinely different facts. Reported
+  // whenever the component exposes it, so a committed selection can be
+  // told apart from a merely repainted one.
+  const committed = trigger.getAttribute("data-value") ?? undefined;
+  const commitNote =
+    committed === undefined
+      ? ""
+      : normalizeLabel(committed) === wanted
+        ? ` The control's committed value is now "${committed}".`
+        : ` The control still reports a committed value of "${committed}", not "${value}" — ` +
+          `the selection repainted the label without committing.`;
+
   if (shown && normalizeLabel(shown) !== wanted) {
-    return { ok: false, detail: `The picklist still shows "${shown}" after selecting "${value}".` };
+    return {
+      ok: false,
+      detail: `The picklist still shows "${shown}" after selecting "${value}".${commitNote}`
+    };
+  }
+  if (committed !== undefined && normalizeLabel(committed) !== wanted) {
+    return { ok: false, detail: `Selected the option labelled "${value}".${commitNote}` };
   }
   return {
     ok: true,
-    detail: shown
-      ? `Selected the option labelled "${value}"; the picklist now shows "${shown}".`
-      : `Selected the option labelled "${value}".`
+    detail:
+      (shown
+        ? `Selected the option labelled "${value}"; the picklist now shows "${shown}".`
+        : `Selected the option labelled "${value}".`) + commitNote
   };
 }
 
