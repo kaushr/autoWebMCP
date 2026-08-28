@@ -410,3 +410,70 @@ describe("post-save verification against the record view", () => {
     expect(result.checks.find((check) => check.name === "returned_to_record")?.status).toBe("fail");
   });
 });
+
+describe("an optional input nobody supplied is not part of the invocation", () => {
+  const OPTIONAL_BINDING: BrowserExecutionBinding = {
+    ...BINDING,
+    inputs: [
+      { ...BINDING.inputs[0], required: true },
+      {
+        semanticInput: "next_step",
+        semanticTarget: { role: "field", label: "Next Step" },
+        valueKind: "text",
+        required: false
+      }
+    ]
+  };
+
+  it("saves without it, rather than blocking on a field the caller deliberately left alone", async () => {
+    // The optional field is not even present on this form. Resolving it
+    // would fail and block the whole run — which is what happened live:
+    // Run test refused to save because a field nobody asked to change had
+    // no value.
+    mountEditForm();
+    const result = await executeConfirmed({
+      root: document,
+      binding: OPTIONAL_BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.evidence.join("\n")).toMatch(/Not part of this invocation.*next_step.*optional/);
+    expect(result.transactions?.map((t) => t.name)).toEqual(["close_date"]);
+  });
+
+  it("still refuses when a REQUIRED input has no value, and says which one", async () => {
+    mountEditForm();
+    const result = await executeConfirmed({
+      root: document,
+      binding: OPTIONAL_BINDING,
+      inputs: {},
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+
+    expect(result.status).not.toBe("succeeded");
+    expect(result.warnings.join(" ")).toMatch(/required input "close_date"/);
+  });
+
+  it("treats a binding with no required flag as required, so an older stored binding cannot start saving partial records", async () => {
+    mountEditForm();
+    const legacy: BrowserExecutionBinding = {
+      ...BINDING,
+      inputs: [{ ...BINDING.inputs[0] }] // no `required` field at all
+    };
+    const result = await executeConfirmed({
+      root: document,
+      binding: legacy,
+      inputs: {},
+      adapter: salesforceAdapter(),
+      confirmed: true,
+      reaction: { quietMs: 20, timeoutMs: 500 }
+    });
+    expect(result.status).not.toBe("succeeded");
+  });
+});

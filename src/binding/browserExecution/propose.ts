@@ -207,7 +207,11 @@ export function proposeBrowserBinding(
       semanticInput: input.name,
       semanticTarget: target,
       valueKind,
-      applicationField: bound
+      applicationField: bound,
+      // Carried from the capability's own contract so the executor can tell
+      // "leave this field alone" from "refuse to save a partial record"
+      // without needing the capability alongside it at execution time.
+      required: input.required
     });
     evidence.push(grounding.detail);
   }

@@ -61,7 +61,10 @@ describe("proposeBrowserBinding — deterministic, evidence-only", () => {
       valueKind: "date",
       // With no application knowledge supplied, the binding still records
       // honestly that the identity rests on the observation alone.
-      applicationField: { objectApiName: "Opportunity", apiName: "CloseDate", type: "string", knowledge: "observation-only" }
+      applicationField: { objectApiName: "Opportunity", apiName: "CloseDate", type: "string", knowledge: "observation-only" },
+      // Carried from the capability so the executor can tell "leave this
+      // field alone" from "refuse to save a partial record" on its own.
+      required: true
     });
     expect(binding.commit).toEqual({ semanticAction: { role: "button", label: "Save" } });
   });

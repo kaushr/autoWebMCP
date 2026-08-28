@@ -532,9 +532,28 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   }
 
   /* --- A: resolve every target before writing anything --------------- */
+  // An optional input the caller did not supply is not part of this
+  // invocation at all: not resolved, not written, not verified, and its
+  // absence never blocks the commit. Resolving it anyway would let a field
+  // nobody asked for fail the whole run. A required input with no value
+  // still blocks below — quietly saving a partial record is the worse
+  // failure, so an absent `required` (an older stored binding that predates
+  // the flag) is treated as required.
+  const applicable = binding.inputs.filter(
+    (input) => inputs[input.semanticInput] !== undefined || input.required !== false
+  );
+  const omitted = binding.inputs.filter((input) => !applicable.includes(input));
+  if (omitted.length > 0) {
+    evidence.push(
+      `Not part of this invocation: ${omitted
+        .map((input) => `"${input.semanticInput}" (optional, no value supplied)`)
+        .join(", ")}.`
+    );
+  }
+
   const resolution = await resolveAllTargets(
     root,
-    binding.inputs,
+    applicable,
     adapter,
     options.resolveRetryMs ?? RESOLVE_RETRY_WINDOW_MS
   );
@@ -552,7 +571,9 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   checks.push({
     name: "target_resolved",
     status: "pass",
-    detail: `All ${binding.inputs.length} input target(s) resolved on the live page.`
+    detail:
+      `All ${applicable.length} input target(s) resolved on the live page.` +
+      (omitted.length > 0 ? ` ${omitted.length} optional input(s) were not supplied and were skipped.` : "")
   });
 
   /* --- B: set every value ------------------------------------------------ *
@@ -566,8 +587,10 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   for (const { input, target } of resolved) {
     const requestedValue = inputs[input.semanticInput];
     if (requestedValue === undefined) {
+      // Only a required input reaches here — `applicable` already dropped
+      // the optional ones nobody supplied.
       allSet = false;
-      warnings.push(`No value was supplied for "${input.semanticInput}".`);
+      warnings.push(`No value was supplied for required input "${input.semanticInput}".`);
       continue;
     }
 

@@ -95,6 +95,18 @@ export interface BrowserBindingInput {
   semanticTarget: SemanticTarget;
   valueKind: FieldValueKind;
   applicationField?: BoundApplicationField;
+  /**
+   * Whether an invocation must supply this input, carried from the
+   * capability's own contract.
+   *
+   * The executor needs it independently: an agent calling a published tool
+   * supplies whatever it likes, and "no value for an optional field" and
+   * "no value for a required field" are opposite situations — one means
+   * leave that field alone, the other means refuse to save a partial
+   * record. Absent (an older stored binding) is treated as required,
+   * because blocking a save is the recoverable mistake.
+   */
+  required?: boolean;
 }
 
 export type PageMode = "record-view" | "edit-form" | "edit-or-record";
