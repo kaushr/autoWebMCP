@@ -33,10 +33,15 @@ export interface SupportedInterfaceQuery {
   family?: string;
 }
 
-/** Page-state semantics plus the provenance of the knowledge that produced them. */
+/**
+ * Every declared page-state pattern plus the provenance of the knowledge
+ * that produced them — a list, not a single rule, because a platform may
+ * declare more than one independently-provenanced way to recognize
+ * record-edit (see `PageStateSemanticsEntry`).
+ */
 export interface PageStateIntelligence {
   platform: string;
-  pageState: PageStateSemanticsEntry["pageState"];
+  entries: PageStateSemanticsEntry[];
   provenance: PlatformIntelligenceTrace;
 }
 
@@ -157,11 +162,11 @@ export function createPlatformIntelligenceProvider(
     getPageStateSemantics(platformId) {
       const pack = byPlatform.get(platformId);
       if (!pack) return undefined;
-      const entry = active(pack.knowledge).find(
+      const entries = active(pack.knowledge).filter(
         (candidate): candidate is PageStateSemanticsEntry => candidate.category === "page-state-semantics"
       );
-      if (!entry) return undefined;
-      return { platform: platformId, pageState: entry.pageState, provenance: traceFor(pack, [entry]) };
+      if (entries.length === 0) return undefined;
+      return { platform: platformId, entries, provenance: traceFor(pack, entries) };
     },
 
     getVerificationSemantics(platformId) {

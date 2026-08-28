@@ -193,23 +193,41 @@ export interface ReferenceEntry extends KnowledgeEntryBase {
  * entirely. Like `resolution-policy`, this is declarative knowledge a
  * runtime compiles once and applies mechanically — element identities and
  * evidence thresholds, never DOM operations or selector chains.
+ *
+ * One entry declares exactly one independently-provenanced *pattern* for
+ * recognizing record-edit, not the whole rule. A platform commonly declares
+ * more than one: a documented component identity is one way to recognize
+ * an edit surface, a structural signature (enough editable fields plus a
+ * commit action) is a different kind of evidence entirely, and the two do
+ * not have to share a strength. Collapsing every pattern into one flat
+ * evidence bundle was tried first and failed a live case: a genuine,
+ * 16-field Salesforce edit form matched neither the declared component
+ * tags nor a generic dialog role, so it never even reached this knowledge
+ * — the observation layer had already decided, on its own, what counted
+ * as a candidate surface. Each pattern here is evaluated against
+ * observations the generic engine already made, never the other way
+ * around.
  */
 export interface PageStateSemanticsEntry extends KnowledgeEntryBase {
   category: "page-state-semantics";
-  strength: "documented-fact" | "documented-policy" | "validated-platform-rule";
   pageState: {
     /** A generic visible dialog must never, alone, be read as record-edit. */
     genericDialogIsNotEditEvidence: true;
-    editSurface: {
-      /** Tag names that themselves signify this platform's record-edit component. */
-      componentEvidence: string[];
-      /** Structural qualification: at least this many editable fields inside the surface… */
-      minimumEditableFields: number;
-      /** …together with a commit action carrying one of these accessible labels. */
-      commitActionLabels: string[];
-      /** Supporting (never sufficient) evidence: a dismiss action with one of these labels. */
-      dismissActionLabels: string[];
-    };
+    editSurface:
+      | {
+          kind: "component-identity";
+          /** Tag names that themselves signify this platform's record-edit component. */
+          componentIdentities: string[];
+        }
+      | {
+          kind: "structural";
+          /** At least this many editable fields inside the surface… */
+          minimumEditableFields: number;
+          /** …together with a commit action carrying one of these accessible labels. */
+          commitActionLabels: string[];
+          /** Supporting (never sufficient) evidence: a dismiss action with one of these labels. */
+          dismissActionLabels: string[];
+        };
   };
 }
 

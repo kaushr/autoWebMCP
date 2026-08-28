@@ -497,7 +497,15 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
       editWaitMs: 3_000
     });
     console.debug("[AutoWebMCP] content: inspection finished", inspection);
-    return { ok: true, inspection };
+    // Which pack knowledge governed this read, recorded alongside the
+    // result — execution already carried this; introspection silently
+    // didn't, so a failed domain acquisition carried no indication of
+    // which pack, version, or rule was even in force.
+    const provenance = resolutionProvenanceForPlatform(request.binding.platform);
+    return {
+      ok: true,
+      inspection: provenance ? { ...inspection, evidence: [provenance, ...inspection.evidence] } : inspection
+    };
   } catch (error) {
     return {
       ok: false,

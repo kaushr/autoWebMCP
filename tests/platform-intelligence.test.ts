@@ -14,7 +14,7 @@ describe("Platform Intelligence schema and Salesforce pack", () => {
     const pack = assertPlatformIntelligencePack(salesforceIntelligencePack);
 
     expect(pack.packId).toBe("salesforce-intelligence-pack");
-    expect(pack.packVersion).toBe("0.5.0");
+    expect(pack.packVersion).toBe("0.6.0");
     expect(pack.schemaVersion).toBe(PLATFORM_INTELLIGENCE_SCHEMA_VERSION);
     expect(pack.platform.id).toBe("salesforce-lightning");
   });
@@ -67,7 +67,7 @@ describe("PlatformIntelligenceProvider", () => {
   it("resolves Salesforce to the versioned pack", () => {
     const pack = defaultPlatformIntelligenceProvider.getPack("salesforce-lightning");
     expect(pack?.packId).toBe("salesforce-intelligence-pack");
-    expect(pack?.packVersion).toBe("0.5.0");
+    expect(pack?.packVersion).toBe("0.6.0");
   });
 
   it("returns undefined or empty slices for unknown platforms", () => {

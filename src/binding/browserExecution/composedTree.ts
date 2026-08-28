@@ -96,6 +96,101 @@ export function queryComposedTreeFirst(
 }
 
 /**
+ * Composed-tree containment: walks parents, hopping from a shadow root to
+ * its host. Generic — moved here from the Salesforce adapter, where an
+ * identical copy previously lived only because it happened to be written
+ * for Salesforce first. Nothing about parent-walking is platform-specific,
+ * and page-state surface discovery needs the same containment test the
+ * adapter already trusted for option and surface deduplication.
+ */
+export function composedContains(ancestor: Element, node: Element): boolean {
+  let current: Element | null = node;
+  let hops = 0;
+  while (current && hops < 60) {
+    if (current === ancestor) return true;
+    if (current.parentElement) current = current.parentElement;
+    else {
+      const treeRoot = current.getRootNode();
+      current = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
+    }
+    hops++;
+  }
+  return false;
+}
+
+/** One step up the composed tree: the light-DOM parent, or a shadow root's host at its boundary. */
+export function composedParent(element: Element): Element | undefined {
+  if (element.parentElement) return element.parentElement;
+  const root = element.getRootNode();
+  return root instanceof ShadowRoot ? root.host : undefined;
+}
+
+function isCustomElement(element: Element): boolean {
+  return element.tagName.includes("-");
+}
+
+/** Whether an element exposes a plain, mirrored `value` property — the LWC `@api value` contract, generalized: any custom element that mirrors its value as a plain JS property, regardless of platform. */
+export function hasMirroredValueProperty(element: Element): element is Element & { value?: unknown } {
+  return isCustomElement(element) && "value" in element;
+}
+
+/** A native form control anywhere within `host`'s composed subtree (self-inclusive), matching `selector`. */
+export function nativeControlWithin(
+  host: Element,
+  selector: string,
+  policy: ResolutionPolicy
+): HTMLInputElement | undefined {
+  const native = composedMatchWithin(host, selector, policy);
+  return native instanceof HTMLInputElement ? native : undefined;
+}
+
+/**
+ * Any control within `host`'s composed subtree, native or not.
+ *
+ * Distinct from `nativeControlWithin`, which deliberately returns only a
+ * real `<input>`: a combobox's control is a `<button role="combobox">`,
+ * which is a control by ARIA and not by tag.
+ */
+export function controlWithin(host: Element, selector: string, policy: ResolutionPolicy): Element | undefined {
+  return composedMatchWithin(host, selector, policy);
+}
+
+/**
+ * A generic WAI-ARIA combobox trigger: `role="combobox"`, or a
+ * button/input declaring `aria-haspopup="listbox"`. This is the ARIA
+ * combobox pattern itself, not a Salesforce identity — any platform's
+ * picklist-like control is reachable through it.
+ */
+export const COMBOBOX_TRIGGER_SELECTOR = '[role="combobox"], button[aria-haspopup="listbox"], input[aria-haspopup="listbox"]';
+
+/**
+ * Whether an element is a plausible field-owning host: a custom element
+ * that either mirrors its own `value` property, wraps a native form
+ * control somewhere in its composed subtree, or wraps an ARIA combobox
+ * trigger (a picklist's control is a button, not a native input).
+ *
+ * Shared by two consumers that must never define "editable field"
+ * differently: execution's own field resolution, and generic surface
+ * observation used for page-state classification. A live Salesforce run
+ * showed those two disagreeing — one could manipulate Close Date and Stage
+ * directly, the other counted a visibly rich, 16-field edit form as having
+ * one field. The cause was never a second, weaker field definition; it was
+ * that page-state classification was scoped to the wrong DOM root before
+ * this predicate ever ran. Keeping exactly one function, used both places,
+ * makes that class of divergence impossible to reintroduce silently.
+ */
+export function isPotentialFieldHost(element: Element, policy: ResolutionPolicy): boolean {
+  if (!isCustomElement(element)) return false;
+  return (
+    hasMirroredValueProperty(element) ||
+    Boolean(nativeControlWithin(element, "input, select, textarea", policy)) ||
+    Boolean(controlWithin(element, COMBOBOX_TRIGGER_SELECTOR, policy))
+  );
+}
+
+export { isCustomElement };
+
+/**
  * The first composed-tree match, considering the root element ITSELF.
  *
  * A semantic resolver is allowed to land on whatever element carries the

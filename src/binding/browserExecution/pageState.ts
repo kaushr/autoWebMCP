@@ -21,6 +21,25 @@
 
 export type PageState = "record-edit" | "record-view" | "unknown";
 
+/**
+ * One independently-provenanced way a platform's record-edit state can be
+ * established. Multiple patterns may exist for the same platform, each
+ * with its own strength: a documented component identity is not the only
+ * way to recognize an edit surface, and a structural pattern inferred from
+ * one live observation is not the same *kind* of knowledge as a vendor's
+ * own component name, even when both currently point at `record-edit`.
+ * Collapsing them into one flat rule was the mistake — see
+ * `sf-record-edit-structural-semantics` in the Salesforce pack for the
+ * live case that forced this apart.
+ */
+export interface EditSurfacePattern {
+  id: string;
+  strength: string;
+  evidence:
+    | { kind: "component-identity"; componentIdentities: string[] }
+    | { kind: "structural"; minimumEditableFields: number };
+}
+
 /** What a state assessment actually saw, kept so a wrong answer is arguable. */
 export interface PageStateEvidence {
   /** Editable record fields found inside the qualifying (or best) surface. */
@@ -31,6 +50,12 @@ export interface PageStateEvidence {
   editComponentEvidence: string[];
   /** Visible dialog-like surfaces that did NOT qualify as an edit surface. */
   unrelatedDialogsIgnored: number;
+  /** How many candidate surfaces were observed in total, qualifying or not. */
+  surfacesObserved: number;
+  /** Which pattern, if any, established `record-edit` — its id and epistemic strength. */
+  matchedPattern?: { id: string; strength: string };
+  /** Other observed candidates that did not qualify, kept for diagnosis — an unrelated error banner included, never silently dropped. */
+  otherSurfaces?: Array<{ heading?: string; roles: string[]; editableFieldCount: number }>;
 }
 
 export interface PageStateAssessment {
@@ -59,34 +84,39 @@ export interface EditableTransition {
  * How a platform's record-edit state is recognized. Compiled from Platform
  * Intelligence at the composition root; deliberately declarative — element
  * identities and thresholds, never DOM operations.
+ *
+ * `patterns` replaces what used to be a single flat component-tag list plus
+ * a single field-count threshold. Multiple independently-provenanced ways
+ * to recognize record-edit can coexist — a documented component identity
+ * and a structural pattern are different *kinds* of evidence and may carry
+ * different strength, and a platform is not limited to declaring one of
+ * each. `commitActionLabels`/`dismissActionLabels` stay flat and shared:
+ * they name what "Save" and "Cancel" look like on this platform, used both
+ * by the structural pattern and independently, to find and click those
+ * actions during restoration and validation — that vocabulary does not
+ * vary per recognition pattern.
  */
 export interface PageStatePolicy {
-  /**
-   * Element tag names that themselves signify a record-edit surface on this
-   * platform (a component identity is a documented platform fact, not a
-   * recorded selector chain).
-   */
-  editSurfaceComponents: string[];
-  /**
-   * A dialog-like surface qualifies structurally only with at least this
-   * many editable fields inside it AND a commit action. One lone input
-   * with a button is a search box or a note composer, not a record form.
-   */
-  minimumEditableFields: number;
-  /** Accessible labels that count as the surface's commit action, lowercase. */
+  patterns: EditSurfacePattern[];
+  /** Accessible labels that count as a commit action, lowercase. */
   commitActionLabels: string[];
-  /** Accessible labels that count as its dismiss action, lowercase. */
+  /** Accessible labels that count as a dismiss action, lowercase. */
   dismissActionLabels: string[];
 }
 
 /**
- * The conservative default when a platform declares nothing: structural
- * evidence only, two-field minimum, Save/Cancel wording. A platform with
- * different semantics declares its own in its pack.
+ * The conservative default when a platform declares nothing: one
+ * structural pattern, two-field minimum, Save/Cancel wording. A platform
+ * with different semantics declares its own in its pack.
  */
 export const DEFAULT_PAGE_STATE_POLICY: PageStatePolicy = {
-  editSurfaceComponents: [],
-  minimumEditableFields: 2,
+  patterns: [
+    {
+      id: "generic-structural",
+      strength: "documented-policy",
+      evidence: { kind: "structural", minimumEditableFields: 2 }
+    }
+  ],
   commitActionLabels: ["save"],
   dismissActionLabels: ["cancel"]
 };

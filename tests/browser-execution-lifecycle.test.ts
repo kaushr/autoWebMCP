@@ -77,9 +77,19 @@ function mountEditForm(options: { rejectSave?: boolean } = {}): HTMLElement {
     }
     // A real successful Lightning save closes the edit surface and returns
     // to a record view that still shows the field's persisted value — it
-    // does not simply delete the field from the page.
+    // does not simply delete the field from the page. Stripping only the
+    // dialog's ARIA markers previously simulated that (candidate discovery
+    // depended entirely on the boundary marker being present), but generic
+    // surface observation now finds a record-edit surface structurally,
+    // from its editable fields and a nearby Save action, independent of
+    // any dialog role — so a faithful "closed" simulation must actually
+    // stop offering those controls, the way a real Lightning save does by
+    // tearing the edit form down.
     dialog.removeAttribute("role");
     dialog.removeAttribute("aria-modal");
+    for (const control of dialog.querySelectorAll("input, mock-lightning-datepicker, button")) {
+      (control as HTMLElement).hidden = true;
+    }
   });
   return document.body;
 }
@@ -116,7 +126,11 @@ function mountPickerOnlyEditForm(): HTMLElement {
     document.querySelector("#calendar")!.remove();
   });
   document.querySelector("#save")!.addEventListener("click", () => {
-    document.querySelector("#edit-dialog")!.removeAttribute("aria-modal");
+    const dialog = document.querySelector("#edit-dialog")!;
+    dialog.removeAttribute("aria-modal");
+    for (const control of dialog.querySelectorAll('input, button, [role="textbox"]')) {
+      (control as HTMLElement).hidden = true;
+    }
   });
   return document.body;
 }
@@ -292,8 +306,12 @@ function mountRecordViewWithEditButton(): HTMLElement {
       </div>
     `;
     document.querySelector("#save")!.addEventListener("click", () => {
-      document.querySelector("#edit-dialog")!.removeAttribute("role");
-      document.querySelector("#edit-dialog")!.removeAttribute("aria-modal");
+      const dialog = document.querySelector("#edit-dialog")!;
+      dialog.removeAttribute("role");
+      dialog.removeAttribute("aria-modal");
+      for (const control of dialog.querySelectorAll("input, mock-lightning-datepicker, button")) {
+        (control as HTMLElement).hidden = true;
+      }
     });
   });
   return document.body;

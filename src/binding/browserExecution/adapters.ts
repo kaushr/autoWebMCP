@@ -49,21 +49,49 @@ export function resolutionPolicyForPlatform(
 }
 
 /**
- * How this platform's record-edit state is recognized, from its pack. The
- * conservative generic default applies when a pack declares nothing.
+ * How this platform's record-edit state is recognized, from its pack —
+ * every independently-provenanced pattern it declares, compiled into one
+ * policy. The conservative generic default applies when a pack declares
+ * nothing. `commitActionLabels`/`dismissActionLabels` are the union of
+ * whatever every structural pattern declares, since that vocabulary is
+ * shared platform knowledge ("what Save looks like here"), not something
+ * that varies per recognition pattern; a platform declaring no structural
+ * pattern at all falls back to the generic Save/Cancel wording so
+ * restoration still has something to look for.
  */
 export function pageStatePolicyForPlatform(
   platform: string,
   intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
 ): PageStatePolicy {
   const declared = intelligence.getPageStateSemantics(platform);
-  if (!declared) return DEFAULT_PAGE_STATE_POLICY;
-  return {
-    editSurfaceComponents: [...declared.pageState.editSurface.componentEvidence],
-    minimumEditableFields: declared.pageState.editSurface.minimumEditableFields,
-    commitActionLabels: [...declared.pageState.editSurface.commitActionLabels],
-    dismissActionLabels: [...declared.pageState.editSurface.dismissActionLabels]
-  };
+  if (!declared || declared.entries.length === 0) return DEFAULT_PAGE_STATE_POLICY;
+
+  const patterns: PageStatePolicy["patterns"] = declared.entries.map((entry) => {
+    const surface = entry.pageState.editSurface;
+    return {
+      id: entry.id,
+      strength: entry.strength,
+      evidence:
+        surface.kind === "component-identity"
+          ? { kind: "component-identity" as const, componentIdentities: [...surface.componentIdentities] }
+          : { kind: "structural" as const, minimumEditableFields: surface.minimumEditableFields }
+    };
+  });
+
+  const structural = declared.entries
+    .map((entry) => entry.pageState.editSurface)
+    .filter((surface): surface is Extract<typeof surface, { kind: "structural" }> => surface.kind === "structural");
+
+  const commitActionLabels =
+    structural.length > 0
+      ? [...new Set(structural.flatMap((surface) => surface.commitActionLabels))]
+      : [...DEFAULT_PAGE_STATE_POLICY.commitActionLabels];
+  const dismissActionLabels =
+    structural.length > 0
+      ? [...new Set(structural.flatMap((surface) => surface.dismissActionLabels))]
+      : [...DEFAULT_PAGE_STATE_POLICY.dismissActionLabels];
+
+  return { patterns, commitActionLabels, dismissActionLabels };
 }
 
 /**

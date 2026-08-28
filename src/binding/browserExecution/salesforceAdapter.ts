@@ -9,7 +9,17 @@ import {
   type PlatformResolverAdapter,
   type ResolvedTarget
 } from "./engine";
-import { composedMatchWithin, queryComposedTree, queryComposedTreeFirst } from "./composedTree";
+import {
+  COMBOBOX_TRIGGER_SELECTOR,
+  composedContains,
+  composedMatchWithin,
+  hasMirroredValueProperty,
+  isPotentialFieldHost,
+  nativeControlWithin,
+  queryComposedTree,
+  queryComposedTreeFirst
+} from "./composedTree";
+import { observeSurfaces, type SurfaceObservation } from "./surfaceObservation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
 import {
   DEFAULT_PAGE_STATE_POLICY,
@@ -79,8 +89,8 @@ const MONTH_NAV_MAX_CLICKS = 24;
  * position-in-list assumption. Options are re-resolved live on every
  * execution.
  */
-const COMBOBOX_TRIGGER_SELECTOR =
-  '[role="combobox"], button[aria-haspopup="listbox"], input[aria-haspopup="listbox"]';
+// COMBOBOX_TRIGGER_SELECTOR now lives in composedTree.ts — the ARIA
+// combobox pattern itself, not a Salesforce identity.
 const LISTBOX_SELECTOR = '[role="listbox"]';
 /** How long to let a picklist settle after a choice before reading it back. */
 const SELECTION_QUIET_MS = 40;
@@ -88,74 +98,12 @@ const SELECTION_TIMEOUT_MS = 2_000;
 const SELECTION_POLL_MS = 40;
 const OPTION_SELECTOR = '[role="option"]';
 
-function isCustomElement(element: Element): boolean {
-  return element.tagName.includes("-");
-}
-
-/** Whether the host exposes a plain, mirrored `value` property — the LWC `@api value` contract. */
-function hasMirroredValueProperty(element: Element): element is Element & { value?: unknown } {
-  return isCustomElement(element) && "value" in element;
-}
-
-/**
- * A Lightning field is usually a custom element host, not a native form
- * control — `lightning-input`, `lightning-datepicker`, and similar all
- * render their real `<input>` inside a shadow root the generic engine's
- * `input, select, textarea` search never reaches by tag name alone. A host
- * counts as a field candidate when it either mirrors its own `value`
- * property or visibly wraps a native form control in its shadow root.
- */
-function isPotentialFieldHost(element: Element, policy: ResolutionPolicy): boolean {
-  if (!isCustomElement(element)) return false;
-  return (
-    hasMirroredValueProperty(element) ||
-    Boolean(nativeControlWithin(element, "input, select, textarea", policy)) ||
-    // A picklist host may contain neither: its control is a combobox
-    // trigger and a listbox, which is a control by ARIA rather than by tag.
-    // Without this, a Lightning picklist is not even a candidate field.
-    Boolean(controlWithin(element, COMBOBOX_TRIGGER_SELECTOR, policy))
-  );
-}
-
-/**
- * A native control anywhere inside a component, at any depth.
- *
- * Depth matters and one level is not enough: Lightning composes components
- * out of other components, so a `lightning-input` renders a
- * `lightning-primitive-input-*`, which renders the real `<input>` — two
- * boundaries down from the host a semantic target resolves to. Looking only
- * at `host.shadowRoot` finds nothing and silently falls through to a weaker
- * strategy.
- */
-/**
- * A native control at or beneath the resolved element.
- *
- * Deliberately composed-subtree and self-inclusive. The previous version
- * required `host.shadowRoot` and searched only inside it, which meant that
- * whenever resolution landed exactly on the control — the common case for
- * a plain `<input>` carrying the field's accessible name — every strategy
- * that depends on this declined, and the caller fell through to a
- * last-resort path that then failed for an unrelated-sounding reason.
- */
-function nativeControlWithin(
-  host: Element,
-  selector: string,
-  policy: ResolutionPolicy
-): HTMLInputElement | undefined {
-  const native = composedMatchWithin(host, selector, policy);
-  return native instanceof HTMLInputElement ? native : undefined;
-}
-
-/**
- * Any control inside the host's shadow root, native or not.
- *
- * Distinct from `nativeControlWithin`, which deliberately returns only a
- * real `<input>`: a picklist's control is a `<button role="combobox">`,
- * which is a control by ARIA and not by tag.
- */
-function controlWithin(host: Element, selector: string, policy: ResolutionPolicy): Element | undefined {
-  return composedMatchWithin(host, selector, policy);
-}
+// isCustomElement, hasMirroredValueProperty, isPotentialFieldHost,
+// nativeControlWithin, and controlWithin now live in composedTree.ts —
+// they were never Salesforce-specific, and generic surface observation
+// (surfaceObservation.ts) needs to count fields exactly the way execution's
+// own field resolution does, using the same function, not a second
+// definition of "editable field" that could silently drift from this one.
 
 function nativeDateInputWithin(root: Element, policy: ResolutionPolicy): HTMLInputElement | undefined {
   return nativeControlWithin(root, 'input[type="date"]', policy);
@@ -695,78 +643,23 @@ const EDIT_WAIT_POLL_MS = 100;
  * "A visible dialog exists" is not a page state. A live Lightning record
  * page carried visible dialog-role surfaces (docked utility bar, panels)
  * while sitting in plain read-only view, and reading any of them as "the
- * record is being edited" skipped the Edit click entirely. What actually
- * establishes record-edit here comes from the Salesforce pack's
- * `sf-record-edit-surface-semantics` entry, compiled into the
- * `PageStatePolicy` this adapter is constructed with.
+ * record is being edited" skipped the Edit click entirely.
+ *
+ * Candidate surfaces are now discovered generically, by `observeSurfaces`
+ * (surfaceObservation.ts) — not by a hardcoded selector naming Salesforce
+ * component tags. What establishes that a given candidate actually means
+ * record-edit comes entirely from the Salesforce pack's `page-state-
+ * semantics` entries, compiled into the `patterns` this adapter's
+ * `PageStatePolicy` carries. This split — observe broadly, then let
+ * declared patterns interpret — exists because the previous, selector-first
+ * design discovered candidates and consulted knowledge in the wrong order:
+ * a live, sixteen-field Salesforce edit form matched none of the declared
+ * component tags and had no dialog role either, so it never became a
+ * candidate at all, and no amount of correct knowledge could have rescued
+ * it once discovery had already excluded it.
  * -------------------------------------------------------------------- */
 
-const DIALOG_SURFACE_SELECTOR = '[role="dialog"], [aria-modal="true"]';
-const EDITABLE_FIELD_SELECTOR =
-  'input:not([type="hidden"]), select, textarea, [role="textbox"], [contenteditable="true"]';
 const SURFACE_ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"]';
-
-/** Composed-tree containment: walks parents, hopping from a shadow root to its host. */
-function composedContains(ancestor: Element, node: Element): boolean {
-  let current: Element | null = node;
-  let hops = 0;
-  while (current && hops < 60) {
-    if (current === ancestor) return true;
-    if (current.parentElement) current = current.parentElement;
-    else {
-      const treeRoot = current.getRootNode();
-      current = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
-    }
-    hops++;
-  }
-  return false;
-}
-
-/**
- * Editable record fields inside a surface, counted as *field units*: a
- * component host that owns a value counts once, and native controls are
- * counted only when no counted host already contains them — otherwise one
- * `lightning-input` wrapping one `<input>` would count as two fields and a
- * lone search box would satisfy a multiple-fields threshold by itself.
- */
-function countEditableFields(surface: Element, resolution: ResolutionPolicy): number {
-  const allHosts = queryComposedTree(surface, "*", resolution).filter(
-    (element) => isVisible(element) && isPotentialFieldHost(element, resolution)
-  );
-  const topHosts = allHosts.filter(
-    (host) => !allHosts.some((other) => other !== host && composedContains(other, host))
-  );
-  const natives = queryComposedTree(surface, EDITABLE_FIELD_SELECTOR, resolution)
-    .filter(isVisible)
-    .filter((native) => !topHosts.some((host) => composedContains(host, native)));
-  return topHosts.length + natives.length;
-}
-
-function surfaceHasActionLabelled(
-  surface: Element,
-  labels: readonly string[],
-  resolution: ResolutionPolicy
-): boolean {
-  const wanted = new Set(labels.map((label) => label.toLowerCase()));
-  return queryComposedTree(surface, SURFACE_ACTION_SELECTOR, resolution)
-    .filter(isVisible)
-    .some((action) => wanted.has(normalizeLabel(accessibleName(action) ?? "")));
-}
-
-function editComponentEvidenceIn(
-  surface: Element,
-  pageState: PageStatePolicy,
-  resolution: ResolutionPolicy
-): string[] {
-  if (pageState.editSurfaceComponents.length === 0) return [];
-  const tags = new Set(pageState.editSurfaceComponents.map((tag) => tag.toLowerCase()));
-  const found = new Set<string>();
-  if (tags.has(surface.tagName.toLowerCase())) found.add(surface.tagName.toLowerCase());
-  for (const descendant of queryComposedTree(surface, pageState.editSurfaceComponents.join(", "), resolution)) {
-    found.add(descendant.tagName.toLowerCase());
-  }
-  return [...found];
-}
 
 function findEditAction(root: ParentNode, resolution: ResolutionPolicy): HTMLElement | undefined {
   const action = queryComposedTree(root, 'button, [role="button"], a', resolution)
@@ -775,66 +668,139 @@ function findEditAction(root: ParentNode, resolution: ResolutionPolicy): HTMLEle
   return action instanceof HTMLElement ? action : undefined;
 }
 
+/** Which of a component-identity pattern's declared tags were actually observed on this surface. */
+function matchedComponentIdentities(
+  componentIdentities: readonly string[],
+  facts: SurfaceObservation["facts"]
+): string[] {
+  const wanted = new Set(componentIdentities.map((tag) => tag.toLowerCase()));
+  return facts.componentIdentities.filter((tag) => wanted.has(tag));
+}
+
+/** Whether one declared pattern is satisfied by one observed surface's facts. */
+function patternQualifies(
+  pattern: PageStatePolicy["patterns"][number],
+  facts: SurfaceObservation["facts"],
+  commitActionLabels: readonly string[]
+): boolean {
+  if (pattern.evidence.kind === "component-identity") {
+    return matchedComponentIdentities(pattern.evidence.componentIdentities, facts).length > 0;
+  }
+  const hasCommit = commitActionLabels.some((label) => facts.actionLabels.includes(label));
+  return facts.editableFieldCount >= pattern.evidence.minimumEditableFields && hasCommit;
+}
+
 /**
- * Classifies the page: `record-edit` only on the pack's evidence — the
- * platform's record-edit component, or a surface holding at least the
- * declared minimum of editable fields together with a commit action.
- * `record-view` when nothing qualifies but an Edit action is offered
- * (which is what a view page does); `unknown` otherwise. A generic dialog
- * alone never qualifies, no matter how visible.
+ * Classifies the page: `record-edit` only when some declared pattern is
+ * satisfied by an observed surface — a component identity, or a structural
+ * signature the pack has earned the right to declare. `record-view` only
+ * with positive evidence for it: an Edit action is offered, AND no
+ * observed candidate looked edit-like without being explained. A candidate
+ * with real fields and something that looks like a commit action, that
+ * still satisfied no pattern, is unexplained evidence, not proof of a
+ * plain view — reporting `record-view` there is exactly the false
+ * negative a live run was caught making, so it now reports `unknown`
+ * instead. A generic dialog alone never qualifies, no matter how visible.
  */
 function assessSalesforcePageState(
   root: ParentNode,
   resolution: ResolutionPolicy,
   pageState: PageStatePolicy
 ): PageStateAssessment {
-  const surfaceSelector =
-    pageState.editSurfaceComponents.length > 0
-      ? `${DIALOG_SURFACE_SELECTOR}, ${pageState.editSurfaceComponents.join(", ")}`
-      : DIALOG_SURFACE_SELECTOR;
-  const allSurfaces = queryComposedTree(root, surfaceSelector, resolution).filter(isVisible);
-  // Nested dialog markers (a modal that is also aria-modal, wrappers inside
-  // wrappers) describe one surface, not several.
-  const surfaces = allSurfaces.filter(
-    (surface) => !allSurfaces.some((other) => other !== surface && composedContains(other, surface))
-  );
+  const surfaces = observeSurfaces(root, resolution);
 
   let best: PageStateEvidence = {
     editableFieldCount: 0,
     commitActionFound: false,
     dismissActionFound: false,
     editComponentEvidence: [],
-    unrelatedDialogsIgnored: surfaces.length
+    unrelatedDialogsIgnored: surfaces.length,
+    surfacesObserved: surfaces.length
   };
+
   for (const surface of surfaces) {
+    const commitActionFound = pageState.commitActionLabels.some((label) => surface.facts.actionLabels.includes(label));
+    const dismissActionFound = pageState.dismissActionLabels.some((label) => surface.facts.actionLabels.includes(label));
+    const editComponentEvidence = [
+      ...new Set(
+        pageState.patterns
+          .filter((pattern) => pattern.evidence.kind === "component-identity")
+          .flatMap((pattern) =>
+            pattern.evidence.kind === "component-identity"
+              ? matchedComponentIdentities(pattern.evidence.componentIdentities, surface.facts)
+              : []
+          )
+      )
+    ];
+
     const evidence: PageStateEvidence = {
-      editableFieldCount: countEditableFields(surface, resolution),
-      commitActionFound: surfaceHasActionLabelled(surface, pageState.commitActionLabels, resolution),
-      dismissActionFound: surfaceHasActionLabelled(surface, pageState.dismissActionLabels, resolution),
-      editComponentEvidence: editComponentEvidenceIn(surface, pageState, resolution),
-      unrelatedDialogsIgnored: surfaces.length - 1
+      editableFieldCount: surface.facts.editableFieldCount,
+      commitActionFound,
+      dismissActionFound,
+      editComponentEvidence,
+      unrelatedDialogsIgnored: surfaces.length - 1,
+      surfacesObserved: surfaces.length
     };
-    const qualifies =
-      evidence.editComponentEvidence.length > 0 ||
-      (evidence.editableFieldCount >= pageState.minimumEditableFields && evidence.commitActionFound);
-    if (qualifies) return { state: "record-edit", surface, evidence };
+
+    const matched = pageState.patterns.find((pattern) =>
+      patternQualifies(pattern, surface.facts, pageState.commitActionLabels)
+    );
+    if (matched) {
+      return {
+        state: "record-edit",
+        surface: surface.root,
+        evidence: { ...evidence, matchedPattern: { id: matched.id, strength: matched.strength } }
+      };
+    }
     if (evidence.editableFieldCount > best.editableFieldCount) best = evidence;
   }
 
-  const state: PageState = findEditAction(root, resolution) ? "record-view" : "unknown";
+  // Nothing qualified. Keep a neutral summary of every observed candidate —
+  // an unrelated dialog (an Aura error banner, a docked panel) is reported,
+  // never silently dropped, so a failure can be diagnosed instead of
+  // guessed at from an aggregate count alone.
+  best = {
+    ...best,
+    otherSurfaces: surfaces.map((surface) => ({
+      heading: surface.facts.heading,
+      roles: surface.facts.roles,
+      editableFieldCount: surface.facts.editableFieldCount
+    }))
+  };
+
+  const state: PageState =
+    best.editableFieldCount > 0 && best.commitActionFound
+      ? "unknown"
+      : findEditAction(root, resolution)
+        ? "record-view"
+        : "unknown";
   return { state, evidence: best };
 }
 
 function describeEvidence(evidence: PageStateEvidence): string {
-  return (
+  const base =
     `editable fields found: ${evidence.editableFieldCount}, ` +
     `Save action found: ${evidence.commitActionFound ? "yes" : "no"}, ` +
     `Cancel action found: ${evidence.dismissActionFound ? "yes" : "no"}, ` +
     `record-edit component evidence: ${
       evidence.editComponentEvidence.length ? evidence.editComponentEvidence.join(", ") : "none"
     }, ` +
-    `unrelated dialogs ignored: ${evidence.unrelatedDialogsIgnored}`
-  );
+    `surfaces observed: ${evidence.surfacesObserved}`;
+  const pattern = evidence.matchedPattern
+    ? ` — matched pattern "${evidence.matchedPattern.id}" (${evidence.matchedPattern.strength})`
+    : "";
+  const others =
+    evidence.otherSurfaces && evidence.otherSurfaces.length > 0
+      ? ` Other surfaces observed: ${evidence.otherSurfaces
+          .map(
+            (surface) =>
+              `${surface.heading ? `"${surface.heading}"` : "(unlabelled)"} [${
+                surface.roles.join(", ") || "no role"
+              }], ${surface.editableFieldCount} field(s)`
+          )
+          .join("; ")}.`
+      : "";
+  return `${base}${pattern}.${others}`;
 }
 
 function sleep(ms: number): Promise<void> {
