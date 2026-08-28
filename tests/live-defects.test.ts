@@ -314,6 +314,76 @@ describe("2 — verification waits for the application to settle", () => {
     expect(outcome.detail).toMatch(/still shows "Collaborate"/);
     expect(page.saves).toBe(0);
   });
+
+  it("stays honest about the platform's true current state, even when the write's own check was fooled by a stale reference", async () => {
+    // A live run showed setPicklistValue's own internal check reporting
+    // "Confirm" while the transaction's separate, freshly-resolved
+    // read-back still showed "Collaborate" — investigated as a possible
+    // bug in the read-back (preferring a fresh resolution over the
+    // write's own verified element), and disproven by this exact
+    // fixture: the write's own check reads from a single reference it
+    // captured before the click, so if the platform ever replaces that
+    // element (plausible — Stage also drives a visible Path indicator),
+    // the write's check would keep reporting success from an orphaned
+    // copy forever, no matter how stale. Reading fresh every time is
+    // what stays truthful. This is not a code bug to fix; it documents
+    // why "the write said it worked" and "the record actually holds it"
+    // are two different questions, and why only the second is trusted.
+    const root = mount(EDIT_SHELL(`<label for="s">*Stage</label><lightning-combobox id="s"></lightning-combobox>`));
+    const buildHost = (selected: string): Element => {
+      const el = document.createElement("lightning-combobox");
+      el.id = "s";
+      const outer = shadow(el, `<lightning-base-combobox></lightning-base-combobox>`);
+      const inner = shadow(
+        outer.querySelector("lightning-base-combobox")!,
+        `<button role="combobox" aria-expanded="false">${selected}</button><div class="dd"></div>`
+      );
+      const trigger = inner.querySelector("button")!;
+      const dropdown = inner.querySelector(".dd")!;
+      trigger.addEventListener("click", () => {
+        if (trigger.getAttribute("aria-expanded") === "true") {
+          dropdown.innerHTML = "";
+          trigger.setAttribute("aria-expanded", "false");
+          return;
+        }
+        trigger.setAttribute("aria-expanded", "true");
+        dropdown.innerHTML = `<div role="listbox">
+          <lightning-base-combobox-item role="option">Collaborate</lightning-base-combobox-item>
+          <lightning-base-combobox-item role="option">Confirm</lightning-base-combobox-item>
+        </div>`;
+        for (const item of dropdown.querySelectorAll('[role="option"]')) {
+          item.addEventListener("click", () => {
+            trigger.textContent = item.textContent ?? "";
+            dropdown.innerHTML = "";
+            trigger.setAttribute("aria-expanded", "false");
+            // The platform's own reactive re-render: this component gets
+            // replaced by a fresh instance a beat later, still reflecting
+            // the record's real (unchanged, unsaved) value.
+            setTimeout(() => el.replaceWith(buildHost("Collaborate")), 10);
+          });
+        }
+      });
+      return el;
+    };
+    root.querySelector("lightning-combobox")!.replaceWith(buildHost("Collaborate"));
+
+    const resolved = resolveSemanticTarget(root, STAGE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+
+    const outcome = await setFieldValue(resolved.target, "Confirm", "select", adapter());
+    // The write's own check reads its captured reference — genuinely
+    // "Confirm" at that moment, and still "Confirm" forever after, since
+    // that node is about to be orphaned.
+    expect(outcome.ok).toBe(true);
+
+    // Wait past the simulated re-render.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // A fresh, independent read — exactly what the transaction's own
+    // verification does — finds the truth instead.
+    const afterWrite = adapter()!.readFieldValue!(root, STAGE, adapter()!.resolutionPolicy!);
+    expect(afterWrite).toBe("Collaborate");
+  });
 });
 
 /* ------------------- 3. date control discovery ------------------- */
