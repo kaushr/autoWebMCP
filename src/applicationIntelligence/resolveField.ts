@@ -207,6 +207,19 @@ function observedMatchesFor(request: FieldResolutionRequest): ObservedFieldCandi
       ...(tenantObject?.fields.filter((field) => foldIdentity(field.label) === key) ?? []),
       ...(standardObject?.fields.filter((field) => foldIdentity(field.defaultLabel) === key) ?? [])
     ].map((field) => field.apiName);
+
+    // A person who has already said "this label is that field" has supplied
+    // identity, and identity is what this gate resolves names through.
+    // Without it, answering the question would ground the input and then
+    // canonicalizing it — the very next step — would rename it to something
+    // this gate could no longer reach, leaving a capability that is
+    // understood and unbindable.
+    //
+    // Still only ever interpretation, never invention: the human had to have
+    // demonstrated a control carrying this label for it to be considered.
+    const clarified = clarificationFor([label], request)?.apiName;
+    if (clarified) identities.push(clarified);
+
     return identities.some((apiName) => namesForApiName(apiName).includes(wanted));
   };
 

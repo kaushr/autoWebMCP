@@ -46,7 +46,8 @@ import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
 import type { CapabilityInputValues, SemanticCapability } from "./semantic/model";
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
-import { canonicalizeCapabilityInputs } from "./training/canonicalInputs";
+import type { InputCanonicalization } from "./training/canonicalInputs";
+import { describeWithdrawnConfirmation, groundCapability } from "./training/semanticGrounding";
 import { emptyTenantIntelligence, tenantIntelligenceFrom } from "./applicationIntelligence/tenant";
 import { mergeTenantSnapshots, type TenantFactConflict } from "./applicationIntelligence/observedTenant";
 import { observedTenantFromBinding } from "./training/tenantObservations";
@@ -98,6 +99,23 @@ let tenantConflicts: TenantFactConflict[] = [];
  * is not the vendor documenting it.
  */
 let fieldClarifications: FieldClarification[] = [];
+
+/**
+ * The pre-confirmation semantic grounding pass.
+ *
+ * `groundingNeeds` are questions whose answers can still change the
+ * agent-facing contract, so they are asked while the contract is still
+ * open. `groundingRenames` record where a canonical name replaced the
+ * label a human demonstrated, because they are about to confirm a contract
+ * whose parameter names differ from what they saw on screen.
+ * `groundingNoncanonical` are inputs whose names remain this org's
+ * vocabulary — usable, and honestly less portable than a grounded one.
+ */
+let groundingNeeds: EpistemicNeed[] = [];
+let groundingRenames: InputCanonicalization[] = [];
+let groundingNoncanonical: string[] = [];
+/** Inputs nothing could ground. Different from noncanonical: these cannot execute at all. */
+let groundingUnresolved: string[] = [];
 
 /**
  * Value domains read from the live application, keyed by capability input.
@@ -314,7 +332,7 @@ function describeInspection(inspection: DomainInspection): string {
         : read;
   }
 }
-let clarificationDraft = "";
+let clarificationDraft: Record<string, string> = {};
 
 export function useTenantIntelligence(source: TenantIntelligenceSource): void {
   tenantIntelligence = source;
@@ -450,7 +468,11 @@ function clearExecutionState(): void {
   validationStatus = "";
   browserBindingCandidate = undefined;
   fieldClarifications = [];
-  clarificationDraft = "";
+  clarificationDraft = {};
+  groundingNeeds = [];
+  groundingRenames = [];
+  groundingNoncanonical = [];
+  groundingUnresolved = [];
   liveValueDomains = {};
   liveDomainProblems = {};
   liveDomainRestorationFailed = false;
@@ -902,6 +924,42 @@ function runBrowserBindingProposal(): void {
 }
 
 /**
+ * Grounds the proposed capability and settles its agent-facing names,
+ * BEFORE a human is asked to confirm anything.
+ *
+ * The lifecycle defect this exists to fix: canonicalization used to run
+ * once, at proposal time, on whatever knowledge happened to exist then.
+ * Field identity, though, could arrive later — from a human answering
+ * which field a label meant — and by then the contract had been confirmed.
+ * Renaming it afterwards would publish something the human never approved;
+ * not renaming it would publish one org's vocabulary forever. The fix is
+ * ordering, not a new mechanism: resolve identity while the contract is
+ * still open.
+ *
+ * DOM-free by construction. `canonicalizeCapabilityInputs` and
+ * `resolveFieldMapping` are pure functions over the trace and what the
+ * knowledge layers hold; nothing here resolves a live control, opens a
+ * page, or creates execution state. Semantic identity and a DOM locator
+ * stay different things — only the first can change what an agent sees,
+ * and the second is still re-resolved fresh at execution time.
+ */
+function runSemanticGrounding(): void {
+  if (!candidate || !selectedTrace) return;
+  const intelligence = {
+    ...applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence),
+    clarifications: fieldClarifications
+  };
+
+  const grounded = groundCapability(candidate, selectedTrace, intelligence);
+  candidate = grounded.capability;
+  groundingNeeds = grounded.needs;
+  groundingRenames = grounded.renames;
+  groundingNoncanonical = grounded.noncanonical;
+  groundingUnresolved = grounded.unresolved;
+  if (grounded.confirmationWithdrawn) semanticizerStatus = describeWithdrawnConfirmation(grounded.renames);
+}
+
+/**
  * Records a human answer and immediately retries resolution.
  *
  * The answer is kept as what it is — human-supplied, scoped to this
@@ -927,8 +985,14 @@ function recordClarification(observedLabel: string, objectApiName: string, apiNa
       scope: "capability"
     }
   ];
-  clarificationDraft = "";
-  runBrowserBindingProposal();
+  clarificationDraft = {};
+  // Grounding first: the answer may settle a field identity, and identity
+  // decides the contract's own parameter names. Only once that has settled
+  // is there any point re-deriving how to execute it — and a binding is
+  // re-proposed only if one already existed, so answering a question before
+  // confirmation never manufactures execution state.
+  runSemanticGrounding();
+  if (browserBindingCandidate) runBrowserBindingProposal();
   render();
 }
 
@@ -940,7 +1004,7 @@ function recordClarification(observedLabel: string, objectApiName: string, apiNa
  * fact would unblock it. Suggestions are shown as suggestions, with where
  * each came from, and confirming one is a deliberate act.
  */
-function renderEpistemicNeed(need: EpistemicNeed, needIndex: number): string {
+function renderEpistemicNeed(need: EpistemicNeed, needIndex: number, source: "grounding" | "binding"): string {
   const heading =
     need.status === "needs-information"
       ? "Needs information"
@@ -966,6 +1030,7 @@ function renderEpistemicNeed(need: EpistemicNeed, needIndex: number): string {
            <button type="button" class="secondary" data-accept-suggestion="${index}" data-need-index="${needIndex}"
              data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
              data-need-object="${escapeHtml(need.knownEvidence.objectApiName ?? "")}"
+             data-need-source="${source}"
            >This one</button></li>`
     )
     .join("");
@@ -976,16 +1041,22 @@ function renderEpistemicNeed(need: EpistemicNeed, needIndex: number): string {
     ? `<ul class="need-path">${(need.resolutionPath ?? []).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>`
     : "";
 
+  // Identified per need, not by one shared id. Two unanswerable fields in
+  // one capability used to render two elements carrying the same id, so
+  // `querySelector` found only the first and the second question could not
+  // be answered at all. Grounding now asks these before confirmation, which
+  // makes more than one of them entirely ordinary.
+  const answerId = `clarification-answer-${source}-${needIndex}`;
   const answerBox =
     need.blocking
       ? `<div class="need-answer">
           <label>${suggestions ? "Or another field API name" : "Field API name"}
-            <input id="clarification-answer" value="${escapeHtml(clarificationDraft)}"
+            <input id="${answerId}" class="clarification-answer" value="${escapeHtml(clarificationDraft[answerId] ?? "")}"
               placeholder="e.g. Implementation_Region__c"
               data-need-label="${escapeHtml(need.knownEvidence.observedLabel ?? "")}"
               data-need-object="${escapeHtml(need.knownEvidence.objectApiName ?? "")}" />
           </label>
-          <button type="button" id="submit-clarification" class="secondary">Use this API name</button>
+          <button type="button" class="secondary submit-clarification" data-answer-id="${answerId}">Use this API name</button>
         </div>`
       : "";
 
@@ -1003,7 +1074,61 @@ function renderEpistemicNeed(need: EpistemicNeed, needIndex: number): string {
 function renderEpistemicNeeds(): string {
   const needs = browserBindingCandidate?.proposal.needs ?? [];
   if (needs.length === 0) return "";
-  return needs.map((need, index) => renderEpistemicNeed(need, index)).join("");
+  return needs.map((need, index) => renderEpistemicNeed(need, index, "binding")).join("");
+}
+
+/**
+ * What grounding settled, and what it still needs, shown WHERE THE HUMAN
+ * CONFIRMS — not later, next to execution.
+ *
+ * These three things all bear on the same decision. A rename explains why
+ * a parameter is called `stage` when the screen said "Sales Stage". An
+ * open question is one whose answer would change that name, so it belongs
+ * before the button and not after it. A name that stayed tenant-derived is
+ * a property of the contract being approved, so it is said plainly rather
+ * than left for someone to infer from its absence.
+ *
+ * Suppressed once a binding exists: from then on the same questions are
+ * the execution stage's, and rendering both would put two answer boxes on
+ * one page.
+ */
+function renderSemanticGrounding(): string {
+  if (browserBindingCandidate) return "";
+  const renames = groundingRenames.length
+    ? `<ul class="reasons">${groundingRenames
+        .map((rename) => `<li>${escapeHtml(rename.detail)}</li>`)
+        .join("")}</ul>`
+    : "";
+  // Two different situations, deliberately worded differently. One
+  // executes and travels badly; the other does not execute. Calling both
+  // "not canonical" would tell someone their capability merely lacks
+  // portability when in fact it will not bind.
+  const noncanonical = groundingNoncanonical.length
+    ? `<p class="ambiguity">${escapeHtml(
+        `${groundingNoncanonical.map((name) => `"${name}"`).join(", ")} ` +
+          `${groundingNoncanonical.length === 1 ? "is named" : "are named"} after what this org calls the field, because ` +
+          "the vendor's own model has no name for it. This works and will execute; its contract is specific to this " +
+          "org rather than portable to another running the same application."
+      )}</p>`
+    : "";
+  const unresolved = groundingUnresolved.length
+    ? `<p class="ambiguity">${escapeHtml(
+        `${groundingUnresolved.map((name) => `"${name}"`).join(", ")} ` +
+          `${groundingUnresolved.length === 1 ? "matches nothing" : "match nothing"} that was demonstrated in this ` +
+          "recording, so no execution path can be built for it. Rename the parameter to the field that was actually " +
+          "used, remove it, or record the workflow again."
+      )}</p>`
+    : "";
+  const questions = groundingNeeds.map((need, index) => renderEpistemicNeed(need, index, "grounding")).join("");
+  if (!renames && !noncanonical && !unresolved && !questions) return "";
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Semantic grounding</p>
+    ${questions}
+    ${renames}
+    ${noncanonical}
+    ${unresolved}
+  </div>`;
 }
 
 /** One typed control per field, per the canonical input contract. */
@@ -1665,6 +1790,7 @@ function renderTrainingStudio(): string {
           )
           .join("")}</div>
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
+        ${renderSemanticGrounding()}
         <div class="studio-actions">
           <button type="submit">Save changes</button>
           ${confirmed ? "" : `<button type="button" id="confirm-capability">Confirm capability</button>`}
@@ -1812,29 +1938,26 @@ function render(): void {
       // story; whatever the previous candidate had is not this one's.
       clearExecutionState();
 
-      // The model named the inputs after the labels this org happens to
-      // use. Before a human confirms the contract, deterministically move
-      // any grounded input onto the vendor's own vocabulary, so what gets
-      // published is the same tool in every org running this application.
-      const canonical = canonicalizeCapabilityInputs(
-        proposed,
-        selectedTrace,
-        applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence)
-      );
       candidate = {
-        ...canonical.capability,
+        ...proposed,
         provenance: {
-          ...canonical.capability.provenance,
+          ...proposed.provenance,
           sourceApplication: sourceApplicationFor(
             selectedTrace.application.platform,
             selectedTrace.application.host
           )
         }
       };
-      // Renames are shown, never silent: the human is confirming a contract
-      // whose input names differ from the labels they just demonstrated.
-      ambiguities = [...run.ambiguities, ...canonical.renames.map((rename) => rename.detail)];
-      traceStatus = "Candidate ready for human review.";
+      // The model named the inputs after the labels this org happens to
+      // use. Grounding settles what those labels actually are, and moves
+      // any input the application's own model identifies onto the vendor's
+      // vocabulary — all of it before a human confirms, because these names
+      // are what an agent will see.
+      runSemanticGrounding();
+      ambiguities = run.ambiguities;
+      traceStatus = groundingNeeds.length
+        ? "Candidate ready for review. Answer the outstanding question first — it decides the parameter names."
+        : "Candidate ready for human review.";
       semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
     } catch (error) {
       traceStatus = describeActionFailure("Candidate generation", error);
@@ -2043,27 +2166,30 @@ function render(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-accept-suggestion]")) {
     button.addEventListener("click", () => {
       const index = Number(button.dataset.acceptSuggestion);
-      const need = (browserBindingCandidate?.proposal.needs ?? [])[Number(button.dataset.needIndex)];
+      const from =
+        button.dataset.needSource === "grounding" ? groundingNeeds : (browserBindingCandidate?.proposal.needs ?? []);
+      const need = from[Number(button.dataset.needIndex)];
       const suggestion = need?.suggestedAnswers?.[index];
       if (!suggestion) return;
       recordClarification(button.dataset.needLabel ?? "", button.dataset.needObject ?? "", suggestion.value);
     });
   }
 
-  const clarificationInput = document.querySelector<HTMLInputElement>("#clarification-answer");
-  clarificationInput?.addEventListener("input", () => {
-    // Held without re-rendering: render() rebuilds innerHTML and would take
-    // the focus out of the field mid-answer.
-    clarificationDraft = clarificationInput.value;
-  });
-  document.querySelector<HTMLButtonElement>("#submit-clarification")?.addEventListener("click", () => {
-    if (!clarificationInput) return;
-    recordClarification(
-      clarificationInput.dataset.needLabel ?? "",
-      clarificationInput.dataset.needObject ?? "",
-      clarificationInput.value
-    );
-  });
+  for (const input of document.querySelectorAll<HTMLInputElement>("input.clarification-answer")) {
+    input.addEventListener("input", () => {
+      // Held without re-rendering: render() rebuilds innerHTML and would
+      // take the focus out of the field mid-answer. Keyed per question, so
+      // typing an answer to one does not appear inside another.
+      clarificationDraft = { ...clarificationDraft, [input.id]: input.value };
+    });
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button.submit-clarification")) {
+    button.addEventListener("click", () => {
+      const input = document.querySelector<HTMLInputElement>(`#${CSS.escape(button.dataset.answerId ?? "")}`);
+      if (!input) return;
+      recordClarification(input.dataset.needLabel ?? "", input.dataset.needObject ?? "", input.value);
+    });
+  }
 
   document.querySelector<HTMLButtonElement>("#suggest-browser-binding")?.addEventListener("click", () =>
     void withBusy("suggest-binding", async () => {
