@@ -46,6 +46,10 @@ import {
 declare global {
   interface Window {
     __autoWebMcpCapture?: { stop: () => CaptureFlush };
+    /** Set once the message listener below is installed, so re-injection cannot add a second one. */
+    __autoWebMcpMessaging?: true;
+    /** Set while a read-only inspection is running, so a second one cannot start on top of it. */
+    __autoWebMcpInspecting?: true;
   }
 }
 
@@ -481,6 +485,20 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
  * — there is no business change here for a person to authorize.
  */
 async function runInspectRequest(request: BrowserBindingInspectRequest): Promise<BrowserBindingInspectResponse> {
+  // An inspection is read-only but not side-effect free: it enters edit
+  // mode, opens a control, and puts both back. Two of them on one record
+  // interleave those steps, so the second is refused rather than allowed to
+  // dismiss a modal the first is still reading.
+  if (window.__autoWebMcpInspecting) {
+    return {
+      ok: false,
+      reason: "introspection-failed",
+      error:
+        "An inspection of this page is already running. Wait for it to finish before starting another — two at " +
+        "once would interfere with each other on the same record."
+    };
+  }
+  window.__autoWebMcpInspecting = true;
   console.debug("[AutoWebMCP] content: inspecting value domains on", window.location.href);
   try {
     // Bounded on purpose. Left to their defaults these waits add up to
@@ -512,9 +530,33 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
       reason: "introspection-failed",
       error: error instanceof Error ? error.message : String(error)
     };
+  } finally {
+    // Released whatever happened: a failed inspection that never cleared
+    // this would lock the page out of every later attempt.
+    window.__autoWebMcpInspecting = undefined;
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Installed exactly once per document.
+ *
+ * The service worker injects this file before every operation, and each
+ * injection used to register another listener. One `inspect:domains`
+ * message then ran N inspections at once — observed live as five
+ * completions 400ms apart from a single request — and since an inspection
+ * enters edit mode, opens a control, dismisses it, and cancels the edit,
+ * those N runs were competing over the same record: one dismissing the
+ * modal another was still reading.
+ *
+ * The capture probe was already guarded this way. The listener was not,
+ * which is what made re-injection look idempotent when it was not.
+ * ------------------------------------------------------------------ */
+if (!window.__autoWebMcpMessaging) {
+  window.__autoWebMcpMessaging = true;
+  installMessageListener();
+}
+
+function installMessageListener(): void {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const request = message as ToContentMessage;
   if (request.type === "capture:begin") {
@@ -539,3 +581,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return undefined;
 });
+}
