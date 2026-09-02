@@ -159,3 +159,85 @@ describe("the org's ordering is established from the whole form", () => {
     expect((document.querySelector("#cd") as HTMLInputElement).value).toBe("3/25/2027");
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * The date-picker trigger, from the shape a live org actually reports.
+ *
+ * A DOM probe of a real Opportunity edit form settled what had been
+ * guesswork: the trigger sits in the input's immediate parent, carries NO
+ * `aria-label`, and its `title` is "Select a date for Close Date". The
+ * selector looked for the words "date picker", which Salesforce never
+ * says, so every ambiguous date fell through to a failure that read as if
+ * no trigger existed.
+ *
+ * The same probe showed why widening the search would be a bug: the form
+ * carries a picker for every date field it renders.
+ * ------------------------------------------------------------------ */
+
+/** The live shape: no native date input, no mirrored value, picker only. */
+function mountPickerForm(): HTMLElement {
+  document.body.innerHTML = `
+    <div role="dialog" aria-modal="true" id="edit-dialog">
+      <records-record-layout-section>
+        <div class="slds-form-element" id="close-date-field">
+          <label for="cd">Close Date</label>
+          <div class="slds-form-element__control">
+            <span id="cd" role="textbox" aria-label="Close Date"></span>
+            <button title="Select a date for Close Date" class="slds-button_icon" id="cd-trigger"></button>
+          </div>
+        </div>
+        <div class="slds-form-element" id="start-date-field">
+          <label for="sd">Project Start Date</label>
+          <div class="slds-form-element__control">
+            <span id="sd" role="textbox" aria-label="Project Start Date"></span>
+            <button title="Select a date for Project Start Date" id="sd-trigger"></button>
+          </div>
+        </div>
+      </records-record-layout-section>
+      <input aria-label="Amount" value="50000" />
+      <button id="save">Save</button><button>Cancel</button>
+    </div>
+  `;
+  const surface = document.createElement("div");
+  surface.setAttribute("role", "grid");
+  surface.hidden = true;
+  surface.innerHTML = `<h2 role="heading">March 2027</h2>
+    <div role="gridcell" aria-label="Monday, March 1, 2027" id="day-1"></div>`;
+  document.body.appendChild(surface);
+
+  for (const id of ["cd-trigger", "sd-trigger"]) {
+    document.querySelector(`#${id}`)!.addEventListener("click", () => {
+      surface.hidden = false;
+      surface.setAttribute("data-opened-by", id);
+    });
+  }
+  return document.body;
+}
+
+describe("the date-picker trigger is found by what the platform actually calls it", () => {
+  it("resolves a trigger titled \"Select a date for Close Date\"", async () => {
+    const root = mountPickerForm();
+    const { resolveSemanticTarget } = await import("../src/binding/browserExecution/engine");
+    const resolved = resolveSemanticTarget(root, { role: "field", label: "Close Date" }, adapter());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    const { setFieldValue } = await import("../src/binding/browserExecution/engine");
+    await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+
+    // It opened THIS field's calendar, not the one next to it.
+    const surface = document.querySelector('[role="grid"]')!;
+    expect(surface.getAttribute("data-opened-by")).toBe("cd-trigger");
+  });
+
+  it("never reaches a neighbouring field's picker", async () => {
+    const root = mountPickerForm();
+    const { resolveSemanticTarget, setFieldValue } = await import("../src/binding/browserExecution/engine");
+    const resolved = resolveSemanticTarget(root, { role: "field", label: "Project Start Date" }, adapter());
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+    expect(document.querySelector('[role="grid"]')!.getAttribute("data-opened-by")).toBe("sd-trigger");
+  });
+});

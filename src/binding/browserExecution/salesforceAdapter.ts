@@ -73,8 +73,9 @@ import {
  * ------------------------------------------------------------------ */
 
 const SLDS_VALIDATION_SELECTOR = '[role="alert"], [aria-invalid="true"], .slds-has-error, .error';
-const DATE_PICKER_TRIGGER_SELECTOR =
-  'button[aria-label*="date picker" i], button[aria-label*="calendar" i], button[title*="date picker" i]';
+const DATE_PICKER_TRIGGER_SELECTOR = 'button, [role="button"]';
+/** Words that mark a control as the one that opens a calendar. English-only, and knowingly so. */
+const DATE_TRIGGER_WORDS = ["date", "calendar"];
 const DATE_PICKER_SURFACE_SELECTOR = '[role="dialog"], [role="application"], [role="grid"]';
 const MONTH_NAV_MAX_CLICKS = 24;
 
@@ -167,21 +168,75 @@ function currentMonthOf(surface: Element, policy: ResolutionPolicy): { year: num
  * from screen position), and clicks the day cell whose own accessible label
  * names the target date.
  */
+/** A control's own name, from either the accessibility tree or the tooltip Lightning actually uses. */
+function triggerName(element: Element): string {
+  return normalizeLabel(accessibleName(element) ?? element.getAttribute("title") ?? "");
+}
+
+/**
+ * The control that opens this field's calendar.
+ *
+ * Scope is deliberately tight — the resolved element and its immediate
+ * parent — and widening it would be a bug, not an improvement. A live
+ * Opportunity edit form carries a picker for every date field it shows,
+ * and a search that climbed even a few levels found triggers titled
+ * "Select a date for Project Start Date" and "Select a date for Project
+ * End Date" sitting beside the one we want. Reaching further would set the
+ * wrong field's date.
+ *
+ * Within that scope the strongest signal is that the control names the
+ * FIELD: Lightning titles it "Select a date for Close Date". Matching on
+ * the field's own label carries no assumption about the surrounding
+ * phrasing, which a live run proved was the actual defect — the selector
+ * looked for the words "date picker", and Salesforce never says them.
+ */
+function findDatePickerTrigger(
+  resolved: ResolvedTarget,
+  fieldLabel: string,
+  policy: ResolutionPolicy
+): HTMLElement | undefined {
+  const scopes = [resolved.element, resolved.element.parentElement].filter(
+    (scope): scope is Element => scope instanceof Element
+  );
+  const candidates: HTMLElement[] = [];
+  for (const scope of scopes) {
+    for (const element of queryComposedTree(scope, DATE_PICKER_TRIGGER_SELECTOR, policy)) {
+      if (element instanceof HTMLElement && isVisible(element) && !candidates.includes(element)) {
+        candidates.push(element);
+      }
+    }
+  }
+  if (candidates.length === 0) return undefined;
+
+  // 1. It names this field. Strongest, and independent of how the platform
+  //    phrases the rest of the label.
+  const wanted = normalizeLabel(fieldLabel.replace(/^\*/, ""));
+  const named = wanted ? candidates.find((element) => triggerName(element).includes(wanted)) : undefined;
+  if (named) return named;
+
+  // 2. It says what it opens.
+  const dateish = candidates.find((element) => {
+    const name = triggerName(element);
+    return DATE_TRIGGER_WORDS.some((word) => name.includes(word));
+  });
+  if (dateish) return dateish;
+
+  // 3. One control inside a date field's own container is that field's
+  //    picker. Taken only when it is unambiguous — several unnamed controls
+  //    are not guessed between, and the caller reports the failure.
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 function setDateViaPicker(
   resolved: ResolvedTarget,
   target: { year: number; month: number; day: number },
   policy: ResolutionPolicy
 ): FieldWriteOutcome {
   const root: ParentNode = resolved.element.ownerDocument ?? resolved.element;
-  // The trigger may be in the host's own subtree, inside its shadow root,
-  // or a sibling in the enclosing form — one composed search covers all
-  // three without three separate lookups that each miss a different case.
-  const trigger =
-    queryComposedTreeFirst(resolved.element, DATE_PICKER_TRIGGER_SELECTOR, policy) ??
-    (resolved.element.parentElement
-      ? queryComposedTreeFirst(resolved.element.parentElement, DATE_PICKER_TRIGGER_SELECTOR, policy)
-      : undefined);
-  if (!(trigger instanceof HTMLElement)) {
+  // The resolved element IS the field, so its own accessible name is the
+  // field's label — no need to carry one down from the binding.
+  const trigger = findDatePickerTrigger(resolved, accessibleName(resolved.element) ?? "", policy);
+  if (!trigger) {
     return { ok: false, detail: "No date-picker trigger control was found near the field." };
   }
   trigger.click();
