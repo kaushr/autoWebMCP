@@ -107,6 +107,13 @@ function materializeOptions(
   field: TenantFieldSchema
 ): Pick<ResolvedApplicationField, "options" | "optionsSource" | "domain"> {
   if (!field.options || field.options.length === 0) return {};
+  // An observation stays an observation. Values read from a running control
+  // describe this record, this user, and this moment; values from metadata
+  // describe the org's configuration. Reporting the first as the second
+  // would make a reading that expires look like a fact that does not.
+  if (field.source === "observed-live") {
+    return { options: [...field.options], optionsSource: "live-application-state", domain: "known-live" };
+  }
   return { options: [...field.options], optionsSource: "tenant", domain: "known-tenant" };
 }
 
@@ -159,12 +166,48 @@ function observedMatchesFor(request: FieldResolutionRequest): ObservedFieldCandi
   const tenantObject = tenantObjectFor(request);
   const standardObject = standardObjectFor(request);
 
-  const identifierMeansThisInput = (identifier: string): boolean => {
-    const key = foldIdentity(identifier);
+  /**
+   * Every name by which a capability input may legitimately refer to one
+   * field identity.
+   *
+   * The vendor label is in here, and that is the whole point: a tenant that
+   * renames Stage to "Sales Stage" has changed its own vocabulary, not the
+   * field. An input named for the vendor's concept must still reach it, or
+   * the agent contract silently inherits one org's configuration — see
+   * `canonicalInputs.ts` for the other half of that invariant.
+   *
+   * The tenant's own label stays in the set too, so a capability taught
+   * where no knowledge layer recognizes the field keeps working exactly as
+   * before.
+   */
+  const namesForApiName = (apiName: string): string[] => {
+    const key = foldIdentity(apiName);
+    const names = [key];
     const tenantField = tenantObject?.fields.find((field) => foldIdentity(field.apiName) === key);
-    if (tenantField) return foldIdentity(tenantField.label) === wanted;
+    if (tenantField) names.push(foldIdentity(tenantField.label));
     const standardField = standardObject?.fields.find((field) => foldIdentity(field.apiName) === key);
-    return standardField ? foldIdentity(standardField.defaultLabel) === wanted : false;
+    if (standardField) names.push(foldIdentity(standardField.defaultLabel));
+    return names;
+  };
+
+  const identifierMeansThisInput = (identifier: string): boolean =>
+    namesForApiName(identifier).includes(wanted);
+
+  /**
+   * A label reaches the input through the field it names.
+   *
+   * Only a field whose label this observation actually carried is
+   * consulted, so knowledge still explains an interaction and never
+   * invents one: the human had to have touched a control labelled this way
+   * for any of it to be reachable at all.
+   */
+  const labelMeansThisInput = (label: string): boolean => {
+    const key = foldIdentity(label);
+    const identities = [
+      ...(tenantObject?.fields.filter((field) => foldIdentity(field.label) === key) ?? []),
+      ...(standardObject?.fields.filter((field) => foldIdentity(field.defaultLabel) === key) ?? [])
+    ].map((field) => field.apiName);
+    return identities.some((apiName) => namesForApiName(apiName).includes(wanted));
   };
 
   return request.observed.filter(
@@ -172,7 +215,8 @@ function observedMatchesFor(request: FieldResolutionRequest): ObservedFieldCandi
       (candidate.applicationIdentifier
         ? foldIdentity(candidate.applicationIdentifier) === wanted ||
           identifierMeansThisInput(candidate.applicationIdentifier)
-        : false) || (candidate.label ? foldIdentity(candidate.label) === wanted : false)
+        : false) ||
+      (candidate.label ? foldIdentity(candidate.label) === wanted || labelMeansThisInput(candidate.label) : false)
   );
 }
 

@@ -71,6 +71,15 @@ export interface StandardApplicationSchema {
   objects: StandardObjectSchema[];
 }
 
+/** How one tenant fact was obtained. Different sources have different lifetimes. */
+export type TenantFactSource =
+  /** The org's own metadata described it. Authoritative about configuration. */
+  | "tenant-metadata"
+  /** Read from the running application. True for this record, user, and moment. */
+  | "observed-live"
+  /** A person told us. Scoped local knowledge, never promoted. */
+  | "human-confirmed";
+
 /**
  * One field as a particular tenant has it configured.
  *
@@ -83,6 +92,18 @@ export interface TenantFieldSchema {
   apiName: string;
   label: string;
   type: ApplicationFieldType;
+  /**
+   * How this org's facts about the field were obtained.
+   *
+   * Absent means metadata, which is what every snapshot meant before
+   * anything else could produce one. It matters downstream because an
+   * observation and a describe are not interchangeable: metadata states
+   * configuration, while a live reading states what one control offered
+   * one user at one moment, and only the second goes stale.
+   */
+  source?: TenantFactSource;
+  /** When a live reading was taken. Meaningless for metadata, which is dated by the snapshot. */
+  observedAt?: string;
   /**
    * The configured value domain, when metadata exposed one.
    *

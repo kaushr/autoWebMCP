@@ -46,7 +46,10 @@ import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
 import type { CapabilityInputValues, SemanticCapability } from "./semantic/model";
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
-import { emptyTenantIntelligence } from "./applicationIntelligence/tenant";
+import { canonicalizeCapabilityInputs } from "./training/canonicalInputs";
+import { emptyTenantIntelligence, tenantIntelligenceFrom } from "./applicationIntelligence/tenant";
+import { mergeTenantSnapshots, type TenantFactConflict } from "./applicationIntelligence/observedTenant";
+import { observedTenantFromBinding } from "./training/tenantObservations";
 import type { DomainInspection } from "./binding/browserExecution/execute";
 import type { ExecutionResult } from "./binding/browserExecution/result";
 import { assessExecutionReadiness } from "./training/executionReadiness";
@@ -61,7 +64,12 @@ import {
   type OperationRegistry,
   type OperationState
 } from "./training/operationState";
-import type { EpistemicNeed, FieldClarification, TenantIntelligenceSource } from "./applicationIntelligence/model";
+import type {
+  EpistemicNeed,
+  FieldClarification,
+  TenantIntelligenceSnapshot,
+  TenantIntelligenceSource
+} from "./applicationIntelligence/model";
 
 /**
  * What this installation knows about the customer's own org.
@@ -73,6 +81,15 @@ import type { EpistemicNeed, FieldClarification, TenantIntelligenceSource } from
  * same seam, so nothing else changes when one arrives.
  */
 let tenantIntelligence: TenantIntelligenceSource = emptyTenantIntelligence();
+/**
+ * The tenant snapshot currently installed, kept alongside the source so a
+ * later observation can be merged into it rather than replacing it.
+ * Undefined means nothing is known about this org yet, which is the honest
+ * starting state of every session.
+ */
+let installedTenantSnapshot: TenantIntelligenceSnapshot | undefined;
+/** Disagreements between installed metadata and what the application showed. Surfaced, never resolved silently. */
+let tenantConflicts: TenantFactConflict[] = [];
 
 /**
  * Facts a human supplied when neither tenant nor standard knowledge could
@@ -209,15 +226,41 @@ async function acquireValueDomains(): Promise<void> {
     liveDomainSources = Object.fromEntries(
       Object.keys(acquisition.inspection.options).map((name) => [name, "live-application-state" as const])
     );
+
+    // What the application just told us about this org is tenant knowledge,
+    // so it is kept as tenant knowledge — dated, marked `observed-live`, and
+    // available to every later resolution — instead of dying in the variable
+    // above. Metadata, if any is ever installed, still governs identity and
+    // type; a reading only governs the value domain it actually read.
+    const observed = observedTenantFromBinding(binding, acquisition.inspection.options, new Date().toISOString());
+    if (observed) {
+      const merged = mergeTenantSnapshots(installedTenantSnapshot, observed);
+      installedTenantSnapshot = merged.snapshot;
+      tenantConflicts = merged.conflicts;
+      useTenantIntelligence(tenantIntelligenceFrom(merged.snapshot));
+      domainAcquisitionTrail = [
+        ...domainAcquisitionTrail,
+        `Tenant intelligence updated from the live application (${observed.objects[0]?.fields.length ?? 0} field(s), observed-live).`,
+        ...merged.conflicts.map((conflict) => `Conflict: ${conflict.detail}`)
+      ];
+    }
     liveDomainRestorationFailed =
       acquisition.inspection.restoration.page === "unproven" ||
       acquisition.inspection.restoration.page === "failed" ||
       acquisition.inspection.restoration.control === "unproven";
     domainAcquisitionTrail = [...domainAcquisitionTrail, ...acquisition.inspection.evidence];
 
+    // A disagreement between what this org's metadata says and what its
+    // application just showed is worth a person's attention: it usually
+    // means the metadata predates a change. It is never resolved silently.
+    const conflictNote =
+      tenantConflicts.length > 0
+        ? ` ${tenantConflicts.length} tenant fact${tenantConflicts.length === 1 ? "" : "s"} disagreed with installed ` +
+          `org metadata — see Admin / Debug. ${tenantConflicts.map((conflict) => conflict.detail).join(" ")}`
+        : "";
     return {
-      message: describeInspection(acquisition.inspection),
-      ...(liveDomainRestorationFailed ? { warning: true } : {})
+      message: `${describeInspection(acquisition.inspection)}${conflictNote}`,
+      ...(liveDomainRestorationFailed || tenantConflicts.length > 0 ? { warning: true } : {})
     };
   });
 }
@@ -1768,17 +1811,29 @@ function render(): void {
       // A freshly proposed capability starts its own execution/validation
       // story; whatever the previous candidate had is not this one's.
       clearExecutionState();
+
+      // The model named the inputs after the labels this org happens to
+      // use. Before a human confirms the contract, deterministically move
+      // any grounded input onto the vendor's own vocabulary, so what gets
+      // published is the same tool in every org running this application.
+      const canonical = canonicalizeCapabilityInputs(
+        proposed,
+        selectedTrace,
+        applicationIntelligenceForPlatform(selectedTrace.application.platform, tenantIntelligence)
+      );
       candidate = {
-        ...proposed,
+        ...canonical.capability,
         provenance: {
-          ...proposed.provenance,
+          ...canonical.capability.provenance,
           sourceApplication: sourceApplicationFor(
             selectedTrace.application.platform,
             selectedTrace.application.host
           )
         }
       };
-      ambiguities = run.ambiguities;
+      // Renames are shown, never silent: the human is confirming a contract
+      // whose input names differ from the labels they just demonstrated.
+      ambiguities = [...run.ambiguities, ...canonical.renames.map((rename) => rename.detail)];
       traceStatus = "Candidate ready for human review.";
       semanticizerStatus = `Candidate proposed from extension trace ${selectedTrace.sessionId}.`;
     } catch (error) {
