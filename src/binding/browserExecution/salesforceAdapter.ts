@@ -8,7 +8,8 @@ import {
   type FieldWriteOutcome,
   type OptionReadOutcome,
   type PlatformResolverAdapter,
-  type ResolvedTarget
+  type ResolvedTarget,
+  type WriteContext
 } from "./engine";
 import {
   COMBOBOX_TRIGGER_SELECTOR,
@@ -23,6 +24,7 @@ import {
 } from "./composedTree";
 import { observeSurfaces, type SurfaceObservation } from "./surfaceObservation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
+import { canTypeDisplayDate, formatDisplayDate } from "./dateRepresentation";
 import {
   DEFAULT_PAGE_STATE_POLICY,
   type EditRestoration,
@@ -693,7 +695,8 @@ function describeResolvedTarget(resolved: ResolvedTarget, policy: ResolutionPoli
 async function setDateValue(
   resolved: ResolvedTarget,
   value: string,
-  policy: ResolutionPolicy
+  policy: ResolutionPolicy,
+  context?: WriteContext
 ): Promise<FieldWriteOutcome> {
   const element = resolved.element;
   // Each strategy records why it declined, so a failure explains the whole
@@ -740,10 +743,31 @@ async function setDateValue(
   if (!anyNative) attempts.push("any native input: none found in the composed subtree");
   if (anyNative) {
     const parsed = parseIsoDate(value);
-    const formatted = parsed ? `${parsed.month}/${parsed.day}/${parsed.year}` : value;
-    writeNativeInput(anyNative, formatted);
-    await settle();
-    return { ok: true, detail: "Value set via the field's own text input, in the display format it expects." };
+    // Typing a display-format date requires knowing which component this
+    // org puts first. Without that, `3/4/2027` is two different days and
+    // typing it blind risks a silently wrong record — so this strategy
+    // declines and the ordering-independent picker below handles it. A
+    // date whose day is above 12 is safe either way: a day-first org
+    // rejects month 15 outright rather than saving the wrong day.
+    if (parsed && !canTypeDisplayDate(parsed, context?.dateOrder)) {
+      attempts.push(
+        "display-format text input: declined — this org's date ordering is not established and the value is ambiguous"
+      );
+    } else {
+      const formatted = parsed
+        ? formatDisplayDate(parsed, context?.dateOrder ?? "month-first")
+        : value;
+      writeNativeInput(anyNative, formatted);
+      await settle();
+      return {
+        ok: true,
+        detail:
+          "Value set via the field's own text input, in the display format it expects" +
+          (context?.dateOrder
+            ? ` (${context.dateOrder}, as established for this org).`
+            : "; the value is unambiguous, so its ordering cannot be misread.")
+      };
+    }
   }
 
   // 3. The host's own mirrored value property — a real mechanism for
@@ -1282,9 +1306,10 @@ export function createSalesforceResolverAdapter(
       resolved: ResolvedTarget,
       value: string,
       valueKind: FieldValueKind,
-      policy: ResolutionPolicy
+      policy: ResolutionPolicy,
+      context?: WriteContext
     ): FieldWriteOutcome | Promise<FieldWriteOutcome> | undefined {
-      if (valueKind === "date") return setDateValue(resolved, value, policy);
+      if (valueKind === "date") return setDateValue(resolved, value, policy, context);
       // Asynchronous by necessity: a picklist selection is only verifiable
       // once the component has settled.
       if (valueKind === "select") return setPicklistValue(resolved, value, policy);

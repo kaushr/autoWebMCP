@@ -240,13 +240,36 @@ describe("verifyOutcome", () => {
 
 
 describe("compareObservedValue — display format vs wire format", () => {
-  it("treats equal date parts across formats as a match — a record view displays 10/1/2026 for a write of 2026-10-01", () => {
-    expect(compareObservedValue("2026-10-01", "10/1/2026")).toBe("match");
+  it("treats equal date parts across formats as a match, once the org's ordering is known", () => {
+    expect(compareObservedValue("2026-10-01", "10/1/2026", "month-first")).toBe("match");
+    // ISO on both sides needs no ordering at all.
     expect(compareObservedValue("2026-10-01", "2026-10-01")).toBe("match");
   });
 
+  it("reads the same displayed date the way each org actually reads it", () => {
+    // "10/1/2026" is 1 October to a US org and 10 January to a UK one.
+    expect(compareObservedValue("2026-10-01", "10/1/2026", "month-first")).toBe("match");
+    expect(compareObservedValue("2026-10-01", "10/1/2026", "day-first")).toBe("mismatch");
+    expect(compareObservedValue("2026-01-10", "10/1/2026", "day-first")).toBe("match");
+  });
+
+  it("refuses a verdict on an ambiguous displayed date when the ordering is unknown", () => {
+    // The defect this replaced: month-first was assumed, so a record holding
+    // 3 April reported "match" for a requested 4 March. Silently confirming
+    // a wrong record is the one outcome verification must never produce.
+    expect(compareObservedValue("2027-03-04", "3/4/2027")).toBe("incomparable");
+    expect(compareObservedValue("2026-10-01", "10/1/2026")).toBe("incomparable");
+  });
+
+  it("still decides an unambiguous displayed date with no ordering established", () => {
+    // A component above 12 cannot be a month, so the value settles itself.
+    expect(compareObservedValue("2027-03-15", "3/15/2027")).toBe("match");
+    expect(compareObservedValue("2027-03-15", "15/3/2027")).toBe("match");
+    expect(compareObservedValue("2027-03-15", "3/16/2027")).toBe("mismatch");
+  });
+
   it("treats differing dates as a mismatch", () => {
-    expect(compareObservedValue("2026-10-01", "11/1/2022")).toBe("mismatch");
+    expect(compareObservedValue("2026-10-01", "11/1/2022", "month-first")).toBe("mismatch");
   });
 
   it("treats an unparseable read-back against a date as incomparable — never a verdict either way", () => {

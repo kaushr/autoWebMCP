@@ -3,6 +3,7 @@ import type { ExecutionCheckResult } from "./result";
 import { DEFAULT_RESOLUTION_POLICY, type IdentitySignal, type ResolutionPolicy } from "./resolutionPolicy";
 import type { EditRestoration, EditableTransition, PageStateAssessment } from "./pageState";
 import type { ValidationAssessment } from "./verificationPolicy";
+import { parseDisplayedDate, type DateOrder } from "./dateRepresentation";
 import {
   composedClosest,
   ownerScope,
@@ -50,6 +51,12 @@ export type ResolveOutcome =
 
 export type FieldWriteOutcome = { ok: boolean; detail: string };
 
+/** Tenant-specific facts a write may need. Established at execution time, never stored on a binding. */
+export interface WriteContext {
+  /** This org's date ordering, when it has been established. Absent means undetermined. */
+  dateOrder?: DateOrder;
+}
+
 export type { ExecutionCheckResult };
 
 /**
@@ -88,7 +95,14 @@ export interface PlatformResolverAdapter {
     resolved: ResolvedTarget,
     value: string,
     valueKind: FieldValueKind,
-    policy: ResolutionPolicy
+    policy: ResolutionPolicy,
+    /**
+     * Tenant facts the write needs but the platform cannot supply. Date
+     * ordering lives here rather than in `ResolutionPolicy` because it is
+     * configuration of one org, not behaviour of the platform: two orgs on
+     * identical Lightning render the same date differently.
+     */
+    context?: WriteContext
   ): Promise<FieldWriteOutcome> | FieldWriteOutcome | undefined;
   /**
    * Platform-aware post-commit validation assessment: distinguishes a
@@ -468,9 +482,10 @@ export async function setFieldValue(
   resolved: ResolvedTarget,
   value: string,
   valueKind: FieldValueKind,
-  adapter?: PlatformResolverAdapter
+  adapter?: PlatformResolverAdapter,
+  context?: WriteContext
 ): Promise<FieldWriteOutcome> {
-  const fromAdapter = await adapter?.setFieldValue?.(resolved, value, valueKind, policyFor(adapter));
+  const fromAdapter = await adapter?.setFieldValue?.(resolved, value, valueKind, policyFor(adapter), context);
   if (fromAdapter) return fromAdapter;
   return writeNativeValue(resolved.element, value);
 }
@@ -590,16 +605,9 @@ export interface VerifyContext {
   root: ParentNode;
   checks: readonly VerificationCheck[];
   inputs: ReadonlyArray<{ target: SemanticTarget; expectedValue: string }>;
+  /** This org's established date ordering. Absent means undetermined, never month-first. */
+  dateOrder?: DateOrder;
   adapter?: PlatformResolverAdapter;
-}
-
-/** `2026-10-01` or `10/1/2026` (month-first, as this platform displays dates) → date parts. */
-function parseDateParts(value: string): { y: number; m: number; d: number } | undefined {
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
-  if (iso) return { y: Number(iso[1]), m: Number(iso[2]), d: Number(iso[3]) };
-  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value.trim());
-  if (slash) return { y: Number(slash[3]), m: Number(slash[1]), d: Number(slash[2]) };
-  return undefined;
 }
 
 /**
@@ -609,13 +617,28 @@ function parseDateParts(value: string): { y: number; m: number; d: number } | un
  * value that neither matches nor parses into a comparable form is
  * `incomparable`: not proof of a wrong write, and never silently proof of
  * a right one.
+ *
+ * `order` is this org's date ordering, and omitting it is not the same as
+ * assuming one. A displayed `3/4/2027` means different days in different
+ * orgs, so without an established ordering it is `incomparable` — the one
+ * answer that is true either way. Reading it month-first by default is
+ * what let a wrong record report `match`.
  */
-export function compareObservedValue(expected: string, observed: string): "match" | "mismatch" | "incomparable" {
+export function compareObservedValue(
+  expected: string,
+  observed: string,
+  order?: DateOrder
+): "match" | "mismatch" | "incomparable" {
   if (normalizeLabel(observed) === normalizeLabel(expected)) return "match";
-  const expectedDate = parseDateParts(expected);
-  const observedDate = parseDateParts(observed);
+  const expectedDate = parseDisplayedDate(expected, order);
+  const observedDate = parseDisplayedDate(observed, order);
+  // Either side unreadable for want of an ordering makes the comparison
+  // unanswerable, never a verdict.
+  if (expectedDate === "ambiguous" || observedDate === "ambiguous") return "incomparable";
   if (expectedDate && observedDate) {
-    return expectedDate.y === observedDate.y && expectedDate.m === observedDate.m && expectedDate.d === observedDate.d
+    return expectedDate.year === observedDate.year &&
+      expectedDate.month === observedDate.month &&
+      expectedDate.day === observedDate.day
       ? "match"
       : "mismatch";
   }
@@ -693,7 +716,7 @@ export function verifyOutcome(context: VerifyContext): ExecutionCheckResult[] {
         details.push(`"${input.target.label}" could not be read back.`);
         continue;
       }
-      const comparison = compareObservedValue(input.expectedValue, value);
+      const comparison = compareObservedValue(input.expectedValue, value, context.dateOrder);
       if (comparison === "incomparable") {
         // The read-back produced something that neither matches nor can be
         // meaningfully compared (a display string the extractor misjudged).

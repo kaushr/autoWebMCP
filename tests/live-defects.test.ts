@@ -7,6 +7,7 @@ import {
   setFieldValue
 } from "../src/binding/browserExecution/engine";
 import { resolverAdapterForPlatform } from "../src/binding/browserExecution/adapters";
+import { inferDateRepresentation } from "../src/binding/browserExecution/dateRepresentation";
 import { suspiciousDomain } from "../src/binding/browserExecution/salesforceAdapter";
 import { buildTestFormFields } from "../src/training/executionTestForm";
 import { assessExecutionReadiness } from "../src/training/executionReadiness";
@@ -414,10 +415,61 @@ describe("3 — the date control is found wherever it sits beneath the target", 
 
     const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
     if (!resolved.ok) throw new Error(resolved.reason);
-    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+    // A text input takes the display format a human would type, which means
+    // it needs to know which order this org types dates in. The executor
+    // establishes that from the page before writing anything.
+    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter(), {
+      dateOrder: "month-first"
+    });
     expect(outcome.ok).toBe(true);
-    // A text input takes the display format a human would type.
     expect(outcome.detail).toMatch(/display format/i);
+    expect(root.querySelector("lightning-input")!.shadowRoot!.querySelector("input")!.value).toBe("3/1/2027");
+  });
+
+  it("writes the same date the other way round for a day-first org", async () => {
+    const root = mount(
+      EDIT_SHELL(`<label for="cd">*Close Date</label>
+        <records-record-field id="cd"><lightning-input></lightning-input></records-record-field>`)
+    );
+    shadow(root.querySelector("lightning-input")!, `<input name="CloseDate" type="text" class="slds-input" />`);
+    const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter(), { dateOrder: "day-first" });
+    expect(outcome.ok).toBe(true);
+    expect(root.querySelector("lightning-input")!.shadowRoot!.querySelector("input")!.value).toBe("1/3/2027");
+  });
+
+  it("refuses to type an ambiguous date into a text input when the ordering is unknown", async () => {
+    // The safety rule: 3/1/2027 means two different days in two orgs, so
+    // typing it blind risks a silently wrong record. With no picker in this
+    // fixture there is nowhere safe left to go, and the write fails loudly
+    // instead of saving the wrong day.
+    const root = mount(
+      EDIT_SHELL(`<label for="cd">*Close Date</label>
+        <records-record-field id="cd"><lightning-input></lightning-input></records-record-field>`)
+    );
+    shadow(root.querySelector("lightning-input")!, `<input name="CloseDate" type="text" class="slds-input" />`);
+    const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+    expect(outcome.ok).toBe(false);
+    expect(outcome.detail).toMatch(/ordering is not established/i);
+    expect(root.querySelector("lightning-input")!.shadowRoot!.querySelector("input")!.value).toBe("");
+  });
+
+  it("types an unambiguous date with no ordering established, because it cannot be misread", async () => {
+    // Day 15 cannot be a month: a day-first org rejects "3/15/2027"
+    // outright rather than saving the wrong day, so attempting it is safe.
+    const root = mount(
+      EDIT_SHELL(`<label for="cd">*Close Date</label>
+        <records-record-field id="cd"><lightning-input></lightning-input></records-record-field>`)
+    );
+    shadow(root.querySelector("lightning-input")!, `<input name="CloseDate" type="text" class="slds-input" />`);
+    const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
+    if (!resolved.ok) throw new Error(resolved.reason);
+    const outcome = await setFieldValue(resolved.target, "2027-03-15", "date", adapter());
+    expect(outcome.ok).toBe(true);
+    expect(root.querySelector("lightning-input")!.shadowRoot!.querySelector("input")!.value).toBe("3/15/2027");
   });
 
   it("the previously working component-host shape stays green", async () => {
@@ -457,7 +509,9 @@ describe("3 — the date control is found wherever it sits beneath the target", 
 
     const resolved = resolveSemanticTarget(root, CLOSE_DATE, adapter());
     if (!resolved.ok) throw new Error(resolved.reason);
-    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter());
+    const outcome = await setFieldValue(resolved.target, "2027-03-01", "date", adapter(), {
+      dateOrder: "month-first"
+    });
     expect(outcome.ok).toBe(true);
     expect(reacted).toBe(true);
   });
@@ -492,20 +546,35 @@ describe("no write escapes a failed field", () => {
 
 /* ------------------- the date-format hazard ------------------- */
 
-describe("writing a date into a text control assumes a locale", () => {
-  it("documents a silent wrong-value path that verification cannot catch", () => {
-    // The adapter types M/D/YYYY, and the read-back parser reads M/D/YYYY.
-    // In an org that displays D/M/YYYY both are wrong the same way, so the
-    // check agrees with the mistake instead of catching it.
+describe("writing a date into a text control no longer assumes a locale", () => {
+  it("refuses to confirm a wrong record when the ordering was never established", () => {
+    // This was a silent wrong-value path: the adapter typed M/D/YYYY and
+    // the read-back parser read M/D/YYYY, so in a day-first org both were
+    // wrong the same way and the check AGREED with the mistake.
     const requested = "2026-11-01"; // 1 November
     const orgDisplaysDayFirst = "11/01/2026"; // the org stored 11 January
-    expect(compareObservedValue(requested, orgDisplaysDayFirst)).toBe("match");
+    expect(compareObservedValue(requested, orgDisplaysDayFirst)).toBe("incomparable");
 
-    // Stated plainly so the hazard is not mistaken for correctness: the
-    // only unambiguous path is the native date input, which takes ISO.
-    // Resolving this properly needs the org's locale, which is application
-    // knowledge rather than something to guess in the adapter.
+    // ISO on both sides never had the problem.
     expect(compareObservedValue("2026-11-01", "2026-11-01")).toBe("match");
+  });
+
+  it("decides the same comparison once the org's ordering is established", () => {
+    // Established, not assumed — and it now catches the wrong record the
+    // old code confirmed.
+    expect(compareObservedValue("2026-11-01", "11/01/2026", "day-first")).toBe("mismatch");
+    expect(compareObservedValue("2026-11-01", "11/01/2026", "month-first")).toBe("match");
+  });
+
+  it("establishes the ordering from a date the application is already displaying", () => {
+    // A component above 12 cannot be a month, so one displayed value
+    // settles it with no configuration and no guessing.
+    expect(inferDateRepresentation(["25/12/2026"])).toMatchObject({ order: "day-first", source: "unambiguous-sample" });
+    expect(inferDateRepresentation(["12/25/2026"])).toMatchObject({ order: "month-first", source: "unambiguous-sample" });
+    // Nothing to learn from an ambiguous one, and it must not lower to a guess.
+    expect(inferDateRepresentation(["01/02/2026"]).order).toBeUndefined();
+    // Two samples that pin opposite orders mean something was misread.
+    expect(inferDateRepresentation(["25/12/2026", "12/25/2026"])).toMatchObject({ source: "conflicting" });
   });
 });
 

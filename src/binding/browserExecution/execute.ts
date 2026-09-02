@@ -8,10 +8,12 @@ import {
   verifyOutcome,
   waitForApplicationReaction,
   type PlatformResolverAdapter,
-  type ResolvedTarget
+  type ResolvedTarget,
+  type WriteContext
 } from "./engine";
 import type { BrowserBindingInput, BrowserExecutionBinding, SemanticTarget } from "./model";
 import type { PageState } from "./pageState";
+import { inferDateRepresentation } from "./dateRepresentation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
 import type { ExecutionCheckResult, ExecutionOutcomeStatus, ExecutionResult, InputTransaction } from "./result";
 
@@ -582,6 +584,36 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
    * 4/1/2027, the test asked for 11/01/2026, and nothing said which of
    * those the executor had seen, written, or read back.
    */
+  /* --- B0: establish this org's date ordering, before anything is written --- *
+   * Read every target's current value first, so `beforeValue` really is
+   * what the record held before we touched it, and so the dates already on
+   * screen can settle how this org orders them. A value with a component
+   * above 12 pins the order outright; if nothing does, the ordering stays
+   * undetermined and every date decision downstream — what to type, and
+   * what a read-back proves — accounts for that rather than assuming.
+   */
+  const beforeValues = new Map<string, string>();
+  for (const { input, target } of resolved) {
+    const current = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
+    if (current !== undefined) beforeValues.set(input.semanticInput, current);
+  }
+  const dateSamples = resolved
+    .filter(({ input }) => input.valueKind === "date")
+    .map(({ input }) => beforeValues.get(input.semanticInput))
+    .filter((value): value is string => typeof value === "string");
+  const dateRepresentation = inferDateRepresentation(dateSamples);
+  const writeContext: WriteContext = dateRepresentation.order ? { dateOrder: dateRepresentation.order } : {};
+  if (resolved.some(({ input }) => input.valueKind === "date")) {
+    evidence.push(
+      dateRepresentation.order
+        ? `Date ordering for this org established as ${dateRepresentation.order} (${dateRepresentation.source}). ` +
+          dateRepresentation.evidence.join(" ")
+        : `Date ordering for this org could not be established (${dateRepresentation.source}). ` +
+          `${dateRepresentation.evidence.join(" ")} Ambiguous dates will not be typed, and a read-back that ` +
+          "depends on the ordering will be reported as unverifiable rather than as a match."
+    );
+  }
+
   const transactions: InputTransaction[] = [];
   let allSet = true;
   for (const { input, target } of resolved) {
@@ -595,8 +627,9 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     }
 
     // What the record held before we touched it — an observation, never to
-    // be confused with what was asked for.
-    const beforeValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
+    // be confused with what was asked for. Read before any write in this
+    // run, so a second input cannot inherit the first one's aftermath.
+    const beforeValue = beforeValues.get(input.semanticInput);
     const transaction: InputTransaction = {
       name: input.semanticInput,
       ...(input.applicationField?.apiName ? { apiName: input.applicationField.apiName } : {}),
@@ -607,14 +640,17 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       detail: ""
     };
 
-    const result = await setFieldValue(target, requestedValue, input.valueKind, adapter);
+    const result = await setFieldValue(target, requestedValue, input.valueKind, adapter, writeContext);
     transaction.detail = result.detail;
 
     // A write that reports success is not the same as a field that holds
     // the value: the date strategies wrote and returned, proving nothing.
     const afterWriteValue = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
     if (afterWriteValue !== undefined) transaction.afterWriteValue = afterWriteValue;
-    const comparison = afterWriteValue === undefined ? "incomparable" : compareObservedValue(requestedValue, afterWriteValue);
+    const comparison =
+      afterWriteValue === undefined
+        ? "incomparable"
+        : compareObservedValue(requestedValue, afterWriteValue, dateRepresentation.order);
     transaction.verified = comparison === "match" ? "yes" : comparison === "mismatch" ? "no" : "unreadable";
 
     if (!result.ok || transaction.verified === "no") {
@@ -695,6 +731,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       target: input.semanticTarget,
       expectedValue: inputs[input.semanticInput] ?? ""
     })),
+    ...(dateRepresentation.order ? { dateOrder: dateRepresentation.order } : {}),
     adapter
   });
   checks.push(...verification);
