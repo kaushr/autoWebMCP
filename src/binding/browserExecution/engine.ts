@@ -281,6 +281,35 @@ export function collectElements(root: ParentNode, selector: string, policy: Reso
   return queryComposedTree(root, selector, policy);
 }
 
+/**
+ * Every date-shaped value the application is currently rendering in a form
+ * control.
+ *
+ * How an org writes dates is a property of the ORG, not of one field, so
+ * the evidence for it is the whole page rather than the single field a
+ * capability happens to touch. A live run made the cost of the narrow
+ * reading obvious: Close Date held "6/1/2027", which pins nothing, so the
+ * ordering stayed unknown and every date with a day of 12 or lower became
+ * unwritable — while the same form carried other dates that would have
+ * settled it outright.
+ *
+ * Deliberately limited to form-control values, not page text. A control's
+ * value is the platform's own rendering of a stored date; arbitrary text
+ * could be anything a user typed, and one stray date-shaped string in a
+ * description would be read as the org contradicting itself.
+ */
+export function observedDateValues(root: ParentNode, policy: ResolutionPolicy): string[] {
+  const values: string[] = [];
+  for (const element of queryComposedTree(root, "input", policy)) {
+    if (!(element instanceof HTMLInputElement)) continue;
+    // A password or hidden control is never a date and never worth reading.
+    if (element.type === "password" || element.type === "hidden") continue;
+    const value = element.value?.trim();
+    if (value) values.push(value);
+  }
+  return values;
+}
+
 const FIELD_SELECTOR = 'input, select, textarea, [role="textbox"], [role="combobox"], [contenteditable="true"]';
 const ACTION_SELECTOR =
   'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]';

@@ -1,6 +1,7 @@
 import {
   compareObservedValue,
   invokeSemanticAction,
+  observedDateValues,
   policyFor,
   readSemanticOptions,
   resolveSemanticTarget,
@@ -597,10 +598,18 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     const current = adapter?.readFieldValue?.(root, input.semanticTarget, policyFor(adapter), target.element);
     if (current !== undefined) beforeValues.set(input.semanticInput, current);
   }
-  const dateSamples = resolved
-    .filter(({ input }) => input.valueKind === "date")
-    .map(({ input }) => beforeValues.get(input.semanticInput))
-    .filter((value): value is string => typeof value === "string");
+  // The capability's own date fields first — they are certainly dates — then
+  // every other value the form is rendering. One field's value often pins
+  // nothing ("6/1/2027" could be either order), while the same form carries
+  // another date that settles it outright. Ordering is a property of the
+  // org, so the evidence for it is the whole surface.
+  const dateSamples = [
+    ...resolved
+      .filter(({ input }) => input.valueKind === "date")
+      .map(({ input }) => beforeValues.get(input.semanticInput))
+      .filter((value): value is string => typeof value === "string"),
+    ...observedDateValues(root, policyFor(adapter))
+  ];
   const dateRepresentation = inferDateRepresentation(dateSamples);
   const writeContext: WriteContext = dateRepresentation.order ? { dateOrder: dateRepresentation.order } : {};
   if (resolved.some(({ input }) => input.valueKind === "date")) {
