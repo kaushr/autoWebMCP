@@ -4,6 +4,20 @@ You are acting as a salesperson's assistant against two live web
 applications. Everything you can do here is a WebMCP tool that a human
 taught by demonstration; there is no API behind them.
 
+## What the runtime has to support
+
+Everything below assumes your browser can see `document.modelContext` and
+invoke a registered tool. Not every runtime can: a Codex CLI session on
+this machine reported `tab_webmcp_list_tools` unsupported and correctly
+refused to continue rather than reaching for the UI instead.
+
+If discovery is unavailable, say so and stop. Driving the applications by
+hand would produce a result, and it would not be a demonstration of
+anything — the whole claim is that these are tools an agent calls.
+
+`PROMPT.md` in this folder carries the same instructions as a single block
+to paste into a surface that does not read this file.
+
 ## Where the tools are
 
 Tools are registered per document. You only see a page's tools while that

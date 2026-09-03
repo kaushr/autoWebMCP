@@ -38,6 +38,20 @@ the page carries against the one the loaded extension carries, and against
 the control plane's API version — a half-reloaded browser produces
 confident results about code that is not running.
 
+## Which agent surface
+
+The instructions live in two places because the surfaces differ.
+
+`AGENTS.md` is read by a Codex CLI session started in this folder. `PROMPT.md`
+carries the same content as one pasteable block, for a surface that supports
+WebMCP but reads no project file.
+
+At the time of writing only the second could actually invoke a tool: a CLI
+session here reported `tab_webmcp_list_tools` unsupported. It followed the
+instructions correctly — opened both pages, reloaded them, chose `getTools()`
+— and then stopped rather than driving the UI by hand, which is the right
+answer to a runtime that cannot do the thing being demonstrated.
+
 ## The ask
 
 ```text
