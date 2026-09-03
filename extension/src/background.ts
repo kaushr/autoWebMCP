@@ -455,7 +455,6 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       // Each hop reports itself, so a failure names the thing that actually
       // broke rather than collapsing into one unhelpful timeout.
       try {
-        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
       } catch (error) {
         return {
@@ -513,7 +512,6 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         };
       }
       try {
-        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         const found = (await withTimeout(
           chrome.tabs.sendMessage(tabId, { type: "query:run", request: message.request }),
@@ -558,7 +556,6 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         // Idempotent: content.js declines to attach a second capture probe
         // if one is already present, and the execute handler here has no
         // session state to duplicate.
-        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         const answer = (await withTimeout(
           chrome.tabs.sendMessage(tabId, { type: "execute:run", request: message.request }),
@@ -629,19 +626,21 @@ async function openRequestedRecord(tabId: number, answer: BrowserBindingExecuteR
  * answer. This worker already holds the answer, so the navigation is free.
  */
 /**
- * Waits for a tab to finish loading before anything is asked of it.
+ * Waits for a tab to settle after THIS worker navigated it.
  *
- * Injecting into a document that is about to be replaced is the same
- * failure as navigating from inside one: the content script is torn down
- * mid-execution and the answer is never sent. It happened for real between
- * two capabilities — a search opened the Opportunities list, an update was
- * dispatched a moment later into the still-loading tab, and the caller
- * waited out the full 42s to be told nothing.
+ * Deliberately not before every request. An application like Lightning
+ * streams resources continuously and may never report itself complete, so
+ * a wait in front of each call is not a safety net — it is a flat tax on
+ * every operation, paid at exactly the ceiling an agent gives up at. Put
+ * there to fix a race between two capabilities, it made every call slower
+ * and turned a flaky path into one that never finished.
  *
- * Bounded, and never fatal: a tab that will not settle is still worth
- * asking, and the hop below reports honestly either way.
+ * The race it was for is real, but it belongs where the navigation is: a
+ * caller told to invoke again should not be racing a page this worker just
+ * sent somewhere. Short, because it is a courtesy rather than a guarantee,
+ * and never fatal — the hop below reports honestly either way.
  */
-async function waitForTabReady(tabId: number, timeoutMs = 10_000): Promise<void> {
+async function waitForTabReady(tabId: number, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
