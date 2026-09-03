@@ -96,13 +96,23 @@ function adapterOnRecord(sequence: (string | undefined)[]): PlatformResolverAdap
   };
 }
 
-const run = (adapter: PlatformResolverAdapter, inputs: Record<string, string>, identityGated = true) =>
+/**
+ * `requireTarget` is the AGENT path. Defaulted on here because most of
+ * these cover autonomous invocation; the manual-test cases pass it false
+ * explicitly, which is the distinction the whole gate turns on.
+ */
+const run = (
+  adapter: PlatformResolverAdapter,
+  inputs: Record<string, string>,
+  options: { identityGated?: boolean; requireTarget?: boolean } = {}
+) =>
   executeConfirmed({
     root: mountEditForm(),
-    binding: bindingFor({ identityGated }),
+    binding: bindingFor({ identityGated: options.identityGated ?? true }),
     inputs,
     adapter,
     confirmed: true,
+    ...(options.requireTarget === false ? {} : { requireTarget: true }),
     reaction: { timeoutMs: 40, quietMs: 10 },
     resolveRetryMs: 50
   });
@@ -164,7 +174,7 @@ describe("the target is established before anything is touched", () => {
     expect(stageValue()).toBe("Engage");
   });
 
-  it("refuses an identity-gated invocation that supplied no identity", async () => {
+  it("refuses an autonomous invocation that supplied no identity", async () => {
     const result = await run(adapterOnRecord([RECORD_A]), { stage: "Confirm" });
     expect(result.status).toBe("blocked");
     expect(result.warnings.join(" ")).toMatch(/must say which record it means/i);
@@ -179,10 +189,38 @@ describe("the Studio's manual test still operates on the open record", () => {
     // A human testing a binding chose the record by opening it. That path
     // must keep working — the asymmetry with the agent contract is the
     // point, not an oversight.
-    const result = await run(adapterOnRecord([RECORD_A]), { stage: "Confirm" }, false);
+    const result = await run(adapterOnRecord([RECORD_A]), { stage: "Confirm" }, {
+      identityGated: false,
+      requireTarget: false
+    });
     expect(result.target?.status).toBe("not-required");
     expect(stageValue()).toBe("Confirm");
     expect(result.status).not.toBe("blocked");
+  });
+
+  it("runs a GATED binding manually, on the record the human opened", async () => {
+    // The combination a live run caught and this suite had missed: gated
+    // binding, manual invocation. Whether an identity is required is the
+    // CALLER's question — a binding declaring a target says what would
+    // identify the entity, not that every invocation must name one.
+    // Reading those as the same thing made the Studio's own test refuse
+    // itself the moment proposals began declaring targets.
+    const result = await run(adapterOnRecord([RECORD_A]), { stage: "Confirm" }, { requireTarget: false });
+    expect(result.target?.status).toBe("not-required");
+    expect(result.status).not.toBe("blocked");
+    expect(stageValue()).toBe("Confirm");
+  });
+
+  it("verifies an identity supplied manually, rather than ignoring it", async () => {
+    // Supplying one without being asked is still a claim about which record
+    // this is, and a wrong one must not be waved through just because the
+    // caller was a human.
+    const result = await run(adapterOnRecord([RECORD_B]), { opportunity_id: RECORD_A, stage: "Confirm" }, {
+      requireTarget: false
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.target?.status).toBe("mismatch");
+    expect(stageValue()).toBe("Engage");
   });
 });
 

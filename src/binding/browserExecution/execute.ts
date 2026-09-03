@@ -518,13 +518,22 @@ async function establishTarget(options: ExecuteOptions): Promise<{
   const declared = binding.context.target;
   const requestedId = declared ? inputs[declared.inputName]?.trim() : undefined;
 
-  // No identity requirement and none supplied: the human-driven path, where
-  // the person operating the Studio chose the record by opening it.
-  if (!declared && !options.requireTarget) {
+  // Whether an identity is REQUIRED is the caller's question, not the
+  // binding's. A binding declaring a target says what would identify the
+  // entity; it does not say that every invocation must name one.
+  //
+  // A live run found the difference the hard way: once proposals began
+  // declaring targets, the Studio's own manual test started refusing
+  // itself, because "the binding is gated" was being read as "an identity
+  // must be supplied". The human-driven path chose the record by opening
+  // it, and that is still a choice.
+  if (!requestedId && !options.requireTarget) {
     return {
       state: {
         status: "not-required",
-        detail: "This binding is not identity-gated; it acts on the record currently open."
+        detail: declared
+          ? `No ${declared.entityType} identity was supplied, so this acts on the record currently open.`
+          : "This binding is not identity-gated; it acts on the record currently open."
       },
       evidence: []
     };
