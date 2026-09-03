@@ -804,3 +804,87 @@ describe("a component library may listen for its own signal, not for keys", () =
     expect(committed).toBe(0);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * The term is what tells a match from a bystander.
+ *
+ * A live list was already filtered to "PS" from an earlier search, so the
+ * set did not change and change detection discarded the correct result
+ * sitting in plain sight. The same detection had earlier returned a
+ * record's account and owner from an unrelated page. Neither is about
+ * change; both are about whether the records answer the term.
+ * ------------------------------------------------------------------ */
+
+describe("an unchanged page can still be showing the answer", () => {
+  const run = (term: string) =>
+    executeQuery({
+      root: document.body,
+      binding: {
+        ...BINDING,
+        query: { inputName: "name", semanticTarget: { role: "field", label: "Search this list..." } },
+        open: undefined,
+        submit: undefined,
+        submitKey: undefined
+      },
+      inputs: { name: term },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 100
+    });
+
+  it("returns a record already on screen whose name answers the term", async () => {
+    // Exactly the live case: the list was left filtered by a previous
+    // search, so nothing changed and the answer was already there.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" type="search" />
+      <table role="grid"><tbody><tr>
+        <th><a href="/lightning/r/${ACME_A}/view">PS Project Test - updated</a></th>
+      </tr></tbody></table>
+    `;
+    const outcome = await run("PS");
+    expect(outcome.candidates.map((c) => c.id)).toEqual([ACME_A]);
+  });
+
+  it("still ignores records that have nothing to do with the term", async () => {
+    // A record page's own account and owner, which is what an unchanged
+    // page looked like the first time this went wrong.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" type="search" />
+      <h3><a href="/lightning/r/${ACCOUNT}/view">A &amp; H Steel Ltd.</a></h3>
+      <h3><a href="/lightning/r/0055w00000BtwefAAB/view">Kaushik Ruparel</a></h3>
+    `;
+    const outcome = await run("PS");
+    expect(outcome.candidates).toEqual([]);
+  });
+
+  it("does not filter what the application actively produced", async () => {
+    // When the page answers, its answer stands whole — a platform can
+    // match on a field that never appears in a record's name.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" type="search" /><button id="go">Go</button>
+    `;
+    document.querySelector("#go")!.addEventListener("click", () => {
+      const row = document.createElement("h3");
+      row.innerHTML = `<a href="/lightning/r/${ACME_B}/view">Renewal 2027</a>`;
+      document.body.appendChild(row);
+    });
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: {
+        ...BINDING,
+        query: { inputName: "name", semanticTarget: { role: "field", label: "Search this list..." } },
+        open: undefined,
+        submit: { role: "button", label: "Go" },
+        submitKey: undefined
+      },
+      inputs: { name: "Acme" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 1_000
+    });
+    expect(outcome.candidates.map((c) => c.name)).toEqual(["Renewal 2027"]);
+  });
+});

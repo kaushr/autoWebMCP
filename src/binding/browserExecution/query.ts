@@ -235,6 +235,20 @@ function safePath(href: string): string | undefined {
   }
 }
 
+/**
+ * Whether a candidate's name answers the term that was searched for.
+ *
+ * Deliberately plain containment, case- and space-insensitive. A platform's
+ * own matching may be cleverer — a record can match on a field never shown
+ * in its name — which is why this only ever decides between records
+ * ALREADY on an unchanged page, and never filters an answer the
+ * application actively produced.
+ */
+function matchesTerm(name: string, term: string): boolean {
+  const fold = (value: string): string => value.replace(/\s+/g, " ").trim().toLowerCase();
+  return fold(name).includes(fold(term));
+}
+
 const RESULTS_WAIT_MS = 8_000;
 const RESULTS_POLL_MS = 300;
 
@@ -251,6 +265,8 @@ async function collectCandidates(
   identity: EntityIdentityPolicy,
   adapter: PlatformResolverAdapter | undefined,
   waitMs = RESULTS_WAIT_MS,
+  /** The term searched for, used to tell a match from a bystander. */
+  term = "",
   /** Whether the application has navigated since the search was submitted. */
   navigated: () => boolean = () => false,
   /**
@@ -280,9 +296,20 @@ async function collectCandidates(
     // on its own so that searching twice for the same thing does not have
     // to produce a different set to count.
     const changed = all.length !== before.size || all.some((candidate) => !before.has(candidate.id));
-    const answered = navigated() || changed;
-    if (answered && all.length > 0) return all;
-    if (Date.now() >= deadline) return answered ? all : [];
+
+    // If the page changed in response, it is the answer and everything on
+    // it counts. If it did not, the page may already have been showing the
+    // answer — a list left filtered from a previous search — or it may be
+    // an unrelated page whose records have nothing to do with the term.
+    //
+    // What separates those is the term itself. A name search returns
+    // records whose names match it: "PS Project Test" does, while the
+    // account and owner of whatever record happened to be open do not.
+    // Change detection could never tell them apart, and discarded a
+    // correct result sitting in plain sight.
+    const relevant = all.filter((candidate) => matchesTerm(candidate.name, term));
+    const found = navigated() || changed ? all : relevant;
+    if (found.length > 0 || Date.now() >= deadline) return found;
     await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
 }
@@ -435,6 +462,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
     identity,
     adapter,
     options.resultsWaitMs,
+    term,
     () => locationOf() !== addressBefore,
     before
   );
