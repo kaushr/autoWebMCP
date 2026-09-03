@@ -468,7 +468,8 @@ async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise
       binding: request.binding,
       inputs: request.inputs,
       adapter: resolverAdapterForPlatform(request.binding.platform),
-      confirmed: true
+      confirmed: true,
+      ...(request.requireTarget ? { requireTarget: true } : {})
     });
     // Which pack knowledge governed this run, recorded alongside the result
     // so an execution can be audited back to the platform facts that shaped it.

@@ -77,6 +77,16 @@ export interface BrowserBindingExecuteRequest {
   binding: BrowserExecutionBinding;
   inputs: Record<string, string>;
   confirmed: true;
+  /**
+   * Demand an explicit record identity before writing.
+   *
+   * Set by the published WebMCP tool and never by the Studio's manual test.
+   * The asymmetry is the safety property: a human testing a binding chose
+   * the record by opening it, while an agent has chosen nothing, so an
+   * autonomous write must name the record it means rather than acting on
+   * whichever one happens to be open.
+   */
+  requireTarget?: boolean;
 }
 
 /**
@@ -224,6 +234,8 @@ export interface StudioBridgeExecuteRequest {
   binding: BrowserExecutionBinding;
   inputs: Record<string, string>;
   confirmed: true;
+  /** See `BrowserBindingExecuteRequest.requireTarget`. */
+  requireTarget?: boolean;
 }
 
 export interface StudioBridgeExecuteResponse {

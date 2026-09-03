@@ -1,7 +1,8 @@
 import type { ObservationTrace } from "../../capture/normalize";
 import type { CaptureFieldContext } from "../../capture/types";
 import type { SemanticCapability } from "../../semantic/model";
-import { observedRecordType, resolveFieldMapping, type ApplicationIntelligence } from "../fieldMapping";
+import { businessInputs, observedRecordType, resolveFieldMapping, type ApplicationIntelligence } from "../fieldMapping";
+import { targetIdentityFor } from "../../applicationIntelligence/targetIdentity";
 import type { ApplicationFieldType } from "../../applicationIntelligence/model";
 import {
   BROWSER_BINDING_SAFETY,
@@ -122,10 +123,16 @@ export function proposeBrowserBinding(
     };
   }
 
+  // The identity parameter names WHICH record; it is not a control on the
+  // form and has no semantic target to resolve. It becomes `context.target`
+  // below instead of an input the engine would look for on screen.
+  const demonstrated = businessInputs(capability);
+  const identityInput = capability.inputs.find((input) => input.role === "target-identity");
+
   const fieldMapping = resolveFieldMapping(capability, trace, intelligence);
   if (
     fieldMapping.ambiguities.length > 0 ||
-    Object.keys(fieldMapping.mapping).length !== capability.inputs.length
+    Object.keys(fieldMapping.mapping).length !== demonstrated.length
   ) {
     // The needs travel with the refusal: where the system can name the
     // fact it is missing, this is a question awaiting an answer rather
@@ -144,7 +151,7 @@ export function proposeBrowserBinding(
   const inputs: BrowserBindingInput[] = [];
   const evidence: string[] = [];
 
-  for (const input of capability.inputs) {
+  for (const input of demonstrated) {
     const applicationField = fieldMapping.fields[input.name];
     const grounding = fieldMapping.grounding[input.name];
     const observed = fieldMapping.observed[input.name];
@@ -217,6 +224,13 @@ export function proposeBrowserBinding(
   }
 
   const recordType = observedRecordType(trace);
+  // What the execution must be gated on. Present only when the capability
+  // carries an identity parameter AND the platform can actually observe an
+  // identity — a requirement nothing could verify would be theatre.
+  const identity = identityInput ? targetIdentityFor(source.id, recordType) : undefined;
+  const target =
+    identityInput && identity ? { inputName: identityInput.name, entityType: identity.entityType } : undefined;
+
   const binding: BrowserExecutionBinding = {
     id: `browser-${capability.id}-${source.id}`,
     capabilityId: capability.id,
@@ -224,6 +238,7 @@ export function proposeBrowserBinding(
     platform: source.id,
     context: {
       ...(recordType ? { recordType } : {}),
+      ...(target ? { target } : {}),
       pageMode: "edit-or-record"
     },
     inputs,
@@ -237,6 +252,12 @@ export function proposeBrowserBinding(
     safety: BROWSER_BINDING_SAFETY,
     evidence: [
       ...(recordType ? [`Object type resolved from the captured page path: ${recordType}.`] : []),
+      ...(target
+        ? [
+            `Execution is gated on ${target.entityType} identity, supplied as "${target.inputName}": ` +
+            "the record is verified before writing and again after saving."
+          ]
+        : []),
       ...evidence,
       `Commit action observed: a click labelled "${commitLabel}" was treated as the save action.`
     ]

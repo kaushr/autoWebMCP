@@ -474,7 +474,11 @@ function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: Capa
   }
   const stringInputs: Record<string, string> = {};
   for (const [name, value] of Object.entries(inputs)) stringInputs[name] = value === undefined ? "" : String(value);
-  return extensionBridgeExecutionClient.execute(executionBinding, stringInputs);
+  // The agent path, and the reason the flag exists. An agent has opened
+  // nothing and chosen nothing, so an execution it starts must name the
+  // record it means. The Studio's own manual test deliberately does not set
+  // this: there, a human chose the record by opening it.
+  return extensionBridgeExecutionClient.execute(executionBinding, stringInputs, { requireTarget: true });
 }
 
 /** Registers any published capability this control-mode document has not already exposed. */
@@ -778,6 +782,37 @@ function renderPublications(): string {
       <p class="semanticizer-status">${escapeHtml(publishStatus)}</p>
     </div>
   </section>`;
+}
+
+/**
+ * The targeting parameters, shown apart from the demonstrated fields.
+ *
+ * A person is about to approve a contract containing an input they never
+ * typed into anything. Rendering it in the same list as Stage and Close
+ * Date would read as "another editable field we found", which is exactly
+ * the wrong idea: it does not change a value on the record, it decides
+ * WHICH record everything else applies to.
+ *
+ * Not editable, because its name and necessity come from the application's
+ * own model rather than from anything a person chose — and an agent
+ * calling the published tool has to supply precisely this name.
+ */
+function renderTargetIdentityInputs(capability: SemanticCapability): string {
+  const identity = capability.inputs.filter((input) => input.role === "target-identity");
+  if (identity.length === 0) return "";
+
+  return `<div class="lifecycle-section target-identity">
+    <p class="eyebrow">Execution target</p>
+    <p class="semanticizer-status">Added by AutoWebMCP, not demonstrated. An agent calling this capability has not
+      opened any record, so it must say which one it means — otherwise the write would land on whichever record
+      happened to be on screen. Verified before writing and again after saving.</p>
+    <ul class="reasons">${identity
+      .map(
+        (input) =>
+          `<li><code>${escapeHtml(input.name)}</code> · required · ${escapeHtml(input.description)}</li>`
+      )
+      .join("")}</ul>
+  </div>`;
 }
 
 /** Everything a human is asked to accept as the meaning of the capability. */
@@ -1887,9 +1922,12 @@ function renderTrainingStudio(): string {
         ${renderLifecycleStages(view)}
         <label>Capability name<input name="name" value="${escapeHtml(capability.name)}" /></label>
         <label>Description<textarea name="description">${escapeHtml(capability.description)}</textarea></label>
+        ${renderTargetIdentityInputs(capability)}
         <div class="input-list">${capability.inputs
-          .map(
-            (input, index) => `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label>Type <select name="input-type-${index}">${(["string", "date", "number", "boolean"] as const)
+          .map((input, index) =>
+            input.role === "target-identity"
+              ? ""
+              : `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label>Type <select name="input-type-${index}">${(["string", "date", "number", "boolean"] as const)
               .map((type) => `<option value="${type}" ${input.type === type ? "selected" : ""}>${type}</option>`)
               .join("")}</select></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
           )
@@ -2332,6 +2370,11 @@ function render(): void {
       name: String(form.get("name") ?? candidate.name),
       description: String(form.get("description") ?? candidate.description),
       inputs: candidate.inputs.map((input, index) => {
+        // Targeting parameters render as text, not as form controls, so the
+        // form carries no values for them. Reading their absence as edits
+        // would quietly clear `required` on the one input that must never
+        // be optional.
+        if (input.role === "target-identity") return input;
         const type = String(form.get(`input-type-${index}`) ?? input.type);
         return {
           ...input,

@@ -158,7 +158,14 @@ window.addEventListener("message", (event) => {
     };
     callBackground({
       type: "browser-binding:execute",
-      request: { binding: data.binding, inputs: data.inputs ?? {}, confirmed: true }
+      request: {
+        binding: data.binding,
+        inputs: data.inputs ?? {},
+        confirmed: true,
+        // Relayed rather than decided here: only the caller knows whether
+        // this is an autonomous invocation or a human's own test.
+        ...(data.requireTarget === true ? { requireTarget: true } : {})
+      }
     })
       .then((response: unknown) => respond(response as BrowserBindingExecuteResponse))
       .catch((error: unknown) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));

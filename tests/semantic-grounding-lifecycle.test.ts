@@ -115,7 +115,21 @@ function proposed(stageInput: string): SemanticCapability {
   };
 }
 
-const names = (capability: SemanticCapability) => capability.inputs.map((input) => input.name).sort();
+/**
+ * The inputs a human demonstrated. Asserted separately from the identity
+ * parameter, because they answer different questions: these prove the
+ * tenant-independence invariant, while the identity parameter proves the
+ * system added its own targeting requirement.
+ */
+const names = (capability: SemanticCapability) =>
+  capability.inputs
+    .filter((input) => (input.role ?? "business") === "business")
+    .map((input) => input.name)
+    .sort();
+
+/** The identity parameter the system contributes, if any. */
+const identityInput = (capability: SemanticCapability) =>
+  capability.inputs.find((input) => input.role === "target-identity");
 
 const SALES_STAGE_IS_STAGENAME: FieldClarification = {
   platform: PLATFORM,
@@ -137,6 +151,13 @@ describe("1 — canonical identity available before the human is asked", () => {
     );
     // The name is settled before anyone confirms anything.
     expect(names(grounded.capability)).toEqual(["close_date", "stage"]);
+    // And the system has contributed the targeting parameter nobody
+    // demonstrated, before the human is asked to approve the contract.
+    expect(identityInput(grounded.capability)).toMatchObject({
+      name: "opportunity_id",
+      required: true,
+      role: "target-identity"
+    });
     expect(grounded.capability.provenance.confirmedByHuman).toBe(false);
     expect(grounded.needs).toEqual([]);
     expect(grounded.confirmationWithdrawn).toBe(false);
@@ -367,7 +388,10 @@ describe("6 — the tenant-independence invariant holds through the lifecycle", 
     const a = publishedFor("Stage", "stage", withTenant(snapshotLabelled("Stage")));
     const b = publishedFor("Sales Stage", "sales_stage", withTenant(snapshotLabelled("Sales Stage")));
     expect(b).toEqual(a);
-    expect(Object.keys(a.properties).sort()).toEqual(["close_date", "stage"]);
+    // The system's own targeting parameter travels with the demonstrated
+    // fields, and is identical across tenants for the same reason they are.
+    expect(Object.keys(a.properties).sort()).toEqual(["close_date", "opportunity_id", "stage"]);
+    expect(a.required).toContain("opportunity_id");
   });
 
   it("holds when one org's identity came from metadata and the other's from a human", () => {
@@ -407,7 +431,7 @@ describe("7 — semantic grounding stores nothing a DOM could invalidate", () =>
     // types, and value domains only.
     for (const input of grounded.capability.inputs) {
       expect(Object.keys(input).every((key) =>
-        ["name", "description", "type", "required", "enum"].includes(key)
+        ["name", "description", "type", "required", "enum", "role"].includes(key)
       )).toBe(true);
     }
   });

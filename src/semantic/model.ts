@@ -18,12 +18,30 @@ export interface SourceApplication {
 
 export type ProvenanceSource = "observed" | "configured" | "inferred" | "confirmed";
 
+/**
+ * What an input IS, which is not the same as what type it holds.
+ *
+ * `business` inputs were demonstrated: a human changed that control and the
+ * capability exists because they did. `target-identity` was not — nobody
+ * types a record id into an edit form. It is added because the platform and
+ * the application say this operation acts on an existing entity and must
+ * name which one.
+ *
+ * The distinction is load-bearing in three places: grounding must not try to
+ * resolve an identity input to a form field, the published schema must
+ * always require it, and a human confirming the contract has to be able to
+ * see that it is a targeting parameter rather than something they taught.
+ */
+export type CapabilityInputRole = "business" | "target-identity";
+
 export interface CapabilityInput {
   name: string;
   description: string;
   type: CapabilityInputType;
   required: boolean;
   enum?: string[];
+  /** Absent means `business` — every input predating this distinction was one. */
+  role?: CapabilityInputRole;
 }
 
 export interface CapabilityOutput {

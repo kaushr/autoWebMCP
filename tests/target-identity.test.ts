@@ -249,3 +249,99 @@ describe("identity is read from declared platform knowledge, not from code", () 
     expect(identityFromPath("/acme/widgets/issues/42", github)).toEqual({ entityType: "acme/widgets", id: "42" });
   });
 });
+
+/* ================= the published contract requires it ================= */
+
+describe("the agent-facing contract carries the targeting parameter", () => {
+  it("adds an identity input the human never demonstrated, before confirmation", async () => {
+    const { groundCapability } = await import("../src/training/semanticGrounding");
+    const { applicationIntelligenceForPlatform } = await import("../src/binding/browserExecution/adapters");
+    const { emptyTenantIntelligence } = await import("../src/applicationIntelligence/tenant");
+    const { CaptureSession } = await import("../src/capture/session");
+
+    const page = { host: "x.lightning.force.com", path: `/lightning/r/Opportunity/${RECORD_A}/view` };
+    const session = new CaptureSession("s", 0, { host: page.host, platform: "salesforce-lightning", title: "Opp" });
+    session.addMany([
+      { id: "n", kind: "navigate", t: 1, page },
+      {
+        id: "c",
+        kind: "field_change",
+        t: 2,
+        page,
+        element: { tag: "input", name: "CloseDate", label: "*Close Date" },
+        field: { label: "*Close Date", section: "D", control: "date" },
+        value: { masked: false, to: "2027-03-25" }
+      },
+      { id: "s", kind: "click", t: 3, page, actionLabel: "Save" }
+    ]);
+    session.stop(4);
+
+    const grounded = groundCapability(
+      {
+        id: "update_opportunity",
+        name: "Update opportunity",
+        description: "d",
+        inputs: [{ name: "close_date", description: "The close date", type: "date", required: true }],
+        outputs: [],
+        provenance: { source: "inferred", observationIds: [], confirmedByHuman: false, sourceApplication: SALESFORCE },
+        safety: { readOnly: false, requiresConfirmation: true }
+      },
+      session.toTrace(),
+      applicationIntelligenceForPlatform("salesforce-lightning", emptyTenantIntelligence())
+    );
+
+    const identity = grounded.capability.inputs.find((input) => input.role === "target-identity");
+    expect(identity).toMatchObject({ name: "opportunity_id", required: true, type: "string" });
+    expect(grounded.targetIdentity?.entityType).toBe("Opportunity");
+    // Contributed by the system, so it must be visible before approval —
+    // and the confirmation it invalidates is a separate question the
+    // grounding lifecycle already answers.
+    expect(grounded.capability.provenance.confirmedByHuman).toBe(false);
+  });
+
+  it("publishes it as a required parameter an agent must supply", async () => {
+    const { compileCapability } = await import("../src/webmcp/compiler");
+    const tool = compileCapability(
+      {
+        id: "update_opportunity",
+        name: "u",
+        description: "d",
+        inputs: [
+          {
+            name: "opportunity_id",
+            description: "Which Opportunity to act on",
+            type: "string",
+            required: true,
+            role: "target-identity"
+          },
+          { name: "stage", description: "The stage", type: "string", required: false }
+        ],
+        outputs: [],
+        provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true },
+        safety: { readOnly: false, requiresConfirmation: true }
+      },
+      () => ({})
+    );
+    expect(tool.inputSchema.required).toContain("opportunity_id");
+    expect(tool.inputSchema.properties["opportunity_id"]).toBeDefined();
+  });
+
+  it("derives the parameter name from the entity, for entities that are not Opportunities", async () => {
+    // Nothing about this is Opportunity-specific: the convention is
+    // agent-facing vocabulary applied to whatever entity the application
+    // says the capability acts on.
+    const { identityInputNameFor } = await import("../src/applicationIntelligence/targetIdentity");
+    expect(identityInputNameFor("Opportunity")).toBe("opportunity_id");
+    expect(identityInputNameFor("Account")).toBe("account_id");
+    expect(identityInputNameFor("Custom_Object__c")).toBe("custom_object_id");
+    expect(identityInputNameFor("WorkOrderLineItem")).toBe("work_order_line_item_id");
+  });
+
+  it("requires nothing when the platform declares no identity scheme", async () => {
+    // An application whose pages expose nothing stable gets no invented
+    // parameter — a requirement nothing could verify would be theatre.
+    const { targetIdentityFor } = await import("../src/applicationIntelligence/targetIdentity");
+    expect(targetIdentityFor("some-unknown-platform", "Widget")).toBeUndefined();
+    expect(targetIdentityFor("salesforce-lightning", undefined)).toBeUndefined();
+  });
+});

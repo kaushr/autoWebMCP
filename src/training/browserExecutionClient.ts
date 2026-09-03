@@ -15,7 +15,17 @@ import type { ExecutionResult } from "../binding/browserExecution/result";
  * ------------------------------------------------------------------ */
 
 export interface BrowserExecutionClient {
-  execute(binding: BrowserExecutionBinding, inputs: Record<string, string>): Promise<ExecutionResult>;
+  /**
+   * `requireTarget` demands an explicit record identity — set by the
+   * published tool, never by the Studio's manual test. A human testing a
+   * binding chose the record by opening it; an agent has chosen nothing,
+   * and the agent-facing contract must not inherit "whatever is open".
+   */
+  execute(
+    binding: BrowserExecutionBinding,
+    inputs: Record<string, string>,
+    options?: { requireTarget?: boolean }
+  ): Promise<ExecutionResult>;
   /**
    * Asks the live application which values its closed-domain controls
    * currently offer. Reads only — nothing is written and nothing is saved —
@@ -166,8 +176,12 @@ function bridgeRequest<T>(
  * asked for: the extension already has live tab access; this only reaches it.
  */
 export const extensionBridgeExecutionClient: BrowserExecutionClient = {
-  execute(binding, inputs) {
-    return bridgeRequest<ExecutionResult>({ binding, inputs, confirmed: true }, "exec", RESPONSE_TIMEOUT_MS, (data) => {
+  execute(binding, inputs, options) {
+    return bridgeRequest<ExecutionResult>(
+      { binding, inputs, confirmed: true, ...(options?.requireTarget ? { requireTarget: true } : {}) },
+      "exec",
+      RESPONSE_TIMEOUT_MS,
+      (data) => {
       const result = data.result as ExecutionResult | undefined;
       if (!result) return undefined;
       // A result produced by an older extension than this page expects is
@@ -184,7 +198,8 @@ export const extensionBridgeExecutionClient: BrowserExecutionClient = {
           ...result.warnings
         ]
       };
-    });
+      }
+    );
   },
 
   async acquireDomains(binding) {

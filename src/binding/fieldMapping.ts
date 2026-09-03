@@ -134,6 +134,11 @@ function declaredTypeFor(input: SemanticCapability["inputs"][number]): Applicati
   return undefined;
 }
 
+/** The inputs a human actually demonstrated — the only ones grounding can resolve. */
+export function businessInputs(capability: SemanticCapability): SemanticCapability["inputs"] {
+  return capability.inputs.filter((input) => (input.role ?? "business") === "business");
+}
+
 export function resolveFieldMapping(
   capability: SemanticCapability,
   trace: ObservationTrace,
@@ -158,14 +163,18 @@ export function resolveFieldMapping(
       observed: observedByInput,
       needs,
       statuses,
-      ambiguities: capability.inputs.map(
+      ambiguities: businessInputs(capability).map(
         (input) => `No application field identifier or visible label was observed for "${input.name}".`
       ),
       evidence: ["The capture recorded no field evidence, so no mapping could be established."]
     };
   }
 
-  for (const input of capability.inputs) {
+  // A target-identity input names WHICH record, not a field on it. Nobody
+  // demonstrated it and no control holds it, so grounding must not look for
+  // one — asking "which Opportunity field is opportunity_id?" has no true
+  // answer, and forcing one would put a write somewhere it does not belong.
+  for (const input of businessInputs(capability)) {
     const resolution = resolveApplicationField({
       inputName: input.name,
       ...(objectApiName ? { objectApiName } : {}),

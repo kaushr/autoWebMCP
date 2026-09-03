@@ -3,6 +3,8 @@ import type { EpistemicNeed } from "../applicationIntelligence/model";
 import type { SemanticCapability } from "../semantic/model";
 import { resolveFieldMapping, type ApplicationIntelligence } from "../binding/fieldMapping";
 import { canonicalizeCapabilityInputs, type InputCanonicalization } from "./canonicalInputs";
+import { observedRecordType } from "../binding/fieldMapping";
+import { targetIdentityFor, type TargetIdentityRequirement } from "../applicationIntelligence/targetIdentity";
 
 /* ------------------------------------------------------------------ *
  * Semantic grounding — the stage between a model's proposal and a
@@ -51,6 +53,13 @@ export interface GroundedCapability {
    */
   unresolved: string[];
   /**
+   * The identity parameter this capability requires, when it operates on an
+   * existing entity. Present on `capability.inputs` too; surfaced here so
+   * the Studio can explain WHY an input nobody demonstrated is in the
+   * contract a human is about to approve.
+   */
+  targetIdentity?: TargetIdentityRequirement;
+  /**
    * A confirmed contract had to change, so the confirmation behind it no
    * longer describes what would be published.
    *
@@ -81,14 +90,28 @@ export function groundCapability(
   intelligence: ApplicationIntelligence = {}
 ): GroundedCapability {
   const canonical = canonicalizeCapabilityInputs(capability, trace, intelligence);
-  const withdraw = canonical.renames.length > 0 && capability.provenance.confirmedByHuman;
+
+  /* --- the system's own contribution to the contract -------------------- *
+   * The human taught which FIELDS to change. Platform and Application
+   * Intelligence contribute which RECORD to change them on, because an
+   * agent invoking this later has opened nothing and chosen nothing.
+   *
+   * Added here, before confirmation, precisely because it changes the
+   * agent-facing contract — the same reason canonical renaming happens
+   * here. A person must approve the contract that gets published, and that
+   * contract includes a parameter they did not demonstrate.
+   */
+  const identity = requiredTargetIdentity(capability, trace, intelligence);
+  const withIdentity = identity ? withTargetIdentityInput(canonical.capability, identity) : canonical.capability;
+  const identityAdded = withIdentity !== canonical.capability;
+
+  // A rename or a newly added identity parameter both change what an agent
+  // would receive, so both invalidate a confirmation given for the old one.
+  const withdraw = (canonical.renames.length > 0 || identityAdded) && capability.provenance.confirmedByHuman;
 
   const grounded: SemanticCapability = withdraw
-    ? {
-        ...canonical.capability,
-        provenance: { ...canonical.capability.provenance, source: "inferred", confirmedByHuman: false }
-      }
-    : canonical.capability;
+    ? { ...withIdentity, provenance: { ...withIdentity.provenance, source: "inferred", confirmedByHuman: false } }
+    : withIdentity;
 
   // Resolved again under the names the contract now carries, so every
   // question a human is asked describes the capability in front of them
@@ -106,7 +129,58 @@ export function groundCapability(
     renames: canonical.renames,
     noncanonical: tenantDerived.filter((name) => mapping.mapping[name] !== undefined),
     unresolved: tenantDerived.filter((name) => mapping.mapping[name] === undefined),
+    ...(identity ? { targetIdentity: identity } : {}),
     confirmationWithdrawn: withdraw
+  };
+}
+
+/**
+ * Whether this capability operates on an existing entity, and what would
+ * identify it.
+ *
+ * The signal for "operates on an existing record" is the same one the
+ * binding proposal already trusts: the trace shows a commit against a
+ * record page. A capability that never saved anything is not a mutation,
+ * and a page that named no record type gives nothing to identify.
+ */
+function requiredTargetIdentity(
+  capability: SemanticCapability,
+  trace: ObservationTrace,
+  intelligence: ApplicationIntelligence
+): TargetIdentityRequirement | undefined {
+  if (capability.safety.readOnly) return undefined;
+  if (!trace.observations.some((observation) => observation.action === "save")) return undefined;
+  return targetIdentityFor(intelligence.platform, observedRecordType(trace));
+}
+
+/**
+ * Adds the identity parameter, unless the contract already carries it.
+ *
+ * Returns the SAME object when nothing changed, so the caller can tell an
+ * addition from a no-op by identity — which is what decides whether a
+ * standing confirmation still describes the contract.
+ *
+ * It goes first in the input list because it selects what everything else
+ * applies to, and reading a contract in that order is how a person
+ * understands it.
+ */
+function withTargetIdentityInput(
+  capability: SemanticCapability,
+  identity: TargetIdentityRequirement
+): SemanticCapability {
+  if (capability.inputs.some((input) => input.name === identity.inputName)) return capability;
+  return {
+    ...capability,
+    inputs: [
+      {
+        name: identity.inputName,
+        description: identity.description,
+        type: "string",
+        required: true,
+        role: "target-identity"
+      },
+      ...capability.inputs
+    ]
   };
 }
 
