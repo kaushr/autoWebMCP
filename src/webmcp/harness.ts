@@ -243,38 +243,75 @@ export interface HarnessInvocationOutcome {
   unparsed?: string;
 }
 
-export function readToolResult(result: WebMcpToolResult, route: InvocationRoute): HarnessInvocationOutcome {
-  // Deliberately permissive about the envelope and strict about the
-  // payload. The envelope is the browser's, and a `content` entry missing
-  // its `type` is not a reason to discard text that is plainly there;
-  // whether that text is an execution result is a separate question,
-  // answered below.
-  const content = result?.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content
-            .map((block) => (typeof block?.text === "string" ? block.text : ""))
-            .filter(Boolean)
-            .join("\n")
-        : typeof result === "string"
-          ? result
-          : "";
+/** Text carried by a WebMCP content envelope, in whatever shape it arrives. */
+function textFromEnvelope(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return undefined;
+  const content = (value as WebMcpToolResult).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  // Any entry carrying text counts. The envelope is the browser's, and
+  // discarding text that is plainly there because a `type` field is absent
+  // would report a caller's problem as the tool's.
+  const text = content
+    .map((block) => (typeof block?.text === "string" ? block.text : ""))
+    .filter(Boolean)
+    .join("\n");
+  return text || undefined;
+}
 
-  if (!text) {
-    return { route, text: "", unparsed: "The tool returned no readable content." };
-  }
+/** How deep to keep unwrapping before concluding the payload is not ours. */
+const MAX_ENVELOPE_DEPTH = 4;
 
-  try {
-    const parsed = JSON.parse(text) as ExecutionResult;
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.checks)) {
-      return { route, execution: parsed, text };
+/**
+ * Reads what a tool returned, through however many envelopes it arrives in.
+ *
+ * A live invocation established that Chrome's `executeTool` resolves with
+ * the ENTIRE result envelope serialized as a string — so the payload is a
+ * JSON string, containing an envelope, whose content entry holds another
+ * JSON string, which is the execution result. Unwrapping one layer found
+ * valid JSON that was not a result, and the panel blamed the tool for a
+ * shape it had itself failed to open.
+ *
+ * So layers are peeled until something answers to being an execution
+ * result, bounded rather than unbounded: a payload that never becomes one
+ * is reported as what it is, with the raw text kept for reading.
+ */
+export function readToolResult(result: WebMcpToolResult | string, route: InvocationRoute): HarnessInvocationOutcome {
+  const text = textFromEnvelope(result);
+  if (!text) return { route, text: "", unparsed: "The tool returned no readable content." };
+
+  let payload = text;
+  for (let depth = 0; depth < MAX_ENVELOPE_DEPTH; depth++) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return {
+        route,
+        text,
+        unparsed: depth === 0 ? "The tool's response was not JSON." : "The tool's response did not contain a result."
+      };
     }
-    return { route, text, unparsed: "The tool returned JSON that is not an execution result." };
-  } catch {
-    return { route, text, unparsed: "The tool's response was not JSON." };
+
+    if (isExecutionResult(parsed)) return { route, execution: parsed, text };
+
+    // Not a result, but possibly another envelope around one.
+    const inner = textFromEnvelope(parsed);
+    if (!inner || inner === payload) {
+      return { route, text, unparsed: "The tool returned JSON that is not an execution result." };
+    }
+    payload = inner;
   }
+
+  return { route, text, unparsed: "The tool's response was nested more deeply than this panel unwraps." };
+}
+
+/** Whether a decoded payload is an execution result rather than something else shaped like JSON. */
+function isExecutionResult(value: unknown): value is ExecutionResult {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as ExecutionResult;
+  return Array.isArray(candidate.checks) && typeof candidate.status === "string";
 }
 
 /**

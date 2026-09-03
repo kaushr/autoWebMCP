@@ -289,3 +289,55 @@ describe("an unreadable tool response is reported as such", () => {
     expect(outcome.execution?.status).toBe("blocked");
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * The envelope a live invocation actually arrives in.
+ *
+ * Chrome's executeTool resolves with the WHOLE result envelope serialized
+ * as a string. So the payload is a JSON string, containing an envelope,
+ * whose content entry holds another JSON string, which is the execution
+ * result. Unwrapping one layer finds valid JSON that is not a result — and
+ * the panel blamed the tool for a shape it had failed to open.
+ * ------------------------------------------------------------------ */
+
+describe("a result is found through however many envelopes it arrives in", () => {
+  const execution = {
+    status: "partially_verified",
+    checks: [{ name: "value_set", status: "pass", detail: "written" }],
+    transactions: [{ name: "stage", requestedValue: "Confirm", verified: "yes", detail: "ok" }],
+    evidence: [],
+    warnings: [],
+    executedAt: "2026-09-03T00:00:00.000Z"
+  };
+
+  it("reads the shape a live Chrome invocation returned", () => {
+    // Exactly what came back from the org: the envelope, stringified.
+    const live = JSON.stringify({ content: [{ type: "text", text: JSON.stringify(execution) }] });
+    const outcome = readToolResult(live, "webmcp");
+    expect(outcome.execution?.status).toBe("partially_verified");
+    expect(outcome.unparsed).toBeUndefined();
+  });
+
+  it("still reads the plain envelope, which is what the API's own type promises", () => {
+    const outcome = readToolResult({ content: [{ type: "text", text: JSON.stringify(execution) }] }, "webmcp");
+    expect(outcome.execution?.status).toBe("partially_verified");
+  });
+
+  it("does not mistake an arbitrary JSON object for a result", () => {
+    // Unwrapping must not become "keep going until something parses".
+    const outcome = readToolResult(JSON.stringify({ ok: true, note: "not a result" }), "webmcp");
+    expect(outcome.execution).toBeUndefined();
+    expect(outcome.unparsed).toMatch(/not an execution result/i);
+  });
+
+  it("gives up rather than looping on a payload that never resolves", () => {
+    const outcome = readToolResult(JSON.stringify({ content: [{ type: "text", text: "still not json" }] }), "webmcp");
+    expect(outcome.execution).toBeUndefined();
+    expect(outcome.text).toContain("still not json");
+  });
+
+  it("requires both a status and checks before calling something a result", () => {
+    expect(readToolResult(JSON.stringify({ checks: [] }), "webmcp").execution).toBeUndefined();
+    expect(readToolResult(JSON.stringify({ status: "succeeded" }), "webmcp").execution).toBeUndefined();
+  });
+});
