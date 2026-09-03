@@ -422,6 +422,21 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
     () => locationOf() !== addressBefore,
     before
   );
+
+  // What the reading was working with, recorded whether or not it
+  // succeeded. Without this an empty result is indistinguishable between
+  // "the application found nothing", "the page never changed", and "the
+  // records are there and the extraction cannot see them" — three
+  // different problems that look identical from outside.
+  const onPageNow = candidatesOnPage(root, undefined, identity, adapter);
+  evidence.push(
+    `Reading: ${before.size} record link(s) before, ${onPageNow.length} after; ` +
+      `the address ${locationOf() !== addressBefore ? "changed" : "did not change"}` +
+      (onPageNow.length > 0
+        ? `; on the page now: ${onPageNow.map((entry) => `${entry.name} [${entry.entityType}]`).join(", ")}`
+        : "") +
+      "."
+  );
   evidence.push(
     candidates.length === 0
       ? "No identifiable records were found on the page after searching."
