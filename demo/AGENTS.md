@@ -40,6 +40,22 @@ When you move between the pages, call `getTools()` again. A tool handle
 from one document is not valid on another. If a call reports that a tool or
 its registration is stale, reload that page, re-discover, and try once more.
 
+## The application tab you do not control
+
+The Salesforce tools do not act on the control page. They act on a separate
+Salesforce tab, which must already be open and registered with the Teach
+Mode extension before you start — a human does that from the extension's
+popup, and you cannot do it for them.
+
+You do not need to open Salesforce, and you should not navigate it. The
+tools reach it themselves: one that needs a record open says so and opens
+it, one that needs a list view does the same. That is why a `blocked`
+result telling you to invoke again is an instruction rather than a failure.
+
+If a tool reports that no target tab is known, stop and say so. It means
+the extension has no Salesforce tab registered, and the fix is a person
+pressing Start then Stop in the extension popup on that tab.
+
 ## What you may use
 
 Only these WebMCP tools.

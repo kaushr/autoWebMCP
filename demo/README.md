@@ -28,10 +28,18 @@ is an excellent way to test code that is not running.
 
 ## Before a run
 
+Four tabs: the Studio, SignalBase, the WebMCP control page, and the
+Salesforce org itself. The last one hosts no tools — it is what the
+Salesforce tools act on, and nothing works until the extension knows which
+tab it is.
+
 1. `chrome://extensions` → reload **AutoWebMCP Teach Mode**
 2. Salesforce: open the record, close any edit modal left open
 3. Extension popup → **Start training** → **Stop training** (registers the tab)
 4. Hard-reload the Studio and the control page
+
+Step 3 is the one that is easy to skip and impossible to guess: without it
+every Salesforce tool answers "no target tab is known".
 
 If an orange banner appears, do what it says. It compares the build stamp
 the page carries against the one the loaded extension carries, and against

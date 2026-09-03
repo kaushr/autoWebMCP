@@ -17,6 +17,13 @@ Call `getTools()` again whenever you switch pages; a tool handle from one
 document is not valid on another. If a call reports a tool or registration
 is stale, reload that page, re-discover, and try once more.
 
+The Salesforce tools do not act on the control page. They act on a separate
+Salesforce tab that a human has already opened and registered with the
+Teach Mode extension. Do not open or navigate Salesforce yourself — the
+tools reach it on their own, and a `blocked` result telling you to invoke
+again is an instruction, not a failure. If a tool reports that no target
+tab is known, stop and say so; only a person can register it.
+
 Use nothing else. Do not click through application UI, do not call any REST
 API or connector to change anything, and do not answer from the public web
 or your own knowledge — the data here is a fixture and will not match the
