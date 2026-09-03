@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
@@ -579,15 +579,32 @@ createServer(async (request, response) => {
 
     const requestedPath = request.url?.split("?")[0] ?? "/";
     const candidate = normalize(join(staticRoot, requestedPath === "/" ? "index.html" : requestedPath));
-    const filePath = candidate.startsWith(staticRoot) && existsSync(candidate) ? candidate : join(staticRoot, "index.html");
+    const withinRoot = candidate.startsWith(staticRoot) && existsSync(candidate);
+    // A directory is not a file. `/prospect/` resolved to a real path, was
+    // streamed, and `EISDIR` fired on a ReadStream nobody was listening to
+    // — which does not fail the request, it kills the process. Opening
+    // SignalBase took the whole control plane down with it.
+    const resolved = withinRoot && statSync(candidate).isDirectory() ? join(candidate, "index.html") : candidate;
+    const filePath = withinRoot && existsSync(resolved) ? resolved : join(staticRoot, "index.html");
     response.writeHead(200, {
       "Content-Type": mimeTypes[extname(filePath)] ?? "application/octet-stream",
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Permissions-Policy": "webmcp=(self)"
     });
-    if (request.method === "HEAD") response.end();
-    else createReadStream(filePath).pipe(response);
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+    const stream = createReadStream(filePath);
+    // An unhandled "error" on a stream is a process-level throw, not a
+    // failed response. A static file server must never be able to take the
+    // API down with it.
+    stream.on("error", (streamError) => {
+      console.warn(`could not serve ${filePath}: ${streamError.message}`);
+      response.destroy();
+    });
+    stream.pipe(response);
   } catch (error) {
     send(response, 500, { error: error instanceof Error ? error.message : "Internal error" });
   }

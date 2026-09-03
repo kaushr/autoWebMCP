@@ -87,7 +87,7 @@ function searchView(query: string): string {
 
   const list = results.length
     ? `<ul class="card-list">${results.map(companyCard).join("")}</ul>`
-    : `<p class="empty">No companies match that search. Try an account name such as “Acme”, or an industry such as “Logistics”.</p>`;
+    : `<p class="empty">No companies match that search. Try an account name such as “Tesla”, or an industry such as “Logistics”.</p>`;
 
   return `
     <section class="hero" aria-labelledby="search-heading">
@@ -104,7 +104,7 @@ function searchView(query: string): string {
             name="q"
             type="search"
             value="${escapeHtml(trimmed)}"
-            placeholder="e.g. Acme"
+            placeholder="e.g. Tesla"
             autocomplete="off"
             spellcheck="false"
           />

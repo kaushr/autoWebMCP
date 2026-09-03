@@ -63,7 +63,7 @@ type CompanySeed = [
 ];
 
 const companySeeds: CompanySeed[] = [
-  ["acme", "Acme Industrial", "acmeindustrial.example", "Industrial Manufacturing", 7400, "Columbus, OH", "Global manufacturer of precision components, modernizing how it sources direct materials across eleven plants."],
+  ["tesla", "Tesla Motors", "teslamotors.example", "Industrial Manufacturing", 7400, "Columbus, OH", "Global manufacturer of precision components, modernizing how it sources direct materials across eleven plants."],
   ["northstar", "Northstar Logistics", "northstarlogistics.example", "Logistics", 3200, "Minneapolis, MN", "Regional freight network expanding carrier operations into the Southeast."],
   ["harbor", "Harbor Health Systems", "harborhealth.example", "Healthcare", 8600, "Baltimore, MD", "Integrated care provider standardizing clinical and back-office systems across 14 hospitals."],
   ["vertex", "Vertex Software", "vertexsoftware.example", "Software", 1900, "Austin, TX", "B2B workflow platform moving upmarket into regulated enterprise accounts."],
@@ -98,105 +98,105 @@ export const companies: Company[] = companySeeds.map(
 );
 
 /**
- * Acme is the demo account. It deliberately carries three procurement people at
+ * Tesla is the demo account. It deliberately carries three procurement people at
  * three seniorities so that "the most relevant procurement executive" has to be
  * reasoned about from function and seniority rather than read off a flag.
  */
-const acmeContacts: Contact[] = [
+const teslaContacts: Contact[] = [
   {
-    id: "contact-acme-01",
-    companyId: "acme",
+    id: "contact-tesla-01",
+    companyId: "tesla",
     name: "Maya Chen",
     title: "VP Procurement",
     function: "Procurement",
     seniority: "VP",
     location: "Columbus, OH",
-    email: "maya.chen@acmeindustrial.example",
+    email: "maya.chen@teslamotors.example",
     phone: "+1 (614) 555-0143",
     responsibilitySummary:
       "Owns strategic sourcing, supplier performance, and the direct-materials category budget."
   },
   {
-    id: "contact-acme-02",
-    companyId: "acme",
+    id: "contact-tesla-02",
+    companyId: "tesla",
     name: "Daniel Brooks",
     title: "Procurement Manager",
     function: "Procurement",
     seniority: "Manager",
     location: "Columbus, OH",
-    email: "daniel.brooks@acmeindustrial.example",
+    email: "daniel.brooks@teslamotors.example",
     phone: "+1 (614) 555-0188",
     responsibilitySummary: "Runs day-to-day sourcing events and supplier onboarding for two plants."
   },
   {
-    id: "contact-acme-03",
-    companyId: "acme",
+    id: "contact-tesla-03",
+    companyId: "tesla",
     name: "Nina Alvarez",
     title: "Director, Indirect Procurement",
     function: "Procurement",
     seniority: "Director",
     location: "Chicago, IL",
-    email: "nina.alvarez@acmeindustrial.example",
+    email: "nina.alvarez@teslamotors.example",
     phone: "+1 (312) 555-0117",
     responsibilitySummary: "Leads indirect spend categories including facilities, MRO, and services."
   },
   {
-    id: "contact-acme-04",
-    companyId: "acme",
+    id: "contact-tesla-04",
+    companyId: "tesla",
     name: "Priya Shah",
     title: "SVP Operations",
     function: "Operations",
     seniority: "SVP",
     location: "Columbus, OH",
-    email: "priya.shah@acmeindustrial.example",
+    email: "priya.shah@teslamotors.example",
     phone: "+1 (614) 555-0102",
     responsibilitySummary: "Executive sponsor for manufacturing throughput and operational excellence."
   },
   {
-    id: "contact-acme-05",
-    companyId: "acme",
+    id: "contact-tesla-05",
+    companyId: "tesla",
     name: "Marcus Lee",
     title: "Chief Information Officer",
     function: "Information Technology",
     seniority: "C-Level",
     location: "Columbus, OH",
-    email: "marcus.lee@acmeindustrial.example",
+    email: "marcus.lee@teslamotors.example",
     phone: "+1 (614) 555-0110",
     responsibilitySummary: "Accountable for enterprise applications, integration, and technology spend."
   },
   {
-    id: "contact-acme-06",
-    companyId: "acme",
+    id: "contact-tesla-06",
+    companyId: "tesla",
     name: "Tomas Weber",
     title: "VP Information Technology",
     function: "Information Technology",
     seniority: "VP",
     location: "Detroit, MI",
-    email: "tomas.weber@acmeindustrial.example",
+    email: "tomas.weber@teslamotors.example",
     phone: "+1 (313) 555-0164",
     responsibilitySummary: "Runs plant systems, ERP delivery, and the manufacturing data platform."
   },
   {
-    id: "contact-acme-07",
-    companyId: "acme",
+    id: "contact-tesla-07",
+    companyId: "tesla",
     name: "Elena Garcia",
     title: "Chief Financial Officer",
     function: "Finance",
     seniority: "C-Level",
     location: "Columbus, OH",
-    email: "elena.garcia@acmeindustrial.example",
+    email: "elena.garcia@teslamotors.example",
     phone: "+1 (614) 555-0129",
     responsibilitySummary: "Approves capital allocation and multi-year supplier commitments."
   },
   {
-    id: "contact-acme-08",
-    companyId: "acme",
+    id: "contact-tesla-08",
+    companyId: "tesla",
     name: "Jordan Kim",
     title: "Director, Sales Operations",
     function: "Sales",
     seniority: "Director",
     location: "Columbus, OH",
-    email: "jordan.kim@acmeindustrial.example",
+    email: "jordan.kim@teslamotors.example",
     phone: "+1 (614) 555-0175",
     responsibilitySummary: "Owns forecasting, territory design, and revenue systems."
   }
@@ -253,7 +253,7 @@ const responsibilityByFunction: Record<ContactFunction, string> = {
 };
 
 const generatedContacts: Contact[] = companies
-  .filter((company) => company.id !== "acme")
+  .filter((company) => company.id !== "tesla")
   .flatMap((company, companyIndex) =>
     roleTemplates[companyIndex % roleTemplates.length].map((role, roleIndex) => {
       const seed = companyIndex * roleTemplates[0].length + roleIndex;
@@ -273,4 +273,4 @@ const generatedContacts: Contact[] = companies
     })
   );
 
-export const contacts: Contact[] = [...acmeContacts, ...generatedContacts];
+export const contacts: Contact[] = [...teslaContacts, ...generatedContacts];

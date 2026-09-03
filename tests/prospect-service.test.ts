@@ -40,15 +40,15 @@ describe("Prospect Intelligence dataset", () => {
 });
 
 describe("Company search", () => {
-  it("finds Acme by name and is case insensitive", () => {
-    expect(searchCompanies("Acme").map((company) => company.id)).toEqual(["acme"]);
-    expect(searchCompanies("acme").map((company) => company.id)).toEqual(["acme"]);
-    expect(searchCompanies("  ACME  ").map((company) => company.id)).toEqual(["acme"]);
+  it("finds Tesla by name and is case insensitive", () => {
+    expect(searchCompanies("Tesla").map((company) => company.id)).toEqual(["tesla"]);
+    expect(searchCompanies("tesla").map((company) => company.id)).toEqual(["tesla"]);
+    expect(searchCompanies("  TESLA  ").map((company) => company.id)).toEqual(["tesla"]);
   });
 
   it("also matches partial names, domains, and industries", () => {
-    expect(searchCompanies("acm").map((company) => company.id)).toEqual(["acme"]);
-    expect(searchCompanies("acmeindustrial.example").map((company) => company.id)).toEqual(["acme"]);
+    expect(searchCompanies("tes").map((company) => company.id)).toEqual(["tesla"]);
+    expect(searchCompanies("teslamotors.example").map((company) => company.id)).toEqual(["tesla"]);
     expect(searchCompanies("Logistics").map((company) => company.id)).toContain("northstar");
   });
 
@@ -59,11 +59,11 @@ describe("Company search", () => {
   });
 });
 
-describe("Contact filtering at Acme", () => {
+describe("Contact filtering at Tesla", () => {
   it("maps the buying committee the demo reasons over", () => {
-    const acme = findContacts({ company_id: "acme" });
-    expect(countContacts("acme")).toBe(acme.length);
-    expect(acme.map((contact) => `${contact.name} — ${contact.title}`)).toEqual([
+    const tesla = findContacts({ company_id: "tesla" });
+    expect(countContacts("tesla")).toBe(tesla.length);
+    expect(tesla.map((contact) => `${contact.name} — ${contact.title}`)).toEqual([
       "Maya Chen — VP Procurement",
       "Daniel Brooks — Procurement Manager",
       "Nina Alvarez — Director, Indirect Procurement",
@@ -76,21 +76,21 @@ describe("Contact filtering at Acme", () => {
   });
 
   it("narrows by function, then by seniority", () => {
-    const procurement = findContacts({ company_id: "acme", function: "Procurement" });
+    const procurement = findContacts({ company_id: "tesla", function: "Procurement" });
     expect(procurement.map((contact) => contact.seniority)).toEqual(["VP", "Manager", "Director"]);
 
-    const executive = findContacts({ company_id: "acme", function: "Procurement", seniority: "VP" });
+    const executive = findContacts({ company_id: "tesla", function: "Procurement", seniority: "VP" });
     expect(executive.map((contact) => contact.name)).toEqual(["Maya Chen"]);
   });
 
   it("does not encode a single hardcoded answer: several procurement seniorities exist", () => {
-    const procurement = findContacts({ company_id: "acme", function: "Procurement" });
+    const procurement = findContacts({ company_id: "tesla", function: "Procurement" });
     expect(procurement.length).toBeGreaterThan(1);
     expect(new Set(procurement.map((contact) => contact.seniority)).size).toBeGreaterThan(1);
   });
 
   it("filters title keywords and retrieves a contact by id", () => {
-    const results = findContacts({ company_id: "acme", title_keywords: "VP procurement" });
+    const results = findContacts({ company_id: "tesla", title_keywords: "VP procurement" });
     expect(results).toHaveLength(1);
     expect(getContact(results[0].id)?.name).toBe("Maya Chen");
   });
@@ -103,7 +103,7 @@ describe("Contact filtering at Acme", () => {
   });
 
   it("is stable across repeated calls", () => {
-    const input = { company_id: "acme", function: "Procurement", seniority: "VP" };
+    const input = { company_id: "tesla", function: "Procurement", seniority: "VP" };
     expect(findContacts(input)).toEqual(findContacts(input));
   });
 });
@@ -124,13 +124,13 @@ describe("Reference capability contracts", () => {
   it("runs the demo path end to end through the execution bindings", () => {
     const byId = (id: string) => referenceCapabilities.find((capability) => capability.id === id)!;
 
-    const found = invokeProspectBinding(byId("search_companies"), { query: "Acme" }) as {
+    const found = invokeProspectBinding(byId("search_companies"), { query: "Tesla" }) as {
       companies: Array<{ id: string }>;
     };
-    expect(found.companies.map((company) => company.id)).toEqual(["acme"]);
+    expect(found.companies.map((company) => company.id)).toEqual(["tesla"]);
 
     const candidates = invokeProspectBinding(byId("find_contacts"), {
-      company_id: "acme",
+      company_id: "tesla",
       function: "Procurement",
       seniority: "VP"
     }) as { contacts: Array<{ id: string }> };
@@ -140,9 +140,9 @@ describe("Reference capability contracts", () => {
       contact_id: candidates.contacts[0].id
     }) as { contact: { name: string; email: string } | null };
     expect(contact.contact?.name).toBe("Maya Chen");
-    expect(contact.contact?.email).toBe("maya.chen@acmeindustrial.example");
+    expect(contact.contact?.email).toBe("maya.chen@teslamotors.example");
 
-    const company = invokeProspectBinding(byId("get_company"), { company_id: "acme" }) as {
+    const company = invokeProspectBinding(byId("get_company"), { company_id: "tesla" }) as {
       company: { headquarters: string } | null;
     };
     expect(company.company?.headquarters).toBe("Columbus, OH");
@@ -166,7 +166,7 @@ describe("Reference capability contracts", () => {
     expect(findContactsTool.inputSchema.required).toEqual(["company_id"]);
     expect(findContactsTool.inputSchema.properties.seniority?.enum).toContain("VP");
 
-    const result = await findContactsTool.execute({ company_id: "acme", function: "Procurement", seniority: "VP" });
+    const result = await findContactsTool.execute({ company_id: "tesla", function: "Procurement", seniority: "VP" });
     expect(JSON.parse(result.content[0].text).contacts[0].name).toBe("Maya Chen");
   });
 

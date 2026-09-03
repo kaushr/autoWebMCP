@@ -42,7 +42,7 @@ describe("Publication gate", () => {
       ...taughtAndBound(),
       provenance: {
         ...findRelevantContactsProposal.provenance,
-        sourceApplication: sourceApplicationFor("salesforce-lightning", "acme.lightning.force.com")
+        sourceApplication: sourceApplicationFor("salesforce-lightning", "tesla.lightning.force.com")
       }
     });
     expect(() => assertPublishable(borrowed)).toThrow(/must belong to the application/);
@@ -84,7 +84,7 @@ describe("Binding resolution on the taught site", () => {
       binding: { application: "salesforce-lightning", action: "find_relevant_contacts" }
     };
     expect(bindingActionFor(elsewhere)).toBeUndefined();
-    expect(() => invokeProspectBinding(elsewhere, { company: "Acme" })).toThrow(/No execution binding/);
+    expect(() => invokeProspectBinding(elsewhere, { company: "Tesla" })).toThrow(/No execution binding/);
   });
 
   it("refuses a capability this site has no implementation for", () => {
@@ -113,24 +113,24 @@ describe("Published capability execution", () => {
 
   it("runs the whole research workflow through the site's own service", async () => {
     const tool = compileCapability(published, invokeProspectBinding);
-    const result = await tool.execute({ company: "Acme", function: "Procurement", seniority: "VP" });
+    const result = await tool.execute({ company: "Tesla", function: "Procurement", seniority: "VP" });
     const payload = JSON.parse(result.content[0].text) as {
       company: { id: string } | null;
       contacts: Array<{ name: string; title: string; email: string }>;
     };
 
-    expect(payload.company?.id).toBe("acme");
+    expect(payload.company?.id).toBe("tesla");
     expect(payload.contacts).toHaveLength(1);
     expect(payload.contacts[0].name).toBe("Maya Chen");
     expect(payload.contacts[0].title).toBe("VP Procurement");
-    expect(payload.contacts[0].email).toBe("maya.chen@acmeindustrial.example");
+    expect(payload.contacts[0].email).toBe("maya.chen@teslamotors.example");
   });
 
   it("resolves the company the way the human typed it, not by internal id", async () => {
     const tool = compileCapability(published, invokeProspectBinding);
-    for (const company of ["Acme", "acme industrial", "ACME"]) {
+    for (const company of ["Tesla", "tesla motors", "TESLA"]) {
       const result = await tool.execute({ company });
-      expect(JSON.parse(result.content[0].text).company.id).toBe("acme");
+      expect(JSON.parse(result.content[0].text).company.id).toBe("tesla");
     }
   });
 
@@ -140,7 +140,7 @@ describe("Published capability execution", () => {
       inputs: published.inputs.map((input) => (input.name === "company" ? { ...input, name: "company_name" } : input))
     };
     const result = await compileCapability(renamed, invokeProspectBinding).execute({
-      company_name: "Acme",
+      company_name: "Tesla",
       function: "Procurement"
     });
     expect(JSON.parse(result.content[0].text).contacts).toHaveLength(3);

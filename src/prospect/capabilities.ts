@@ -76,7 +76,7 @@ export const referenceCapabilities: SemanticCapability[] = [
 
 /**
  * What the semanticizer is expected to propose from the canonical training
- * session: search Acme, open it, filter by function and seniority, open a
+ * session: search Tesla, open it, filter by function and seniority, open a
  * person. One business outcome, not four UI primitives.
  *
  * This is a test fixture and a review reference. The recorder must never emit
