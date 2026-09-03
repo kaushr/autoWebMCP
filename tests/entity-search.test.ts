@@ -550,6 +550,73 @@ describe("an application can answer without navigating", () => {
   });
 });
 
+describe("a list that filters in place is answering too", () => {
+  it("returns the narrowed set, which is never anything new", async () => {
+    // The structural flaw this closes. A list view already shows records,
+    // and searching NARROWS it — the results are always a subset of what
+    // was there, so "candidates that were not there before" is empty by
+    // construction and the answer was discarded every time.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" /><button id="go">Go</button>
+      <table role="grid"><tbody id="rows">
+        <tr><th><a href="/lightning/r/${ACME_A}/view">PS Project Test</a></th></tr>
+        <tr><th><a href="/lightning/r/${ACME_B}/view">Another Opportunity</a></th></tr>
+        <tr><th><a href="/lightning/r/${ACCOUNT}/view">An Account</a></th></tr>
+      </tbody></table>
+    `;
+    // Filtering removes rows; it never adds any.
+    document.querySelector("#go")!.addEventListener("click", () => {
+      document.querySelector("#rows")!.innerHTML =
+        `<tr><th><a href="/lightning/r/${ACME_A}/view">PS Project Test</a></th></tr>`;
+    });
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: {
+        ...BINDING,
+        query: { inputName: "name", semanticTarget: { role: "field", label: "Search this list..." } },
+        open: undefined,
+        submit: { role: "button", label: "Go" },
+        submitKey: undefined
+      },
+      inputs: { name: "PS" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 1_000
+    });
+
+    expect(outcome.candidates.map((c) => c.id)).toEqual([ACME_A]);
+  });
+
+  it("still returns nothing when the set never changed", async () => {
+    // A search that did not run leaves the page exactly as it was, and
+    // that is the one case where the records on screen are not an answer.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" />
+      <table role="grid"><tbody>
+        <tr><th><a href="/lightning/r/${ACME_A}/view">Untouched</a></th></tr>
+      </tbody></table>
+    `;
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: {
+        ...BINDING,
+        query: { inputName: "name", semanticTarget: { role: "field", label: "Search this list..." } },
+        open: undefined,
+        submit: undefined,
+        submitKey: undefined
+      },
+      inputs: { name: "PS" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 100
+    });
+    expect(outcome.candidates).toEqual([]);
+  });
+});
+
 /* ============ the handoff into a mutation ============ */
 
 describe("what search returns is what update requires", () => {

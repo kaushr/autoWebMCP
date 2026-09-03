@@ -267,19 +267,22 @@ async function collectCandidates(
   const deadline = Date.now() + waitMs;
   for (;;) {
     const all = candidatesOnPage(root, entityType, identity, adapter);
+
     // Whether what is on screen answers THIS search.
     //
-    // If the application navigated in response, the page is its answer and
-    // everything on it counts — including records that were already
-    // linked, because searching twice for the same thing must not return
-    // less the second time.
+    // The question is not "what is new" — a list view already shows
+    // records, and searching it NARROWS the set, so the results are always
+    // a subset of what was there and nothing is ever new. It is whether
+    // the application responded at all: a set that differs from the one
+    // present before, in either direction, is the application answering.
     //
-    // If it did not navigate, the page is the one we started on, and the
-    // links that were already there are not results. That distinction is
-    // what stops a search run from a record page reporting that record's
-    // own account and owner as matches.
-    const found = navigated() ? all : all.filter((candidate) => !before.has(candidate.id));
-    if (found.length > 0 || Date.now() >= deadline) return found;
+    // Navigating is the same fact more loudly, and is taken as sufficient
+    // on its own so that searching twice for the same thing does not have
+    // to produce a different set to count.
+    const changed = all.length !== before.size || all.some((candidate) => !before.has(candidate.id));
+    const answered = navigated() || changed;
+    if (answered && all.length > 0) return all;
+    if (Date.now() >= deadline) return answered ? all : [];
     await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
 }
