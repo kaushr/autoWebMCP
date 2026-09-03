@@ -52,10 +52,24 @@ declare global {
      * "already installed" flag cannot do that job — see the install block.
      */
     __autoWebMcpListener?: ContentMessageListener;
-    /** Set while a read-only inspection is running, so a second one cannot start on top of it. */
-    __autoWebMcpInspecting?: true;
+    /**
+     * When the running inspection started, so a second cannot begin on top
+     * of it — and so an abandoned one expires instead of blocking the page
+     * forever. A bare boolean made the same mistake the listener flag did:
+     * it outlived the context that set it.
+     */
+    __autoWebMcpInspecting?: number;
   }
 }
+
+/**
+ * After this long, a recorded inspection start is treated as abandoned.
+ *
+ * Comfortably above the inspection's own budget — a 3s edit wait, a 1.5s
+ * settle, the control read, a 3s restore — and below the caller's 15s
+ * patience, so a genuine run is never mistaken for a stale one.
+ */
+const INSPECTION_STALE_MS = 20_000;
 
 const FLUSH_INTERVAL_MS = 800;
 const REACTION_WINDOW_MS = 1_200;
@@ -494,7 +508,13 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
   // mode, opens a control, and puts both back. Two of them on one record
   // interleave those steps, so the second is refused rather than allowed to
   // dismiss a modal the first is still reading.
-  if (window.__autoWebMcpInspecting) {
+  // Held as a start time, not a flag. An inspection whose context died
+  // mid-run — an extension reload is the ordinary way — would otherwise
+  // leave this set forever, and every later inspection on the page would be
+  // refused for a run that is no longer happening. Its own budget bounds
+  // how long it could legitimately still be going.
+  const running = window.__autoWebMcpInspecting;
+  if (running !== undefined && Date.now() - running < INSPECTION_STALE_MS) {
     return {
       ok: false,
       reason: "introspection-failed",
@@ -503,7 +523,7 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
         "once would interfere with each other on the same record."
     };
   }
-  window.__autoWebMcpInspecting = true;
+  window.__autoWebMcpInspecting = Date.now();
   console.debug("[AutoWebMCP] content: inspecting value domains on", window.location.href);
   try {
     // Bounded on purpose. Left to their defaults these waits add up to
@@ -536,8 +556,8 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
       error: error instanceof Error ? error.message : String(error)
     };
   } finally {
-    // Released whatever happened: a failed inspection that never cleared
-    // this would lock the page out of every later attempt.
+    // Released whatever happened. The expiry above covers the case this
+    // cannot: a context that died before reaching here.
     window.__autoWebMcpInspecting = undefined;
   }
 }
