@@ -19,6 +19,13 @@ export default defineConfig({
   },
   server: {
     headers: isolationHeaders,
+    port: 5173,
+    // Fail rather than drift. The extension's content-script `matches` in
+    // extension/manifest.json name 127.0.0.1:5173 literally, so a Studio
+    // served from any other port loses the bridge entirely — the page
+    // loads, looks correct, and silently cannot reach the extension.
+    // A refusal to start is far easier to diagnose than that.
+    strictPort: true,
     proxy: {
       "/api": "http://127.0.0.1:8787"
     }
