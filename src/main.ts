@@ -59,6 +59,9 @@ import { proposeBrowserBinding } from "./binding/browserExecution/propose";
 import { applicationIntelligenceForPlatform } from "./binding/browserExecution/adapters";
 import type { InputCanonicalization } from "./training/canonicalInputs";
 import { describeWithdrawnConfirmation, groundCapability } from "./training/semanticGrounding";
+import { proposeQueryBinding, type QueryProposal } from "./binding/browserExecution/proposeQuery";
+import { entityIdentityPolicyForPlatform } from "./binding/browserExecution/adapters";
+import type { QueryOutcome } from "./binding/browserExecution/query";
 import { emptyTenantIntelligence, tenantIntelligenceFrom } from "./applicationIntelligence/tenant";
 import { mergeTenantSnapshots, type TenantFactConflict } from "./applicationIntelligence/observedTenant";
 import { observedTenantFromBinding } from "./training/tenantObservations";
@@ -127,6 +130,17 @@ let groundingRenames: InputCanonicalization[] = [];
 let groundingNoncanonical: string[] = [];
 /** Inputs nothing could ground. Different from noncanonical: these cannot execute at all. */
 let groundingUnresolved: string[] = [];
+
+/* ------------------------- entity search ------------------------- *
+ * A read-only capability's own lifecycle, kept beside the mutation
+ * one rather than folded into it: a search has no commit to invoke, no
+ * record to verify, and returns candidates instead of a changed record.
+ * ----------------------------------------------------------------- */
+let queryProposal: QueryProposal | undefined;
+let queryOutcome: QueryOutcome | undefined;
+let queryAccepted = false;
+let queryTerm = "";
+let queryStatus = "";
 
 /**
  * Value domains read from the live application, keyed by capability input.
@@ -593,6 +607,11 @@ function clearExecutionState(): void {
   groundingRenames = [];
   groundingNoncanonical = [];
   groundingUnresolved = [];
+  queryProposal = undefined;
+  queryOutcome = undefined;
+  queryAccepted = false;
+  queryTerm = "";
+  queryStatus = "";
   liveValueDomains = {};
   liveDomainProblems = {};
   liveDomainRestorationFailed = false;
@@ -1436,6 +1455,83 @@ function renderBrowserValidationStage(view: StudioLifecycleView): string {
 }
 
 /** The Publication stage. Always says exactly why, never a bare disabled button. */
+/**
+ * The entity-search lifecycle: propose, run it for real, accept, publish.
+ *
+ * Deliberately parallel to the mutation stage rather than merged with it.
+ * A search has nothing to commit and no record to verify; what a human is
+ * judging is whether it returned the right candidates from the real
+ * application, which is a different question from whether a write landed.
+ */
+function renderQueryStage(capability: SemanticCapability): string {
+  if (capability.provenance.confirmedByHuman !== true) return "";
+  if (!capability.safety.readOnly && !queryProposal) return "";
+
+  const binding = queryProposal?.binding;
+  const body = binding
+    ? `<ul class="reasons">${binding.evidence.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+       <dl class="capability-state">
+         <div><dt>Finds</dt><dd>${escapeHtml(binding.entityType)}</dd></div>
+         <div><dt>Search field</dt><dd>${escapeHtml(binding.query.semanticTarget.label)}</dd></div>
+         <div><dt>Run by</dt><dd>${escapeHtml(binding.submit?.label ?? binding.submitKey ?? "typing alone")}</dd></div>
+       </dl>
+       <div class="test-form">
+         <label>${escapeHtml(binding.query.inputName)}
+           <input type="text" id="query-term" value="${escapeHtml(queryTerm)}" placeholder="e.g. Acme Renewal" />
+         </label>
+         <div class="studio-actions">
+           <button type="button" id="run-query" ${isWorking(operations, "run-query") ? "disabled" : ""}>${
+             isWorking(operations, "run-query") ? "Searching…" : "Run search"
+           }</button>
+           ${
+             queryOutcome && queryOutcome.candidates.length > 0 && !queryAccepted
+               ? `<button type="button" id="accept-query">Accept search</button>`
+               : ""
+           }
+         </div>
+         ${renderOperationStatus("run-query", queryStatus)}
+       </div>
+       ${renderQueryCandidates()}`
+    : `<p class="semanticizer-status">${escapeHtml(
+        queryProposal?.warnings.join(" ") ?? "No search has been suggested from this recording yet."
+      )}</p>`;
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Entity search</p>
+    ${body}
+    <div class="studio-actions">
+      <button type="button" id="suggest-query" class="secondary">${
+        binding ? "Suggest again" : "Suggest an entity search"
+      }</button>
+      ${queryAccepted ? `<p class="semanticizer-status">Search accepted. It will be published with the capability.</p>` : ""}
+    </div>
+  </div>`;
+}
+
+/** What the application offered, with the identity a later step would use. */
+function renderQueryCandidates(): string {
+  if (!queryOutcome) return "";
+  if (queryOutcome.candidates.length === 0) {
+    return `<p class="semanticizer-status">${escapeHtml(
+      queryOutcome.warnings.join(" ") || "The search returned no candidates."
+    )}</p>`;
+  }
+  return `<div class="table-scroll"><table class="comparison">
+      <thead><tr><th>Name</th><th>Identity</th></tr></thead>
+      <tbody>${queryOutcome.candidates
+        .map(
+          (candidate) =>
+            `<tr><td>${escapeHtml(candidate.name)}</td><td><code>${escapeHtml(candidate.id)}</code></td></tr>`
+        )
+        .join("")}</tbody>
+    </table></div>
+    ${
+      queryOutcome.warnings.length
+        ? `<p class="ambiguity">${queryOutcome.warnings.map(escapeHtml).join(" ")}</p>`
+        : ""
+    }`;
+}
+
 function renderPublicationStage(view: StudioLifecycleView): string {
   return `<div class="lifecycle-section">
     <p class="eyebrow">Publication</p>
@@ -1954,6 +2050,7 @@ function renderTrainingStudio(): string {
         ${renderValidationStage(view)}
         ${renderBrowserExecutionStage(view)}
         ${renderBrowserValidationStage(view)}
+        ${renderQueryStage(capability)}
         ${renderPublicationStage(view)}
       </form>`;
       })()
@@ -2448,6 +2545,47 @@ function render(): void {
 
   // Publication is the moment the taught site gains a capability. The Studio
   // hands the confirmed contract to the control plane; the site compiles it.
+  document.querySelector<HTMLButtonElement>("#suggest-query")?.addEventListener("click", () => {
+    if (!candidate || !selectedTrace) return;
+    queryProposal = proposeQueryBinding(
+      candidate,
+      selectedTrace,
+      entityIdentityPolicyForPlatform(selectedTrace.application.platform)
+    );
+    queryOutcome = undefined;
+    queryAccepted = false;
+    queryStatus = "";
+    render();
+  });
+
+  const term = document.querySelector<HTMLInputElement>("#query-term");
+  // Held without re-rendering, so typing is not interrupted.
+  term?.addEventListener("input", () => {
+    queryTerm = term.value;
+  });
+
+  document.querySelector<HTMLButtonElement>("#run-query")?.addEventListener("click", () => {
+    const binding = queryProposal?.binding;
+    if (!binding) return;
+    void runOperation("run-query", "Searching the application…", async () => {
+      queryOutcome = await extensionBridgeExecutionClient.query(binding, { [binding.query.inputName]: queryTerm });
+      return {
+        message:
+          queryOutcome.candidates.length > 0
+            ? `Found ${queryOutcome.candidates.length} candidate(s).`
+            : "The search returned no candidates."
+      };
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#accept-query")?.addEventListener("click", () => {
+    // The same judgement accepting a mutation binding is: a human saw it
+    // return real candidates from the real application.
+    queryAccepted = true;
+    queryStatus = "Search accepted.";
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", () =>
     void withBusy("publish-capability", async () => {
     if (!candidate) return;
@@ -2469,7 +2607,15 @@ function render(): void {
       for (const [name, values] of Object.entries(liveValueDomains)) {
         if (values.length) domains[name] = [...values];
       }
-      const record = await publishCapability(withResolvedValueDomains(candidate, domains), accepted);
+      // A search publishes its own binding. Accepting it is the same
+      // judgement accepting a mutation binding is: a human saw it return
+      // real candidates from the real application.
+      const query = queryAccepted ? queryProposal?.binding ?? undefined : undefined;
+      const record = await publishCapability(
+        withResolvedValueDomains(candidate, domains),
+        accepted,
+        query ?? undefined
+      );
       publications = await listPublishedCapabilities();
       syncBrowserExecutionRegistrations();
       publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;

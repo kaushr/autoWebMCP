@@ -28,7 +28,8 @@ export type OperationKind =
   | "refresh-traces"
   | "reset-control-plane"
   | "save-trace-details"
-  | "invoke-webmcp";
+  | "invoke-webmcp"
+  | "run-query";
 
 export interface OperationState {
   id: string;
