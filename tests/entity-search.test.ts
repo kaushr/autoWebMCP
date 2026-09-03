@@ -53,6 +53,7 @@ function mountResults(): HTMLElement {
       <a href="/lightning/r/Opportunity/${ACME_B}/view">Acme Renewal</a>
       <a href="/lightning/r/Account/${ACCOUNT}/view">Acme Corporation</a>
       <a href="/lightning/o/Opportunity/list">All Opportunities</a>
+      <a href="/lightning/r/Opportunity/${ACME_A}/related/OpportunityLineItems/view">Products(4)</a>
     </div>
   `;
   document.querySelector("#go")!.addEventListener("click", () => {
@@ -94,6 +95,17 @@ describe("candidates carry the platform's own identity", () => {
     const candidates = candidatesOnPage(mountResults(), "Opportunity", IDENTITY, adapter());
     expect(candidates.some((candidate) => candidate.id === ACCOUNT)).toBe(false);
     expect(candidates.some((candidate) => candidate.name === "All Opportunities")).toBe(false);
+  });
+
+  it("rejects a link BENEATH a record, which is not a result for it", () => {
+    // Taken verbatim from a live Lightning page. It parses to a valid
+    // Opportunity id, and offering it would hand an agent an Opportunity
+    // named "Products(4)" whose id belongs to another record's related
+    // list. The canonical route from the pack's own template is what
+    // separates a record's own page from somewhere beneath it.
+    const candidates = candidatesOnPage(mountResults(), "Opportunity", IDENTITY, adapter());
+    expect(candidates.map((c) => c.name)).not.toContain("Products(4)");
+    expect(candidates).toHaveLength(2);
   });
 
   it("resolves the same identity from an absolute href", () => {

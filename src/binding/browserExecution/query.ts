@@ -1,4 +1,4 @@
-import { identityFromPath, sameEntity, type EntityIdentityPolicy } from "./entityIdentity";
+import { identityFromPath, isCanonicalRoute, sameEntity, type EntityIdentityPolicy } from "./entityIdentity";
 import {
   accessibleName,
   collectElements,
@@ -139,6 +139,12 @@ export function candidatesOnPage(
 
     const parsed = identityFromPath(path, identity);
     if (!parsed || !sameEntity(parsed, { id: parsed.id, entityType })) continue;
+
+    // A link BENEATH a record is not a result for it. A live page carried
+    // `/lightning/r/Opportunity/<id>/related/Products/view`, which parses
+    // to a perfectly valid Opportunity id and would have been offered as a
+    // candidate named "Products(4)".
+    if (!isCanonicalRoute(path, parsed, identity)) continue;
     if (found.has(parsed.id)) continue;
 
     // Whitespace collapsed, case preserved. `normalizeLabel` exists for

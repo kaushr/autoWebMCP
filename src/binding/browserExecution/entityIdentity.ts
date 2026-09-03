@@ -62,6 +62,24 @@ export function sameEntity(a: EntityIdentity, b: EntityIdentity): boolean {
   return true;
 }
 
+/**
+ * Whether a path is the entity's OWN page, rather than somewhere beneath it.
+ *
+ * A live Lightning page carries links like
+ * `/lightning/r/Opportunity/<id>/related/Products/view` — the record's id,
+ * on a link to one of its related lists. Reading identity from that is
+ * correct for "which record am I on"; treating it as a search RESULT is
+ * not, and would have handed an agent an Opportunity named "Products(4)".
+ *
+ * The canonical shape comes from the pack's own `routeTemplate`, so this
+ * stays as declared as the pattern that found the id in the first place.
+ */
+export function isCanonicalRoute(path: string, identity: EntityIdentity, policy: EntityIdentityPolicy): boolean {
+  const canonical = routeFor(identity, policy);
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed === canonical.replace(/\/+$/, "");
+}
+
 /** How a caller would reach this entity, for an explanation a human can act on. */
 export function routeFor(identity: EntityIdentity, policy: EntityIdentityPolicy): string {
   return policy.routeTemplate
