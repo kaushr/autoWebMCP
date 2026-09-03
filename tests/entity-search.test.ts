@@ -193,6 +193,71 @@ describe("a type filter excludes what it cannot type", () => {
   });
 });
 
+describe("a result and a field of that result look alike, and are not", () => {
+  /**
+   * The live Salesforce results page, at the structure the probe reported:
+   * the matched record's link sits in a row header and a card heading,
+   * while its account and owner sit in grid cells and card list items.
+   */
+  function mountLiveResults(): HTMLElement {
+    document.body.innerHTML = `
+      <div class="slds-card">
+        <h2 class="recordTitle"><a href="/lightning/r/${ACME_A}/view">PS Project Test - updated</a></h2>
+        <ul class="slds-card__body">
+          <li><div><a href="/lightning/r/${ACCOUNT}/view">A &amp; H Steel Ltd.</a></div></li>
+          <li><div><a href="/lightning/r/0055w00000BtwefAAB/view">KRupa</a></div></li>
+        </ul>
+      </div>
+      <table role="grid"><tbody>
+        <tr>
+          <th class="slds-cell-edit"><span><a href="/lightning/r/${ACME_A}/view">PS Project Test - updated</a></span></th>
+          <td role="gridcell"><span><a href="/lightning/r/${ACCOUNT}/view">A &amp; H Steel Ltd.</a></span></td>
+        </tr>
+        <tr>
+          <th class="slds-cell-edit"><span><a href="/lightning/r/${ACME_B}/view">Another Opportunity</a></span></th>
+          <td role="gridcell"><span><a href="/lightning/r/0055w00000BtwefAAB/view">KRupa</a></span></td>
+        </tr>
+      </tbody></table>
+    `;
+    return document.body;
+  }
+
+  it("returns the records the rows are about, not their fields", () => {
+    // Six record links, two results. The account and the owner are
+    // properties of the matched Opportunity, and returning them invites an
+    // agent to act on an Account it never searched for.
+    const candidates = candidatesOnPage(mountLiveResults(), undefined, IDENTITY, adapter());
+    expect(candidates.map((c) => c.id)).toEqual([ACME_A, ACME_B]);
+    expect(candidates.some((c) => c.entityType === "Account")).toBe(false);
+    expect(candidates.some((c) => c.entityType === "User")).toBe(false);
+  });
+
+  it("reads a card's heading and a row's header as the same kind of signal", () => {
+    // Both are standard semantics — a heading titles its card, a row
+    // header identifies its row — so neither is a platform special case.
+    document.body.innerHTML = `
+      <h3><a href="/lightning/r/${ACME_A}/view">From a heading</a></h3>
+      <table role="grid"><tbody><tr>
+        <th><a href="/lightning/r/${ACME_B}/view">From a row header</a></th>
+        <td role="gridcell"><a href="/lightning/r/${ACCOUNT}/view">A field</a></td>
+      </tr></tbody></table>
+    `;
+    expect(candidatesOnPage(document.body, undefined, IDENTITY, adapter()).map((c) => c.name)).toEqual([
+      "From a heading",
+      "From a row header"
+    ]);
+  });
+
+  it("takes every link when the page marks nothing", () => {
+    // No structure to reason from is not a reason to return nothing.
+    document.body.innerHTML = `
+      <div><a href="/lightning/r/${ACME_A}/view">One</a></div>
+      <div><a href="/lightning/r/${ACME_B}/view">Two</a></div>
+    `;
+    expect(candidatesOnPage(document.body, undefined, IDENTITY, adapter())).toHaveLength(2);
+  });
+});
+
 /* ===================== ambiguity is preserved ===================== */
 
 describe("ambiguity is returned, never resolved", () => {

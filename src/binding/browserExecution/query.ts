@@ -118,6 +118,22 @@ export interface ExecuteQueryOptions {
 const RESULT_SELECTOR = "a[href]";
 
 /**
+ * Structure that marks a link as the SUBJECT of its row or card.
+ *
+ * Standard semantics, not a platform quirk: a row header identifies its
+ * row, and a heading titles its card. A live Salesforce results page put
+ * the matched record's link in `th.slds-cell-edit` and `h2.recordTitle`,
+ * while the account and owner of that same record sat in `td[gridcell]`
+ * and card list items — fields OF the result, not results.
+ */
+const SUBJECT_SELECTOR = 'th, [role="rowheader"], h1, h2, h3, h4, h5, h6, [role="heading"]';
+
+/** Whether a link is the thing its row or card is about. */
+function isSubjectLink(link: Element): boolean {
+  return Boolean(link.closest(SUBJECT_SELECTOR));
+}
+
+/**
  * Every entity the page is currently linking to, of the type asked for.
  *
  * Identity comes from the LINK's own route, using the same declared
@@ -150,7 +166,20 @@ export function candidatesOnPage(
   const policy = policyFor(adapter);
   const found = new Map<string, EntityCandidate>();
 
-  for (const element of collectElements(root, RESULT_SELECTOR, policy)) {
+  const links = collectElements(root, RESULT_SELECTOR, policy);
+  // Prefer links the page's own structure identifies as a row's or card's
+  // subject. A search for "PS Project" returned an Opportunity, its
+  // account and its owner — three records, one result — because every
+  // record link looks alike and only the surrounding structure says which
+  // one the row is about.
+  //
+  // The preference is conditional on the page offering it: where nothing
+  // is marked, there is nothing to reason from, and every record link is
+  // taken rather than none.
+  const subjects = links.filter(isSubjectLink);
+  const considered = subjects.length > 0 ? subjects : links;
+
+  for (const element of considered) {
     if (!(element instanceof HTMLAnchorElement) || !isVisible(element)) continue;
 
     // `getAttribute` rather than `.href`: the attribute is what the
