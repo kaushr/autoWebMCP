@@ -243,12 +243,24 @@ async function collectCandidates(
   entityType: string | undefined,
   identity: EntityIdentityPolicy,
   adapter: PlatformResolverAdapter | undefined,
-  waitMs = RESULTS_WAIT_MS
+  waitMs = RESULTS_WAIT_MS,
+  /**
+   * What the page was already linking to before the search ran.
+   *
+   * Without this, "results have arrived" means "some record link exists",
+   * and a page that already had some answers instantly with the wrong
+   * ones. A live search run from an Opportunity record returned that
+   * record's own account and owner: they were on screen the whole time,
+   * and the read happened before the results page replaced them.
+   */
+  before: ReadonlySet<string> = new Set()
 ): Promise<EntityCandidate[]> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     const found = candidatesOnPage(root, entityType, identity, adapter);
-    if (found.length > 0 || Date.now() >= deadline) return found;
+    // Arrival is the page offering something it was not offering before.
+    const changed = found.some((candidate) => !before.has(candidate.id));
+    if ((found.length > 0 && changed) || Date.now() >= deadline) return found;
     await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
 }
@@ -292,6 +304,11 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
     const value = inputs[filter.inputName]?.trim();
     if (value) controls.push({ target: filter.semanticTarget, value, kind: filter.valueKind, name: filter.inputName });
   }
+
+  // What the page already links to. A search has not produced results
+  // merely because record links exist — they may be the ones that were
+  // there before it ran.
+  const before = new Set(candidatesOnPage(root, undefined, identity, adapter).map((candidate) => candidate.id));
 
   // Reveal the search field first, when the demonstration showed it being
   // opened. A control that is not on screen cannot be resolved, and the
@@ -376,7 +393,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // that matches nothing must not spin for the full budget every time, but
   // it is the only case that pays it.
   // Everything identifiable, not only the type the recording ended on.
-  const candidates = await collectCandidates(root, undefined, identity, adapter, options.resultsWaitMs);
+  const candidates = await collectCandidates(root, undefined, identity, adapter, options.resultsWaitMs, before);
   evidence.push(
     candidates.length === 0
       ? "No identifiable records were found on the page after searching."

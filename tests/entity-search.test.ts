@@ -376,7 +376,11 @@ describe("the search is performed through the application's own controls", () =>
       inputs: { name: "Acme" },
       adapter: adapter(),
       identity: IDENTITY,
-      reaction: { timeoutMs: 40, quietMs: 10 }
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      // A static fixture offers nothing new after searching, so it waits
+      // the whole budget — which is the correct behaviour being asserted
+      // elsewhere, and just needs to be short here.
+      resultsWaitMs: 50
     });
     expect((document.querySelector("#acc") as HTMLInputElement).value).toBe("untouched");
 
@@ -387,7 +391,8 @@ describe("the search is performed through the application's own controls", () =>
       inputs: { name: "Acme", account_name: "Acme Corporation" },
       adapter: adapter(),
       identity: IDENTITY,
-      reaction: { timeoutMs: 40, quietMs: 10 }
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 50
     });
     expect((document.querySelector("#acc") as HTMLInputElement).value).toBe("Acme Corporation");
   });
@@ -417,6 +422,37 @@ describe("what a search returns is the caller's to choose from", () => {
   it("narrows when a type is explicitly asked for", () => {
     const only = candidatesOnPage(mountResults(), "Account", IDENTITY, adapter());
     expect(only.every((c) => c.entityType === "Account")).toBe(true);
+  });
+});
+
+describe("results the page was already showing are not results", () => {
+  it("waits for links the page was not offering before the search", async () => {
+    // The live failure: a search run from an Opportunity record returned
+    // that record's own account and owner. They were on screen the whole
+    // time, and reading as soon as "some record link exists" found them
+    // before the results page replaced them.
+    document.body.innerHTML = `
+      <label for="q">Search</label><input id="q" /><button id="go">Search</button>
+      <div id="page">
+        <h3><a href="/lightning/r/${ACCOUNT}/view">The account already on screen</a></h3>
+      </div>
+    `;
+    setTimeout(() => {
+      document.querySelector("#page")!.innerHTML =
+        `<h3><a href="/lightning/r/${ACME_A}/view">An actual result</a></h3>`;
+    }, 250);
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: { ...BINDING, submit: undefined, submitKey: undefined },
+      inputs: { name: "Acme" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 3_000
+    });
+
+    expect(outcome.candidates.map((c) => c.name)).toEqual(["An actual result"]);
   });
 });
 
