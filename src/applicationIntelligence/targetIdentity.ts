@@ -61,8 +61,20 @@ export function targetIdentityFor(
   return {
     inputName: identityInputNameFor(entityType),
     entityType,
+    /*
+     * System-derived, deliberately, and the one input description no model
+     * ever gets a say in. Nobody demonstrated this parameter — it exists
+     * because the platform declares an identity it will gate a write on
+     * and the application says this capability acts on an existing
+     * entity — so its description states the same two things and nothing
+     * a demonstration could have suggested. The verification sentence is
+     * not a flourish: `browserExecution/execute.ts` establishes the target
+     * before touching the page and re-reads it after the commit, and the
+     * description says exactly that much and no more.
+     */
     description:
-      `Which ${entityType} to act on — the application's own record identity. ` +
-      "Not a field on the record: it selects the record."
+      `The ${entityType} record identity this capability acts on — the application's own id for it, not a field ` +
+      `on the record. Verified against the ${entityType} the application has open before anything is written, and ` +
+      "again after saving."
   };
 }

@@ -4,7 +4,7 @@ import type { TenantIntelligenceSource } from "../../applicationIntelligence/mod
 import type { ApplicationIntelligence } from "../fieldMapping";
 import { createSalesforceResolverAdapter } from "./salesforceAdapter";
 import { DEFAULT_RESOLUTION_POLICY, type ResolutionPolicy } from "./resolutionPolicy";
-import type { EntityIdentityPolicy } from "./entityIdentity";
+import { entityIdentityPolicyForPlatform, type EntityIdentityPolicy } from "./entityIdentity";
 import { DEFAULT_PAGE_STATE_POLICY, type PageStatePolicy } from "./pageState";
 import { DEFAULT_VERIFICATION_POLICY, type VerificationPolicy } from "./verificationPolicy";
 import type { PlatformResolverAdapter } from "./engine";
@@ -107,23 +107,14 @@ export function pageStatePolicyForPlatform(
  * guessing. There is deliberately no generic fallback — inventing a
  * route shape for an unknown platform is exactly the kind of guess that
  * would put a write on the wrong record.
+ *
+ * Re-exported rather than defined here. The mapping itself is pure data —
+ * no adapter, no DOM — and the pre-confirmation semantic stages need it
+ * too, so it lives beside the policy type in `entityIdentity.ts` and this
+ * composition root keeps offering it under the name every caller already
+ * uses.
  */
-export function entityIdentityPolicyForPlatform(
-  platform: string,
-  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
-): EntityIdentityPolicy | undefined {
-  const declared = intelligence.getEntityIdentity(platform);
-  if (!declared) return undefined;
-  return {
-    routePattern: declared.entityIdentity.routePattern,
-    canonicalRoutePattern: declared.entityIdentity.canonicalRoutePattern,
-    ...(declared.entityIdentity.identifierPrefixes
-      ? { identifierPrefixes: { ...declared.entityIdentity.identifierPrefixes } }
-      : {}),
-    trustworthyForMutation: declared.entityIdentity.trustworthyForMutation,
-    routeTemplate: declared.entityIdentity.routeTemplate
-  };
-}
+export { entityIdentityPolicyForPlatform } from "./entityIdentity";
 
 /**
  * How this platform's committed saves are verified, from its pack. The

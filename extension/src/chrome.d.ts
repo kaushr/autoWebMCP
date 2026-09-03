@@ -32,6 +32,8 @@ declare namespace chrome {
     }
     function query(query: { active?: boolean; currentWindow?: boolean }): Promise<Tab[]>;
     function get(tabId: number): Promise<Tab>;
+    /** Navigates a tab. Used to open the record an execution stopped for, from outside that tab. */
+    function update(tabId: number, properties: { url?: string }): Promise<Tab>;
     function sendMessage<TResponse = unknown>(tabId: number, message: unknown): Promise<TResponse>;
     const onUpdated: {
       addListener(

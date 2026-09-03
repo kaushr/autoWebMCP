@@ -50,3 +50,10 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 .acquire-domain { display: grid; gap: .45rem; margin: 0 0 .6rem; padding: .7rem .8rem; border: 1px solid #33507d; border-radius: 10px; background: rgba(10,22,41,.5); }
 button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* A parameter row now carries its agent-facing description as well as its
+   name and type. The description is the widest field and the one most
+   likely to be rewritten, so it wraps onto its own line rather than
+   squeezing the controls above it. */
+.input-list > div { flex-wrap: wrap; }
+.input-list > div > label.input-description { flex: 1 0 100%; display: grid; gap: .3rem; color: #b7c6df; font-size: .75rem; }

@@ -1,3 +1,4 @@
+import { defaultPlatformIntelligenceProvider, type PlatformIntelligenceProvider } from "../../platformIntelligence";
 import type { EntityIdentity } from "./engine";
 
 /* ------------------------------------------------------------------ *
@@ -30,6 +31,37 @@ export interface EntityIdentityPolicy {
   identifierPrefixes?: Record<string, string>;
   trustworthyForMutation: boolean;
   routeTemplate: string;
+}
+
+/**
+ * The policy a platform declares, compiled from its pack.
+ *
+ * A pure data mapping with no adapter, no DOM and no execution in scope,
+ * which is why it lives beside the type it produces rather than in the
+ * browser-execution composition root. The pre-confirmation semantic
+ * stages need to read a route's identity too — a search's description has
+ * to say what kind of thing it returns — and they must be able to do that
+ * without importing a platform's DOM adapter.
+ *
+ * `undefined` when the platform declares no identity scheme: the honest
+ * answer, and the one that leaves every caller refusing rather than
+ * guessing.
+ */
+export function entityIdentityPolicyForPlatform(
+  platform: string,
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): EntityIdentityPolicy | undefined {
+  const declared = intelligence.getEntityIdentity(platform);
+  if (!declared) return undefined;
+  return {
+    routePattern: declared.entityIdentity.routePattern,
+    canonicalRoutePattern: declared.entityIdentity.canonicalRoutePattern,
+    ...(declared.entityIdentity.identifierPrefixes
+      ? { identifierPrefixes: { ...declared.entityIdentity.identifierPrefixes } }
+      : {}),
+    trustworthyForMutation: declared.entityIdentity.trustworthyForMutation,
+    routeTemplate: declared.entityIdentity.routeTemplate
+  };
 }
 
 /** The entity type an identifier's own prefix implies, when the platform declares one. */

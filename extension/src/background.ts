@@ -536,10 +536,23 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         // if one is already present, and the execute handler here has no
         // session state to duplicate.
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-        return (await withTimeout(
+        const answer = (await withTimeout(
           chrome.tabs.sendMessage(tabId, { type: "execute:run", request: message.request }),
           EXECUTE_ANSWER_TIMEOUT_MS
         )) as BrowserBindingExecuteResponse;
+
+        // An execution that stopped because the requested record was not
+        // open says where it lives. Opening it belongs HERE, not in the
+        // tab: this worker is already holding the answer, so navigating
+        // cannot cost anything, whereas the page doing it destroys the
+        // context that owes the answer. That is not theoretical — an agent
+        // waited seventy seconds and received nothing, for a run that had
+        // correctly written nothing and knew exactly where to go.
+        //
+        // Awaited rather than fired and forgotten, so the caller is only
+        // told to invoke again once the tab is actually on its way.
+        await openRequestedRecord(tabId, answer);
+        return answer;
       } catch (error) {
         // A write that was dispatched and then went quiet is not a write
         // that failed. Nobody at this hop knows which — and saying "failed"
@@ -565,6 +578,36 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
     }
     default:
       return { ok: false };
+  }
+}
+
+/**
+ * Opens the record an execution stopped for, if it stopped for one.
+ *
+ * The route is a path, not a URL — it is whatever the platform's pack
+ * declares, and it means nothing outside the tab it came from. Resolved
+ * against that tab's own address so this never navigates anywhere the tab
+ * was not already.
+ *
+ * Failures are reported and swallowed: the caller has a correct result in
+ * hand either way, and the worst case is that it invokes again against a
+ * page that has not moved and gets the same honest answer.
+ */
+async function openRequestedRecord(tabId: number, answer: BrowserBindingExecuteResponse): Promise<void> {
+  const route = answer?.result?.dispatch?.openRecordAt;
+  if (!route) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.url) return;
+    const target = new URL(route, tab.url);
+    // Same origin only. A route is a path from the platform's own pack;
+    // resolving one that somehow carries an origin must not send this tab
+    // somewhere else.
+    if (target.origin !== new URL(tab.url).origin) return;
+    console.debug("[AutoWebMCP] background: opening the requested record at", target.href);
+    await chrome.tabs.update(tabId, { url: target.href });
+  } catch (error) {
+    console.warn("[AutoWebMCP] background: could not open the requested record:", error);
   }
 }
 

@@ -52,6 +52,33 @@ export function assertPublishable(capability: SemanticCapability): SemanticCapab
 }
 
 /**
+ * A read-only capability must not be published with a way to write.
+ *
+ * The description an agent reads says "it does not create, modify, or
+ * delete anything in the application", and a promise nothing checks is
+ * exactly the kind of sentence the semantic layer refuses to let a model
+ * write. So the claim is made checkable here: `safety.readOnly` and a
+ * mutation execution binding — which exists to open an edit surface, set
+ * values and click a commit control — are contradictory, and the
+ * contradiction is refused at the boundary rather than published and
+ * hoped about.
+ *
+ * A query binding is not a mutation and is deliberately unaffected: it
+ * has no commit and nothing to verify against a record.
+ */
+export function assertSafetyMatchesBindings(
+  capability: SemanticCapability,
+  executionBinding?: BrowserExecutionBinding
+): void {
+  if (capability.safety.readOnly && executionBinding) {
+    throw new Error(
+      "A read-only capability cannot be published with a mutation execution binding: its contract states that it " +
+        "changes nothing."
+    );
+  }
+}
+
+/**
  * Carries a resolved value domain into the contract that gets published.
  *
  * An agent calling a published tool has only its input schema to go on. A
@@ -86,8 +113,10 @@ export function parsePublicationRecord(value: unknown): PublicationRecord {
   const record = value as Partial<PublicationRecord>;
   if (typeof record.publishedAt !== "string") throw new Error("Publication timestamp is required.");
   if (!record.capability) throw new Error("Publication capability is required.");
+  const capability = assertPublishable(record.capability);
+  assertSafetyMatchesBindings(capability, record.executionBinding);
   return {
-    capability: assertPublishable(record.capability),
+    capability,
     publishedAt: record.publishedAt,
     ...(record.executionBinding ? { executionBinding: record.executionBinding } : {}),
     ...(record.queryBinding ? { queryBinding: record.queryBinding } : {})
@@ -106,6 +135,7 @@ export async function publishCapability(
   queryBinding?: BrowserQueryBinding
 ): Promise<PublicationRecord> {
   assertPublishable(capability);
+  assertSafetyMatchesBindings(capability, executionBinding);
 
   const response = await fetch("/api/capabilities", {
     method: "POST",

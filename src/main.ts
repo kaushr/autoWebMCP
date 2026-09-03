@@ -1,5 +1,7 @@
 import "./styles.css";
 import { confirmCandidate, semanticizeTrace, type SemanticizerRun } from "./training/semanticizer";
+import { semanticContract } from "./training/semanticContract";
+import { composeDescription, type ComposedDescription } from "./semantic/description";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { sourceApplicationFor } from "./training/sourceApplication";
 import {
@@ -130,6 +132,16 @@ let groundingRenames: InputCanonicalization[] = [];
 let groundingNoncanonical: string[] = [];
 /** Inputs nothing could ground. Different from noncanonical: these cannot execute at all. */
 let groundingUnresolved: string[] = [];
+/**
+ * How the description a human is about to confirm was put together.
+ *
+ * Rendered beside the editable text so the split is visible: the top box
+ * is theirs to rewrite, the sentences underneath are the runtime's and
+ * are re-derived every time grounding runs. A claim the model tried to
+ * make and was refused is shown too — it says something about the
+ * proposal that a silently shorter description would not.
+ */
+let groundingDescription: ComposedDescription | undefined;
 
 /* ------------------------- entity search ------------------------- *
  * A read-only capability's own lifecycle, kept beside the mutation
@@ -867,13 +879,39 @@ function renderTargetIdentityInputs(capability: SemanticCapability): string {
   </div>`;
 }
 
-/** Everything a human is asked to accept as the meaning of the capability. */
-function semanticContract(capability: SemanticCapability): string {
-  return JSON.stringify({
-    name: capability.name,
-    description: capability.description,
-    inputs: capability.inputs.map((input) => [input.name, input.type, input.required])
-  });
+/**
+ * The system's half of the description, shown where it is being approved.
+ *
+ * Read-only on purpose. These sentences are re-derived from what the
+ * runtime enforces every time grounding runs, so an edit to them would be
+ * silently reverted — and worse, would invite someone to promise
+ * something on the runtime's behalf. The editable box above holds the
+ * business intent, which is the half a person actually knows better.
+ */
+function renderExecutionSemantics(): string {
+  const composition = groundingDescription;
+  if (!composition) return "";
+  const guarantees = composition.guarantees.length
+    ? `<ul class="reasons">${composition.guarantees
+        .map((guarantee) => `<li>${escapeHtml(guarantee.statement)}</li>`)
+        .join("")}</ul>`
+    : `<p class="semanticizer-status">Nothing about this capability's execution is established well enough to
+        promise an agent, so the contract promises nothing.</p>`;
+  const rejected = composition.rejectedClaims.length
+    ? `<p class="ambiguity">${escapeHtml(
+        `Removed from the proposed description, because only the runtime can promise this: ${composition.rejectedClaims
+          .map((claim) => `"${claim}"`)
+          .join(" ")}`
+      )}</p>`
+    : "";
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Execution semantics</p>
+    <p class="semanticizer-status">Added by AutoWebMCP to the description above, and not editable: each sentence
+      states something this system enforces, so it is derived from the runtime rather than written about it.</p>
+    ${guarantees}
+    ${rejected}
+  </div>`;
 }
 
 /**
@@ -1148,6 +1186,7 @@ function runSemanticGrounding(): void {
   groundingRenames = grounded.renames;
   groundingNoncanonical = grounded.noncanonical;
   groundingUnresolved = grounded.unresolved;
+  groundingDescription = grounded.descriptionComposition;
   if (grounded.confirmationWithdrawn) semanticizerStatus = describeWithdrawnConfirmation(grounded.renames);
 }
 
@@ -2107,6 +2146,7 @@ function renderTrainingStudio(): string {
         ${renderLifecycleStages(view)}
         <label>Capability name<input name="name" value="${escapeHtml(capability.name)}" /></label>
         <label>Description<textarea name="description">${escapeHtml(capability.description)}</textarea></label>
+        ${renderExecutionSemantics()}
         ${renderTargetIdentityInputs(capability)}
         <div class="input-list">${capability.inputs
           .map((input, index) =>
@@ -2114,7 +2154,7 @@ function renderTrainingStudio(): string {
               ? ""
               : `<div><label>Parameter <input name="input-name-${index}" value="${escapeHtml(input.name)}" /></label><label>Type <select name="input-type-${index}">${(["string", "date", "number", "boolean"] as const)
               .map((type) => `<option value="${type}" ${input.type === type ? "selected" : ""}>${type}</option>`)
-              .join("")}</select></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label></div>`
+              .join("")}</select></label><label class="checkbox"><input name="input-required-${index}" type="checkbox" ${input.required ? "checked" : ""} /> Required</label><label class="input-description">Description <input name="input-description-${index}" value="${escapeHtml(input.description)}" /></label></div>`
           )
           .join("")}</div>
         ${ambiguities.length ? `<p class="ambiguity">Review: ${ambiguities.map(escapeHtml).join(" · ")}</p>` : ""}
@@ -2490,6 +2530,13 @@ function render(): void {
       // validation story; the previous one's does not carry over.
       candidate = undefined;
       ambiguities = [];
+      // Cleared with the capability rather than inside clearExecutionState:
+      // how a description was composed belongs to the capability, and
+      // suggesting an execution path does not un-compose it. Dropping it
+      // there would leave the editor holding text whose runtime half it no
+      // longer recognized, and a later edit would strip those sentences
+      // with nothing to put back.
+      groundingDescription = undefined;
       clearExecutionState();
       render();
     });
@@ -2592,6 +2639,10 @@ function render(): void {
         return {
           ...input,
           name: String(form.get(`input-name-${index}`) ?? input.name),
+          // An input's description is published verbatim into the tool's
+          // input schema, so it is edited here rather than being something
+          // only the model ever gets to write.
+          description: String(form.get(`input-description-${index}`) ?? input.description),
           type: (["string", "date", "number", "boolean"] as const).includes(type as never)
             ? (type as (typeof input)["type"])
             : input.type,
@@ -2602,6 +2653,35 @@ function render(): void {
 
     if (application && action) edited.binding = { application, action };
     else delete edited.binding;
+
+    /* --- a human's text is held to the same rule the model's is ---------- *
+     * Business intent is theirs to write; runtime guarantees are not. A
+     * person typing "safely updates the record" is promising on the
+     * runtime's behalf exactly as a model would, and an agent reading the
+     * published contract cannot tell which of them wrote it.
+     *
+     * Re-composed here rather than by re-running grounding, so that
+     * editing a description never quietly renames a parameter as a side
+     * effect: canonical naming is settled by grounding, and this is the
+     * description stage answering only for itself.
+     */
+    const composition = groundingDescription;
+    const composedDescription = composition ? composeDescription(edited.description, composition.guarantees) : undefined;
+    // With no composition on record there is nothing to put back, so the
+    // text is left exactly as typed rather than having its guarantees
+    // stripped out of it. Grounding recomposes it before confirmation
+    // either way.
+    if (composedDescription) edited.description = composedDescription.text;
+    edited.inputs = edited.inputs.map((input, index) => {
+      if (input.role === "target-identity") return input;
+      const composed = composeDescription(input.description, []);
+      // An input description a person emptied, or filled entirely with
+      // promises, falls back to what was there before rather than being
+      // published blank.
+      const text = composed.intent || candidate?.inputs[index]?.description || input.description;
+      return text === input.description ? input : { ...input, description: text };
+    });
+    if (composedDescription) groundingDescription = composedDescription;
 
     // The binding is not part of what a human confirmed, so changing it leaves
     // confirmation standing. Changing the contract itself does not.
@@ -2617,7 +2697,8 @@ function render(): void {
     applyCandidateEdits(event.currentTarget as HTMLFormElement);
     // Confirming only needs the contract to be right — execution is a
     // separate, later step, whichever route it ends up taking.
-    semanticizerStatus = "Changes saved. Confirm when the description and parameters are correct.";
+    semanticizerStatus =
+      "Changes saved. Confirm when the description and parameters are correct — both are published to agents.";
     render();
   });
 

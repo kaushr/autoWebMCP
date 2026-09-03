@@ -541,17 +541,12 @@ const EXECUTION_BUDGET_MS = EXECUTION_TIMEOUTS.EXECUTION;
 
 async function runExecuteRequest(
   request: BrowserBindingExecuteRequest
-): Promise<{ response: BrowserBindingExecuteResponse; afterResponding?: () => void }> {
+): Promise<BrowserBindingExecuteResponse> {
   if (request.confirmed !== true) {
-    return { response: { ok: false, error: "Execution refused: no explicit confirmation was supplied." } };
+    return { ok: false, error: "Execution refused: no explicit confirmation was supplied." };
   }
 
   const invocationId = request.invocationId;
-  // Whether this is the same transaction arriving again, decided before
-  // `runOnce` folds that distinction away. A redelivery re-reports what
-  // the original run produced; it does not re-open the record, or a caller
-  // that keeps re-asking would keep reloading the page.
-  const redelivered = invocationId !== undefined && pageJournal.read(invocationId)?.outcome !== undefined;
   try {
     const result = await runOnce(
       pageJournal,
@@ -580,29 +575,32 @@ async function runExecuteRequest(
       }
     );
 
-    // Opening the record is the LAST thing this document does, and only
-    // once the answer is already on its way back. Doing it inside the
-    // execution is what lost a whole live invocation: the navigation
-    // replaced the page, and the context that owed everyone an answer went
-    // with it.
-    const openRecordAt = redelivered ? undefined : result.dispatch?.openRecordAt;
+    // Note what is deliberately NOT done here: opening the record.
+    //
+    // `result.dispatch.openRecordAt` says where the requested record lives,
+    // and this document is the one thing that must not go there. An earlier
+    // attempt navigated after calling `sendResponse`, on the theory that
+    // sending first won the race. It did not: a live agent invocation
+    // waited seventy seconds and received nothing, while the same tool
+    // invoked against an already-open record passed every check. Whether
+    // an answer already handed to the runtime survives the frame being
+    // torn down a millisecond later is not something this code gets to
+    // decide, so it stops depending on it.
+    //
+    // The service worker opens the record instead. It holds the response
+    // before it navigates anything, so there is no race left to lose.
     return {
-      response: {
-        ok: true,
-        protocol: STUDIO_BRIDGE_PROTOCOL,
-        ...(invocationId ? { invocationId } : {}),
-        ...(result.dispatch?.phase ? { phase: result.dispatch.phase } : {}),
-        result
-      },
-      ...(openRecordAt ? { afterResponding: () => window.location.assign(openRecordAt) } : {})
+      ok: true,
+      protocol: STUDIO_BRIDGE_PROTOCOL,
+      ...(invocationId ? { invocationId } : {}),
+      ...(result.dispatch?.phase ? { phase: result.dispatch.phase } : {}),
+      result
     };
   } catch (error) {
     return {
-      response: {
-        ok: false,
-        ...(invocationId ? { invocationId } : {}),
-        error: error instanceof Error ? error.message : String(error)
-      }
+      ok: false,
+      ...(invocationId ? { invocationId } : {}),
+      error: error instanceof Error ? error.message : String(error)
     };
   }
 }
@@ -789,12 +787,7 @@ function contentMessageListener(...[message, _sender, sendResponse]: Parameters<
     return true;
   }
   if (request.type === "execute:run") {
-    void runExecuteRequest(request.request).then(({ response, afterResponding }) => {
-      sendResponse(response);
-      // Ordering is the whole fix: the answer leaves this document before
-      // anything is allowed to replace it.
-      if (afterResponding) setTimeout(afterResponding, 0);
-    });
+    void runExecuteRequest(request.request).then(sendResponse);
     return true;
   }
   if (request.type === "inspect:domains") {

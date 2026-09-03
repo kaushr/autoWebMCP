@@ -80,7 +80,7 @@ const capabilitySchema = {
  * Bumped whenever the instructions or response schema change, so a recorded
  * semanticizer run can be read against the prompt that actually produced it.
  */
-const SEMANTICIZER_PROMPT_VERSION = "2026-08-27.1";
+const SEMANTICIZER_PROMPT_VERSION = "2026-09-03.1";
 
 /** Binding inference is a separate question, so it versions separately. */
 const BINDING_PROMPT_VERSION = "2026-08-27.1";
@@ -329,7 +329,19 @@ async function semanticize(request, response) {
     "The evidence was observed by a browser extension on a real application.",
     "Each observation carries an action, the field label and section it touched, the value transition, and how the application reacted.",
     "Derive inputs from the fields the human actually varied, using their visible labels.",
-    "Set binding to null unless the evidence directly establishes a named existing application action."
+    "Set binding to null unless the evidence directly establishes a named existing application action.",
+    // The description halves. The model owns business intent and nothing
+    // else; the runtime's own semantics are composed in afterwards from
+    // facts the system has established, and anything guarantee-shaped that
+    // comes back here is stripped before a human ever sees it. Asking for
+    // it not to be written is cheaper than removing it well.
+    "Write description as the business outcome an agent would be choosing this tool for, in one or two plain sentences.",
+    "Write a description for every input saying what that value means to the business, not what type it is.",
+    "Describe ONLY intent. Never state execution guarantees, safety properties, or result cardinality:",
+    "never say a tool is read-only, safe, atomic, idempotent, verified, validated, or that it refuses anything;",
+    "never say what it requires, what it does not modify, or how many results it returns;",
+    "never imply a search returns exactly one match. Those facts are the runtime's and are added separately.",
+    "Do not mention record ids or identity parameters: the system adds those from its own knowledge, not from the demonstration."
   ];
 
   const model = process.env.OPENAI_MODEL ?? "gpt-5.4";

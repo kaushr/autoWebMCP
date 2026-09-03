@@ -391,3 +391,71 @@ describe("execution evidence survives a delivery failure", () => {
     });
   });
 });
+
+/* ============ the record is opened from outside the dying page ============ */
+
+describe("opening the requested record never depends on the page surviving", () => {
+  /**
+   * A stand-in for the hop that opens the record.
+   *
+   * Deliberately modelled the way the service worker actually behaves: it
+   * is holding the answer BEFORE it navigates anything, so the navigation
+   * cannot cost the answer. The earlier design had the page navigate
+   * itself just after replying, and a live agent invocation waited seventy
+   * seconds and got nothing — while the identical tool call against an
+   * already-open record passed every check.
+   */
+  function deliver(result: ExecutionResult, tabUrl: string) {
+    const navigations: string[] = [];
+    const route = result.dispatch?.openRecordAt;
+    let delivered: ExecutionResult | undefined;
+    delivered = result; // answer in hand first
+    if (route) {
+      const target = new URL(route, tabUrl);
+      if (target.origin === new URL(tabUrl).origin) navigations.push(target.href);
+    }
+    return { delivered, navigations };
+  }
+
+  const opening: ExecutionResult = {
+    status: "blocked",
+    dispatch: {
+      invocationId: "inv-1",
+      phase: "target-opening",
+      mayHavePersisted: false,
+      openRecordAt: "/lightning/r/Opportunity/0065w00002AZ0GeAAL/view"
+    },
+    checks: [],
+    evidence: [],
+    warnings: ["Execution stopped before touching anything. Invoke again."],
+    executedAt: "2026-09-03T00:00:00.000Z"
+  };
+
+  it("still returns the result it was given, and opens the record too", () => {
+    const { delivered, navigations } = deliver(opening, "https://x.lightning.force.com/lightning/o/Opportunity/list");
+    // Both, and in that order — the answer is never traded for the navigation.
+    expect(delivered?.status).toBe("blocked");
+    expect(delivered?.dispatch?.mayHavePersisted).toBe(false);
+    expect(navigations).toEqual(["https://x.lightning.force.com/lightning/r/Opportunity/0065w00002AZ0GeAAL/view"]);
+  });
+
+  it("navigates nowhere when the execution did not stop for a record", () => {
+    const done: ExecutionResult = { ...verified, dispatch: { phase: "verified", mayHavePersisted: true } };
+    const { delivered, navigations } = deliver(done, "https://x.lightning.force.com/lightning/r/Opportunity/006A/view");
+    expect(delivered?.status).toBe("succeeded");
+    expect(navigations).toEqual([]);
+  });
+
+  it("refuses to send the tab to another origin", () => {
+    // A route is a path from the platform's own pack and means nothing
+    // outside the tab it came from. One that somehow carries an origin
+    // must not move the tab off the application it belongs to.
+    const hostile: ExecutionResult = {
+      ...opening,
+      dispatch: { ...opening.dispatch!, openRecordAt: "https://elsewhere.example/lightning/r/Opportunity/006A/view" }
+    };
+    const { delivered, navigations } = deliver(hostile, "https://x.lightning.force.com/lightning/o/Opportunity/list");
+    expect(delivered?.status).toBe("blocked");
+    expect(navigations).toEqual([]);
+  });
+});
