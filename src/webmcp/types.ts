@@ -5,9 +5,15 @@ export interface JsonObjectSchema {
   properties: Record<
     string,
     {
-      type: "string" | "number" | "boolean";
+      type: "string" | "number" | "integer" | "boolean";
       description: string;
       enum?: string[];
+      /**
+       * Standard JSON Schema. `date` is declared rather than left to the
+       * description, so a caller — an agent, or the Studio's own test form —
+       * learns the shape from the contract instead of parsing prose.
+       */
+      format?: "date";
     }
   >;
   required?: string[];

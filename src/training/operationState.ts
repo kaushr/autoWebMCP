@@ -27,7 +27,8 @@ export type OperationKind =
   | "publish-capability"
   | "refresh-traces"
   | "reset-control-plane"
-  | "save-trace-details";
+  | "save-trace-details"
+  | "invoke-webmcp";
 
 export interface OperationState {
   id: string;

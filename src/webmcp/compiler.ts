@@ -26,6 +26,9 @@ export function compileCapability(
         // an agent supplies YYYY-MM-DD and platform presentation stays the
         // execution layer's concern.
         type: input.type === "date" ? ("string" as const) : input.type,
+        // Declared as well as described: `format` is the machine-readable
+        // half, and anything building a caller from this schema needs it.
+        ...(input.type === "date" ? { format: "date" as const } : {}),
         description: input.type === "date" ? `${input.description} (date, YYYY-MM-DD)` : input.description,
         ...(input.enum ? { enum: input.enum } : {})
       }

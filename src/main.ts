@@ -42,6 +42,16 @@ import {
   type PublicationRecord
 } from "./webmcp/publication";
 import { registerHelloControl } from "./webmcp/hello";
+import {
+  collectInvocationArguments,
+  describeWebMcpSurface,
+  harnessFieldsFor,
+  readToolResult,
+  verdictFor,
+  type HarnessField,
+  type HarnessInvocationOutcome
+} from "./webmcp/harness";
+import type { RegisteredTool } from "./webmcp/types";
 import { startRrwebCaptureProbe } from "./capture/rrwebProbe";
 import type { CapabilityInputValues, SemanticCapability } from "./semantic/model";
 import { proposeBrowserBinding } from "./binding/browserExecution/propose";
@@ -359,6 +369,101 @@ const captureMode = new URLSearchParams(window.location.search).get("capture") =
  */
 const registration = controlMode ? registerHelloControl() : document.modelContext ? "available" : "unavailable";
 const browserExecutionRegistered = new Set<string>();
+
+/* --------------------- judge-facing WebMCP harness --------------------- *
+ * What this browser actually permits a page to do, established by asking
+ * rather than assuming. Registration is page-side by definition; discovery
+ * and invocation are separate permissions a browser could reasonably
+ * withhold, and the panel is only allowed to claim what is present.
+ * ---------------------------------------------------------------------- */
+const webMcpSurface = describeWebMcpSurface(document.modelContext);
+/** Tools as the browser reports them. Empty until `getTools()` answers. */
+let discoveredTools: RegisteredTool[] = [];
+let discoveryError = "";
+let selectedToolName = "";
+let harnessValues: Record<string, string> = {};
+let harnessErrors: string[] = [];
+let harnessOutcome: HarnessInvocationOutcome | undefined;
+let harnessStatus = "";
+
+/**
+ * Asks the browser which tools an agent would see on this document.
+ *
+ * Deliberately the browser's answer and not our own registry: what this
+ * page passed to `registerTool` is evidence that registration was
+ * attempted, while `getTools()` is evidence that the tool actually exists
+ * on the surface an agent reads. Only the second supports the claim the
+ * panel is here to make.
+ */
+async function refreshDiscoveredTools(): Promise<void> {
+  if (!webMcpSurface.canDiscover || !document.modelContext) return;
+  try {
+    discoveredTools = await document.modelContext.getTools();
+    discoveryError = "";
+    if (!discoveredTools.some((tool) => tool.name === selectedToolName)) {
+      selectedToolName = discoveredTools.find((tool) => tool.name !== "hello_webmcp")?.name ?? "";
+      harnessValues = {};
+      harnessOutcome = undefined;
+    }
+  } catch (error) {
+    discoveryError = error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** The tool the judge is testing, as the browser describes it. */
+function selectedTool(): RegisteredTool | undefined {
+  return discoveredTools.find((tool) => tool.name === selectedToolName);
+}
+
+function selectedToolFields(): HarnessField[] {
+  return harnessFieldsFor(selectedTool()?.inputSchema);
+}
+
+/**
+ * Invokes the selected tool THROUGH WebMCP.
+ *
+ * The whole value of this panel rests on this function calling
+ * `executeTool` and nothing else. Calling the capability's own execute
+ * callback here would exercise our code from our code and prove nothing
+ * about the agent-facing surface, so there is deliberately no fallback
+ * path: if the browser cannot invoke, the button is not offered and the
+ * panel says why.
+ */
+async function invokeSelectedTool(): Promise<void> {
+  const tool = selectedTool();
+  if (!tool || !document.modelContext?.executeTool) return;
+
+  const collected = collectInvocationArguments(selectedToolFields(), harnessValues);
+  harnessErrors = collected.errors;
+  harnessOutcome = undefined;
+  if (!collected.ok) {
+    harnessStatus = "";
+    render();
+    return;
+  }
+
+  await runOperation("invoke-webmcp", `Invoking ${tool.name} through WebMCP…`, async () => {
+    // Both shapes are the browser's, established empirically: the
+    // RegisteredTool object itself, and the arguments JSON-encoded.
+    const result = await document.modelContext!.executeTool(tool, JSON.stringify(collected.args));
+    harnessOutcome = readToolResult(result, "webmcp");
+    return { message: describeOutcome(harnessOutcome) };
+  });
+}
+
+function describeOutcome(outcome: HarnessInvocationOutcome): string {
+  if (!outcome.execution) return outcome.unparsed ?? "The tool returned a response.";
+  switch (outcome.execution.status) {
+    case "succeeded":
+      return "The tool ran, the application saved, and every check passed.";
+    case "partially_verified":
+      return "The tool ran and saved, but not every check could be answered.";
+    case "blocked":
+      return "The tool stopped before writing anything.";
+    default:
+      return "The tool ran and did not complete successfully.";
+  }
+}
 
 /** A WebMCP tool's inputs arrive untyped; the engine writes strings to the DOM regardless of a field's declared type. */
 function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: CapabilityInputValues): Promise<unknown> {
@@ -1813,25 +1918,275 @@ function renderTrainingStudio(): string {
   </section>`;
 }
 
+/** One control, built from the published schema and nothing else. */
+function renderHarnessControl(field: HarnessField): string {
+  const value = harnessValues[field.name] ?? "";
+  const id = `wm-${field.name}`;
+  switch (field.control) {
+    case "enum":
+      return `<select id="${id}" data-harness-input="${escapeHtml(field.name)}">
+        <option value="">Choose…</option>
+        ${(field.options ?? [])
+          .map(
+            (option) =>
+              `<option value="${escapeHtml(option)}" ${option === value ? "selected" : ""}>${escapeHtml(option)}</option>`
+          )
+          .join("")}
+      </select>`;
+    case "date":
+      return `<input id="${id}" type="date" data-harness-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+    case "number":
+    case "integer":
+      return `<input id="${id}" type="number" ${field.control === "integer" ? 'step="1"' : ""}
+        data-harness-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+    case "boolean":
+      return `<input id="${id}" type="checkbox" data-harness-input="${escapeHtml(field.name)}" ${
+        value === "true" ? "checked" : ""
+      } />`;
+    case "unsupported":
+      // Shown, never guessed at. A control that sent the wrong shape would
+      // be worse than an honest gap.
+      return `<p class="ambiguity">This test form cannot render this parameter's schema:</p>
+        <pre class="admin-json">${escapeHtml(field.rawSchema ?? "")}</pre>`;
+    default:
+      return `<input id="${id}" type="text" data-harness-input="${escapeHtml(field.name)}" value="${escapeHtml(value)}" />`;
+  }
+}
+
+/** The four facts, per input, exactly as the execution engine established them. */
+function renderHarnessTransactions(outcome: HarnessInvocationOutcome): string {
+  const transactions = outcome.execution?.transactions ?? [];
+  if (transactions.length === 0) return "";
+  const verdictLabel = { verified: "verified", mismatch: "MISMATCH", unverifiable: "not verifiable" };
+  return `<div class="table-scroll"><table class="comparison">
+    <thead><tr><th>Input</th><th>Before</th><th>Requested</th><th>After write</th><th>After save</th><th>Verified</th></tr></thead>
+    <tbody>${transactions
+      .map((transaction) => {
+        const verdict = verdictFor(transaction);
+        return `<tr>
+          <td><code>${escapeHtml(transaction.name)}</code>${
+            transaction.apiName ? `<br><small>${escapeHtml(transaction.apiName)}</small>` : ""
+          }</td>
+          <td>${escapeHtml(transaction.beforeValue ?? "—")}</td>
+          <td>${escapeHtml(transaction.requestedValue)}</td>
+          <td>${escapeHtml(transaction.afterWriteValue ?? "—")}</td>
+          <td>${escapeHtml(transaction.afterSaveValue ?? "—")}</td>
+          <td class="${verdict === "verified" ? "check-pass" : verdict === "mismatch" ? "check-fail" : "check-blocked"}">
+            <strong>${verdictLabel[verdict]}</strong>
+          </td>
+        </tr>`;
+      })
+      .join("")}</tbody>
+  </table></div>`;
+}
+
+function renderHarnessResult(): string {
+  if (!harnessOutcome) return "";
+  const execution = harnessOutcome.execution;
+  const checks = execution?.checks ?? [];
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Invocation result</p>
+    <p class="semanticizer-status">${escapeHtml(
+      harnessOutcome.route === "webmcp"
+        ? "Invoked through the browser's WebMCP API — the same call an agent makes."
+        : "Run directly against the capability, bypassing WebMCP."
+    )}</p>
+    ${
+      harnessOutcome.unparsed
+        ? `<p class="ambiguity">${escapeHtml(harnessOutcome.unparsed)}</p>
+           <pre class="admin-json">${escapeHtml(harnessOutcome.text)}</pre>`
+        : ""
+    }
+    ${execution ? `<p><strong>${escapeHtml(describeOutcome(harnessOutcome))}</strong></p>` : ""}
+    ${renderHarnessTransactions(harnessOutcome)}
+    ${
+      checks.length
+        ? `<ul class="reasons">${checks
+            .map(
+              (check) =>
+                `<li class="check-${check.status === "pass" ? "pass" : check.status === "fail" ? "fail" : "skipped"}">
+                  <strong>${check.status.toUpperCase()}</strong> ${escapeHtml(check.name)} — ${escapeHtml(check.detail)}
+                </li>`
+            )
+            .join("")}</ul>`
+        : ""
+    }
+    ${
+      execution?.warnings.length
+        ? `<ul class="reasons">${execution.warnings.map((warning) => `<li class="ambiguity">${escapeHtml(warning)}</li>`).join("")}</ul>`
+        : ""
+    }
+    <details class="admin-raw"><summary>Raw tool response</summary>
+      <pre class="admin-json">${escapeHtml(harnessOutcome.text)}</pre>
+    </details>
+  </div>`;
+}
+
+/**
+ * The judge's panel.
+ *
+ * Every claim here is gated on what `describeWebMcpSurface` actually
+ * found. Where the browser cannot answer, the panel says so instead of
+ * substituting something that looks equivalent.
+ */
+function renderWebMcpHarness(): string {
+  if (!webMcpSurface.available) {
+    return `<div class="lifecycle-section">
+      <p class="eyebrow">WebMCP</p>
+      <p><strong>WebMCP is not available in this browser.</strong></p>
+      <p class="semanticizer-status">This page needs a browser exposing <code>document.modelContext</code> —
+        Chrome with <code>chrome://flags/#enable-webmcp-testing</code> enabled, or another WebMCP-capable client.
+        Nothing below can be shown honestly without it.</p>
+    </div>`;
+  }
+
+  const tools = discoveredTools.filter((tool) => tool.name !== "hello_webmcp");
+  const tool = selectedTool();
+  const fields = selectedToolFields();
+
+  const surfaceNote = webMcpSurface.canDiscover
+    ? `Listed by <code>document.modelContext.getTools()</code> — the browser's own answer about what an agent can see.`
+    : `This browser does not let a page enumerate WebMCP tools, so the list below is what this document
+       passed to <code>registerTool()</code>. That is evidence of registration, not of agent-side discovery.`;
+
+  const listing = webMcpSurface.canDiscover
+    ? tools.length
+      ? `<ul class="reasons">${tools
+          .map(
+            (entry) =>
+              `<li><code>${escapeHtml(entry.name)}</code>${entry.description ? ` — ${escapeHtml(entry.description)}` : ""}</li>`
+          )
+          .join("")}</ul>`
+      : `<p class="semanticizer-status">No published capability is registered on this document yet.
+           Publish one in the Studio, then reload this page.</p>`
+    : `<ul class="reasons">${
+        browserExecutionRegistered.size
+          ? [...browserExecutionRegistered].map((id) => `<li><code>${escapeHtml(id)}</code></li>`).join("")
+          : `<li>Nothing registered yet.</li>`
+      }</ul>`;
+
+  const schema = tool?.inputSchema
+    ? `<details class="admin-raw" open><summary>Agent-facing input schema</summary>
+        <pre class="admin-json">${escapeHtml(JSON.stringify(tool.inputSchema, null, 2))}</pre>
+      </details>`
+    : "";
+
+  const form = tool
+    ? `<div class="test-form">
+        ${fields
+          .map(
+            (field) => `<label>${escapeHtml(field.name)}${field.required ? " *" : ""}
+              ${field.description ? `<small class="domain-unknown">${escapeHtml(field.description)}</small>` : ""}
+              ${renderHarnessControl(field)}
+            </label>`
+          )
+          .join("")}
+        ${harnessErrors.length ? `<p class="ambiguity">${harnessErrors.map(escapeHtml).join(" · ")}</p>` : ""}
+        <div class="studio-actions">
+          ${
+            webMcpSurface.canInvoke
+              ? `<button type="button" id="invoke-webmcp" ${isWorking(operations, "invoke-webmcp") ? "disabled" : ""}>
+                   ${isWorking(operations, "invoke-webmcp") ? "Invoking…" : "Invoke via WebMCP"}
+                 </button>`
+              : ""
+          }
+        </div>
+        ${renderOperationStatus("invoke-webmcp", harnessStatus)}
+        ${
+          webMcpSurface.canInvoke
+            ? ""
+            : `<p class="ambiguity">This browser does not let a page invoke a WebMCP tool — invocation is the
+                 agent's to make. Call <code>${escapeHtml(tool.name)}</code> from a WebMCP-capable agent or the
+                 Model Context Tool Inspector to exercise it. Nothing here will run it and call that WebMCP.</p>`
+        }
+      </div>`
+    : "";
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">WebMCP</p>
+    <p><strong>Registered on this document</strong> — <code>${escapeHtml(window.location.origin)}</code></p>
+    <p class="semanticizer-status">${surfaceNote}</p>
+    ${discoveryError ? `<p class="ambiguity">${escapeHtml(discoveryError)}</p>` : ""}
+    ${listing}
+    ${
+      tools.length > 1
+        ? `<label>Tool to test
+            <select id="harness-tool">${tools
+              .map(
+                (entry) =>
+                  `<option value="${escapeHtml(entry.name)}" ${entry.name === selectedToolName ? "selected" : ""}>${escapeHtml(entry.name)}</option>`
+              )
+              .join("")}</select>
+          </label>`
+        : ""
+    }
+    ${schema}
+    ${form}
+    ${renderHarnessResult()}
+  </div>`;
+}
+
+/**
+ * Control-mode event wiring.
+ *
+ * Separate from the Studio's own `bindEvents` because the two documents
+ * render entirely different pages; sharing one binder would mean querying
+ * for controls that cannot exist.
+ */
+function bindHarnessEvents(): void {
+  for (const control of document.querySelectorAll<HTMLElement>("[data-harness-input]")) {
+    const commit = (event: Event): void => {
+      const element = event.currentTarget as HTMLInputElement | HTMLSelectElement;
+      const name = element.getAttribute("data-harness-input");
+      if (!name) return;
+      harnessValues = {
+        ...harnessValues,
+        [name]:
+          element instanceof HTMLInputElement && element.type === "checkbox" ? String(element.checked) : element.value
+      };
+    };
+    // Held without re-rendering: render() rebuilds innerHTML and would take
+    // the focus out of the control mid-entry.
+    control.addEventListener("change", commit);
+    control.addEventListener("input", commit);
+  }
+
+  document.querySelector<HTMLSelectElement>("#harness-tool")?.addEventListener("change", (event) => {
+    selectedToolName = (event.currentTarget as HTMLSelectElement).value;
+    harnessValues = {};
+    harnessErrors = [];
+    harnessOutcome = undefined;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#invoke-webmcp")?.addEventListener("click", () => {
+    void invokeSelectedTool();
+  });
+}
+
 function render(): void {
   if (controlMode) {
     appRoot.innerHTML = `
       <main class="control-shell">
-        <p class="eyebrow">AutoWebMCP · controlled WebMCP test</p>
-        <h1>WebMCP hello-world control</h1>
-        <p>This isolated controlled page registers <code>hello_webmcp</code> with the same minimal tool shape as the Salesforce spike.</p>
+        <p class="eyebrow">AutoWebMCP · WebMCP surface</p>
+        <h1>Test a published capability</h1>
+        <p>Capabilities published in the Studio are registered on this document as real WebMCP tools.
+          This page exercises them through the browser's own WebMCP API — the same surface an agent uses.</p>
+        <p class="semanticizer-status">The tool runs against the application it was taught from, through the
+          Teach Mode extension. AutoWebMCP Studio publishes the capability; the target application does not host
+          it. Start the extension on that application's tab before invoking.</p>
+        ${renderWebMcpHarness()}
         <dl class="diagnostics">
           <div><dt>document.modelContext</dt><dd>${document.modelContext ? "available" : "unavailable"}</dd></div>
+          <div><dt>Page-side discovery</dt><dd>${webMcpSurface.canDiscover ? "supported" : "not supported"}</dd></div>
+          <div><dt>Page-side invocation</dt><dd>${webMcpSurface.canInvoke ? "supported" : "not supported"}</dd></div>
           <div><dt>crossOriginIsolated</dt><dd>${String(window.crossOriginIsolated)}</dd></div>
-          <div><dt>Registration</dt><dd>${registration}</dd></div>
-          <div><dt>Published tools registered</dt><dd>${
-            browserExecutionRegistered.size
-              ? [...browserExecutionRegistered].map((id) => escapeHtml(id)).join(", ")
-              : "none yet"
-          }</dd></div>
+          <div><dt>Hello-world registration</dt><dd>${registration}</dd></div>
         </dl>
-        <a href="/">Return to Prospect Intelligence</a>
+        <a href="/">Return to the Training Studio</a>
       </main>`;
+    bindHarnessEvents();
     return;
   }
 
@@ -2415,6 +2770,8 @@ void listPublishedCapabilities()
     publications = records;
     if (records.length) publishStatus = "Published capabilities loaded.";
     syncBrowserExecutionRegistrations();
+    // Registration has happened; ask the browser what it can now see.
+    void refreshDiscoveredTools().then(render);
     render();
   })
   .catch((error) => {
