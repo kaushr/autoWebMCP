@@ -13,6 +13,16 @@ read the descriptions — they state what each tool needs and guarantees.
     http://127.0.0.1:5173/prospect/     SignalBase — prospect intelligence
     http://127.0.0.1:5173/?control=1    Salesforce capabilities
 
+`document.modelContext` is a JavaScript API on the page: reach it by
+EVALUATING JAVASCRIPT in the tab, not through a dedicated WebMCP helper
+tool. If your browser has something like `webmcp_list_tools` you may use
+it, but its absence is not a blocker. Discover with
+`await document.modelContext.getTools()` and invoke with
+`await document.modelContext.executeTool(tool, JSON.stringify(args))` —
+the first argument is the tool OBJECT from `getTools()`, not its name, and
+the second is the arguments JSON-encoded as a string. The result is an
+envelope whose text is itself JSON, so parse twice before reading `status`.
+
 Call `getTools()` again whenever you switch pages; a tool handle from one
 document is not valid on another. If a call reports a tool or registration
 is stale, reload that page, re-discover, and try once more.

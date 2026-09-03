@@ -11,10 +11,6 @@ invoke a registered tool. Not every runtime can: a Codex CLI session on
 this machine reported `tab_webmcp_list_tools` unsupported and correctly
 refused to continue rather than reaching for the UI instead.
 
-If discovery is unavailable, say so and stop. Driving the applications by
-hand would produce a result, and it would not be a demonstration of
-anything — the whole claim is that these are tools an agent calls.
-
 `PROMPT.md` in this folder carries the same instructions as a single block
 to paste into a surface that does not read this file.
 
@@ -39,6 +35,33 @@ is the contract, not this file.
 When you move between the pages, call `getTools()` again. A tool handle
 from one document is not valid on another. If a call reports that a tool or
 its registration is stale, reload that page, re-discover, and try once more.
+
+## How to discover and invoke
+
+`document.modelContext` is a JavaScript API on the page. Reach it by
+EVALUATING JAVASCRIPT in the tab — not through a dedicated WebMCP helper
+tool. If your browser offers something like `webmcp_list_tools`, you may
+use it, but its absence is not a blocker and is not a reason to stop.
+
+Discovery:
+
+    await document.modelContext.getTools()
+
+Invocation takes two arguments, and both shapes matter — they were
+established empirically against this browser:
+
+    await document.modelContext.executeTool(tool, JSON.stringify(args))
+
+The first argument must be the tool OBJECT returned by `getTools()`, not
+its name — passing a name throws "The provided value is not of type
+'RegisteredTool'". The second must be the arguments JSON-encoded as a
+string; a plain object throws "Failed to parse input arguments".
+
+The result comes back as an envelope whose text is itself JSON, so parse
+twice before reading `status`.
+
+Only if `document.modelContext` is genuinely absent from the page is
+discovery impossible. Then say so and stop.
 
 ## The application tab you do not control
 
