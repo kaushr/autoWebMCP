@@ -4,6 +4,7 @@ import type { BrowserExecutionBinding } from "../../src/binding/browserExecution
 import type { DomainInspection } from "../../src/binding/browserExecution/execute";
 import type { BrowserQueryBinding, QueryOutcome } from "../../src/binding/browserExecution/query";
 import type { ExecutionResult } from "../../src/binding/browserExecution/result";
+import type { ExecutionPhase } from "../../src/binding/browserExecution/dispatch";
 
 /**
  * Where the extension POSTs its normalized trace.
@@ -88,6 +89,16 @@ export interface BrowserBindingExecuteRequest {
    * whichever one happens to be open.
    */
   requireTarget?: boolean;
+  /**
+   * Correlates this attempt across every hop.
+   *
+   * The same id delivered twice is the SAME transaction and must not
+   * execute twice; a new id carrying identical arguments is a different
+   * transaction that happens to agree, and must. The distinction only
+   * exists if the id travels, so it travels from the caller inward and
+   * comes back on the response.
+   */
+  invocationId?: string;
 }
 
 /**
@@ -124,11 +135,30 @@ export type AcquisitionFailureReason =
   | "target-tab-unreachable"
   | "content-script-unavailable"
   | "introspection-failed"
-  | "introspection-timeout";
+  | "introspection-timeout"
+  /**
+   * The request was dispatched and its answer never arrived.
+   *
+   * Deliberately distinct from every reason above, all of which mean the
+   * work did not happen. This one means nobody knows — which for a write
+   * is a different fact with different consequences, and reporting it as
+   * failure is what sent an agent to retry a save that had succeeded.
+   */
+  | "outcome-unknown";
 
 export interface BrowserBindingExecuteResponse {
   ok: boolean;
   result?: ExecutionResult;
+  /** Echoed back so a response can be matched to the attempt that produced it. */
+  invocationId?: string;
+  /** Which hop gave up, when one did. `outcome-unknown` is the one that matters for a write. */
+  reason?: AcquisitionFailureReason;
+  /**
+   * How far the execution got, when it is known despite there being no
+   * result. Set by whichever hop gave up waiting, so a timeout can say
+   * something better than "no answer".
+   */
+  phase?: ExecutionPhase;
   /**
    * The protocol version of the extension that actually ran this.
    *
@@ -202,7 +232,36 @@ export type TraceResponse = { trace?: ObservationTrace };
  * silently — which is exactly how a stale install came to look like an
  * uninstalled one.
  */
-export const STUDIO_BRIDGE_PROTOCOL = 3;
+export const STUDIO_BRIDGE_PROTOCOL = 4;
+
+/**
+ * How long each hop waits on the one below it, defined in ONE place.
+ *
+ * The order is the property, and it was previously absent: execution was
+ * bounded only at the outermost step, so a content script destroyed
+ * mid-run — which is what opening a record does — produced silence that
+ * travelled the whole way out and surfaced, seconds later, as "the
+ * extension did not respond". That sentence names the wrong component and
+ * says nothing about the write, which had in fact been dispatched.
+ *
+ * Each step must exceed the one inside it, or an inner hop that is still
+ * working is declared dead by an outer one and the account of what
+ * happened comes from whichever hop knows least. `EXECUTION` is summed
+ * from the budgets a run can legitimately spend: entering edit state and
+ * letting it settle (~10s), resolving targets (~8s), writing each value
+ * through its control (~4s per field), committing and settling (~5s), and
+ * reading back after the save (~5s).
+ */
+export const EXECUTION_TIMEOUTS = {
+  /** The execution's own ceiling, in the only context that knows how far it got. */
+  EXECUTION: 38_000,
+  /** The service worker, waiting on that tab. */
+  CONTENT_SCRIPT: 42_000,
+  /** The bridge, waiting on the service worker. */
+  BACKGROUND: 46_000,
+  /** The Studio page, waiting on the bridge. */
+  STUDIO: 50_000
+} as const;
 
 /** The attribute the bridge stamps on the page so its presence is detectable without a round trip. */
 export const STUDIO_BRIDGE_MARKER = "data-autowebmcp-bridge";
@@ -253,6 +312,8 @@ export interface StudioBridgeExecuteRequest {
   confirmed: true;
   /** See `BrowserBindingExecuteRequest.requireTarget`. */
   requireTarget?: boolean;
+  /** See `BrowserBindingExecuteRequest.invocationId`. */
+  invocationId?: string;
 }
 
 export interface StudioBridgeQueryRequest {
@@ -279,6 +340,14 @@ export interface StudioBridgeExecuteResponse {
   requestId: string;
   ok: boolean;
   result?: ExecutionResult;
+  invocationId?: string;
+  /** How far the execution got, when a hop knows that but has no result. */
+  phase?: ExecutionPhase;
+  /**
+   * Which hop gave up. `outcome-unknown` is the one a write must not treat
+   * as failure: it means dispatched, and then nobody heard.
+   */
+  reason?: AcquisitionFailureReason;
   error?: string;
 }
 

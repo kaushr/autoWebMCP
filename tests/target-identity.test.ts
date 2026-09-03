@@ -86,17 +86,16 @@ function mountEditForm(): HTMLElement {
 function adapterOnRecord(
   sequence: (string | undefined)[],
   /**
-   * What navigating does. Omitted means the platform cannot navigate at
-   * all, which is a real case — a platform with no declared route leaves
-   * the caller to open the record.
+   * Whether the platform declares a route to a record it is not showing.
+   * Omitted means it does not, which is a real case — the caller is then
+   * left to open the record itself.
    */
-  navigate?: { lands: string | undefined; ok?: boolean }
+  route?: { to: (id: string) => string }
 ): PlatformResolverAdapter {
   const base = resolverAdapterForPlatform("salesforce-lightning")!;
   let call = 0;
-  let current: string | undefined;
   const next = (): string | undefined => {
-    const id = current ?? sequence[Math.min(call, sequence.length - 1)];
+    const id = sequence[Math.min(call, sequence.length - 1)];
     call += 1;
     return id;
   };
@@ -106,18 +105,7 @@ function adapterOnRecord(
       const id = next();
       return id ? { id, entityType: "Opportunity" } : undefined;
     },
-    ...(navigate
-      ? {
-          navigateToEntity: async () => {
-            // Where the browser actually ended up, which is not necessarily
-            // where it was asked to go.
-            current = navigate.lands;
-            return navigate.ok === false
-              ? { ok: false, detail: "Navigation failed." }
-              : { ok: true, detail: `Navigated to ${navigate.lands}.` };
-          }
-        }
-      : { navigateToEntity: undefined })
+    ...(route ? { entityRouteFor: (identity) => route.to(identity.id) } : { entityRouteFor: undefined })
   };
 }
 
@@ -190,7 +178,7 @@ describe("the target is established before anything is touched", () => {
     expect(stageValue()).toBe("Engage");
     expect(result.transactions).toBeUndefined();
     expect(result.checks.some((check) => check.name === "editable_state")).toBe(false);
-    expect(result.warnings.join(" ")).toMatch(/no way to open a record/i);
+    expect(result.warnings.join(" ")).toMatch(/no route to open another/i);
   });
 
   it("refuses when the platform cannot say which record is open", async () => {
@@ -209,44 +197,56 @@ describe("the target is established before anything is touched", () => {
   });
 });
 
-describe("the execution opens the record it was asked for", () => {
-  it("navigates when a different record is showing, then writes", async () => {
-    // The gap that made this unusable by an agent: it had opened nothing
-    // and could open nothing, so a capability that only acts on what is
-    // already showing could never be called.
-    const result = await run(adapterOnRecord([RECORD_B], { lands: RECORD_A }), {
+describe("opening the requested record is reported, never performed mid-execution", () => {
+  const ROUTE = { to: (id: string) => `/lightning/r/Opportunity/${id}/view` };
+
+  it("stops without touching anything and says where the record is", async () => {
+    // The live failure this replaced: the executor opened the record
+    // itself, which replaces the document and destroys the context doing
+    // the waiting. The write was dispatched, the record was opened, and
+    // nothing was ever heard back — so the caller timed out and retried a
+    // write whose outcome it could not see.
+    const result = await run(adapterOnRecord([RECORD_B], ROUTE), {
+      opportunity_id: RECORD_A,
+      stage: "Confirm"
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.dispatch?.openRecordAt).toBe(`/lightning/r/Opportunity/${RECORD_A}/view`);
+    // Nothing happened, so invoking again is not merely allowed, it is the
+    // documented next step.
+    expect(result.dispatch?.phase).toBe("target-opening");
+    expect(result.dispatch?.mayHavePersisted).toBe(false);
+    expect(stageValue()).toBe("Engage");
+    expect(result.transactions).toBeUndefined();
+    expect(result.warnings.join(" ")).toMatch(/invoke again/i);
+  });
+
+  it("writes without any of that when the requested record is already open", async () => {
+    // The single-call path, and the one a live run proved end to end.
+    const result = await run(adapterOnRecord([RECORD_A], ROUTE), {
       opportunity_id: RECORD_A,
       stage: "Confirm"
     });
 
     expect(result.target?.status).toBe("verified");
-    expect(result.checks.find((check) => check.name === "target_identity")?.status).toBe("pass");
-    expect(result.evidence.join(" ")).toMatch(/navigated to/i);
+    expect(result.dispatch?.openRecordAt).toBeUndefined();
     expect(stageValue()).toBe("Confirm");
   });
 
-  it("refuses when navigation lands somewhere else", async () => {
-    // Navigating is not arriving. A route that redirects — a deleted
-    // record, a permission failure — lands elsewhere, and writing there is
-    // exactly the failure this gate exists to stop.
-    const result = await run(adapterOnRecord([RECORD_B], { lands: "006CCCCCCCCCCCCCCC" }), {
-      opportunity_id: RECORD_A,
-      stage: "Confirm"
-    });
-
-    expect(result.status).toBe("blocked");
-    expect(result.target?.status).toBe("mismatch");
-    expect(stageValue()).toBe("Engage");
-    expect(result.warnings.join(" ")).toMatch(/could not reach/i);
-  });
-
-  it("refuses when navigation itself fails", async () => {
-    const result = await run(adapterOnRecord([RECORD_B], { lands: RECORD_B, ok: false }), {
+  it("never asserts the route it is about to open as the identity it verified", async () => {
+    // The tempting shortcut, and the one that would defeat the whole gate:
+    // push the record's path onto the history, then read identity back out
+    // of the path we just wrote. Every check would pass and nothing would
+    // be proven. Identity is only ever read from a route the APPLICATION
+    // set, so a run that has not arrived is blocked, not verified.
+    const result = await run(adapterOnRecord([undefined], ROUTE), {
       opportunity_id: RECORD_A,
       stage: "Confirm"
     });
     expect(result.status).toBe("blocked");
-    expect(stageValue()).toBe("Engage");
+    expect(result.target?.status).toBe("unobservable");
+    expect(result.target?.afterSaveId).toBeUndefined();
   });
 });
 

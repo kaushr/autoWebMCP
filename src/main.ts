@@ -474,13 +474,24 @@ function describeOutcome(outcome: HarnessInvocationOutcome): string {
       : `The search found ${found} candidate${found === 1 ? "" : "s"} — choose one by its identity.`;
   }
   if (!outcome.execution) return outcome.unparsed ?? "The tool returned a response.";
+  const dispatch = outcome.execution.dispatch;
   switch (outcome.execution.status) {
     case "succeeded":
       return "The tool ran, the application saved, and every check passed.";
     case "partially_verified":
       return "The tool ran and saved, but not every check could be answered.";
     case "blocked":
-      return "The tool stopped before writing anything.";
+      return dispatch?.openRecordAt
+        ? "The tool stopped without writing anything and opened the requested record. Invoke it again."
+        : "The tool stopped before writing anything.";
+    case "unknown":
+      // The distinction the whole outcome model exists for. "Did not
+      // complete" would be a lie here: it may have completed perfectly and
+      // simply never said so.
+      return dispatch?.mayHavePersisted
+        ? `The tool was dispatched, reached "${dispatch.phase}", and never reported. Whether it saved is not ` +
+          "established — read the record rather than invoking again."
+        : "The tool was dispatched and never reported, but nothing had been saved when it stopped answering.";
     default:
       return "The tool ran and did not complete successfully.";
   }
@@ -1441,6 +1452,31 @@ function renderTransactions(result: ExecutionResult): string {
     .join("")}</ul>`;
 }
 
+/**
+ * How far a run got, shown only when that is the interesting fact.
+ *
+ * A successful result speaks for itself through its checks and
+ * transactions. This is for the two cases where it does not: an execution
+ * that stopped to open the requested record, and one that was dispatched
+ * and never reported — where "which phase did it reach" is the difference
+ * between a safe repeat and a write nobody can account for.
+ */
+function renderDispatch(result: ExecutionResult): string {
+  const dispatch = result.dispatch;
+  if (!dispatch || (result.status !== "unknown" && !dispatch.openRecordAt)) return "";
+  const lines = [
+    `Last confirmed phase: ${dispatch.phase}.`,
+    dispatch.openRecordAt ? `The requested record is being opened at ${dispatch.openRecordAt}.` : undefined,
+    result.status === "unknown"
+      ? dispatch.mayHavePersisted
+        ? "The save had already been issued, so this may or may not have been applied. Read the record before running it again."
+        : "Nothing had been saved when this stopped answering, so running it again is safe."
+      : undefined,
+    dispatch.invocationId ? `Invocation ${dispatch.invocationId}.` : undefined
+  ].filter((line): line is string => line !== undefined);
+  return `<p class="ambiguity">${lines.map(escapeHtml).join(" ")}</p>`;
+}
+
 function renderBrowserValidationStage(view: StudioLifecycleView): string {
   // Nothing to show before a test has actually run — the browser-execution
   // section above already carries the "not tested yet" state via its own
@@ -1458,6 +1494,7 @@ function renderBrowserValidationStage(view: StudioLifecycleView): string {
     )
     .join("")}</ul>
     ${renderTransactions(result)}
+    ${renderDispatch(result)}
     ${result.evidence.length ? `<ul class="reasons">${result.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
     ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}`;
 
@@ -2210,6 +2247,7 @@ function renderHarnessResult(): string {
     ${execution || harnessOutcome.query ? `<p><strong>${escapeHtml(describeOutcome(harnessOutcome))}</strong></p>` : ""}
     ${renderHarnessCandidates(harnessOutcome)}
     ${renderHarnessTransactions(harnessOutcome)}
+    ${execution ? renderDispatch(execution) : ""}
     ${
       checks.length
         ? `<ul class="reasons">${checks

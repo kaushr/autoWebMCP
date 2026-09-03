@@ -1,0 +1,393 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  judgeInvocation,
+  mayHavePersisted,
+  memoryJournal,
+  runOnce,
+  type ExecutionPhase
+} from "../src/binding/browserExecution/dispatch";
+import type { ExecutionResult } from "../src/binding/browserExecution/result";
+import { extensionBridgeExecutionClient } from "../src/training/browserExecutionClient";
+import { sourceApplicationFor } from "../src/training/sourceApplication";
+import { EXECUTION_TIMEOUTS, STUDIO_BRIDGE_PROTOCOL } from "../extension/src/protocol";
+import type { BrowserExecutionBinding } from "../src/binding/browserExecution/model";
+
+/* ------------------------------------------------------------------ *
+ * A dispatched write that never answers.
+ *
+ * From a live Codex → WebMCP → AutoWebMCP → Salesforce run. The agent
+ * invoked `update_opportunity`, the caller timed out, and the failure was
+ * reported as a failure. The Opportunity had in fact been changed to
+ * exactly what was asked for — so the agent, told the write had not
+ * happened, ran it again.
+ *
+ * Both halves of that are defects. The caller cannot know an outcome it
+ * never received, so it must not claim one; and a write whose outcome is
+ * unknown must not be repeated on the assumption that it did not happen.
+ * ------------------------------------------------------------------ */
+
+const SOURCE = "autowebmcp-studio-bridge";
+const MARKER = "data-autowebmcp-bridge";
+const SALESFORCE = sourceApplicationFor("salesforce-lightning", "example.lightning.force.com");
+
+const binding: BrowserExecutionBinding = {
+  id: "browser-update_opportunity",
+  capabilityId: "update_opportunity",
+  sourceApplication: SALESFORCE,
+  platform: "salesforce-lightning",
+  context: { recordType: "Opportunity", pageMode: "edit-or-record" },
+  inputs: [{ semanticInput: "stage", semanticTarget: { role: "field", label: "*Stage" }, valueKind: "select" }],
+  commit: { semanticAction: { role: "button", label: "Save" } },
+  verification: ["no-validation-error-visible"],
+  safety: { noCoordinates: true, noXPath: true, noPrivateTransportReplay: true, noCredentialExtraction: true },
+  evidence: []
+};
+
+const verified: ExecutionResult = {
+  status: "succeeded",
+  checks: [{ name: "target_identity", status: "pass", detail: "Same record throughout." }],
+  transactions: [
+    {
+      name: "stage",
+      beforeValue: "Establish",
+      requestedValue: "Collaborate",
+      afterWriteValue: "Collaborate",
+      afterSaveValue: "Collaborate",
+      verified: "yes",
+      detail: "Value set."
+    }
+  ],
+  evidence: [],
+  warnings: [],
+  target: { requestedId: "006A", beforeId: "006A", afterSaveId: "006A", status: "verified", detail: "" },
+  executedAt: "2026-09-02T00:00:00.000Z"
+};
+
+let detach: (() => void) | undefined;
+
+/**
+ * A scripted stand-in for the extension's bridge content script.
+ *
+ * `answer` returning `undefined` is the case that matters most: a bridge
+ * that takes the request and never replies, which is what a destroyed
+ * content script looks like from here.
+ */
+function bridge(answer: (request: Record<string, unknown>) => Record<string, unknown> | undefined): void {
+  document.documentElement.setAttribute(MARKER, String(STUDIO_BRIDGE_PROTOCOL));
+  const listener = (event: MessageEvent): void => {
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data?.source !== SOURCE || data.direction !== "request") return;
+    const reply = answer(data);
+    if (!reply) return;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { source: SOURCE, direction: "response", requestId: data.requestId, ...reply },
+        source: window
+      })
+    );
+  };
+  window.addEventListener("message", listener);
+  detach = () => window.removeEventListener("message", listener);
+}
+
+afterEach(() => {
+  detach?.();
+  detach = undefined;
+  document.documentElement.removeAttribute(MARKER);
+});
+
+/* =============== the round trip, when nothing goes wrong =============== */
+
+describe("a successful execution returns its verification evidence", () => {
+  it("resolves with the four facts and the identity intact", async () => {
+    let seen: Record<string, unknown> | undefined;
+    bridge((request) => {
+      seen = request;
+      return { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL, result: verified };
+    });
+
+    const result = await extensionBridgeExecutionClient.execute(binding, { stage: "Collaborate" }, {
+      requireTarget: true
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.transactions?.[0]).toMatchObject({
+      beforeValue: "Establish",
+      requestedValue: "Collaborate",
+      afterWriteValue: "Collaborate",
+      afterSaveValue: "Collaborate"
+    });
+    expect(result.target).toMatchObject({ requestedId: "006A", beforeId: "006A", afterSaveId: "006A" });
+    // The agent path still demands a named record, and the attempt is
+    // correlated end to end.
+    expect(seen?.requireTarget).toBe(true);
+    expect(typeof seen?.invocationId).toBe("string");
+  });
+});
+
+/* ============ dispatched, and then nobody heard anything ============ */
+
+describe("a lost answer is not a failed write", () => {
+  it("reports an unknown outcome, never a known failure", async () => {
+    // The live case exactly: the mutation succeeded and the response never
+    // came back. Anything that reads as "it did not happen" here is the
+    // sentence that sent an agent to do it twice.
+    bridge(() => undefined);
+
+    const result = await extensionBridgeExecutionClient.execute(binding, { stage: "Collaborate" }, {
+      requireTarget: true
+    });
+
+    expect(result.status).toBe("unknown");
+    expect(result.status).not.toBe("failed");
+    expect(result.dispatch?.mayHavePersisted).toBe(true);
+    expect(result.warnings.join(" ")).toMatch(/not established/i);
+    expect(result.warnings.join(" ")).toMatch(/read the record/i);
+  }, 60_000);
+
+  it("says so when the extension reported the loss itself, rather than waiting it out", async () => {
+    // The hop that actually gave up gets to name itself; the caller does
+    // not have to spend its whole budget to learn nothing.
+    bridge(() => ({
+      ok: false,
+      reason: "outcome-unknown",
+      error: "The target tab accepted this execution and did not answer within 42s."
+    }));
+
+    const result = await extensionBridgeExecutionClient.execute(binding, { stage: "Collaborate" });
+    expect(result.status).toBe("unknown");
+    expect(result.warnings.join(" ")).toMatch(/did not answer within 42s/);
+  });
+
+  it("still calls it blocked when nothing could have been dispatched at all", async () => {
+    // The other half of the distinction. A request that never reached a
+    // page cannot have changed anything, and saying "unknown" about it
+    // would be its own kind of dishonesty.
+    bridge(() => ({
+      ok: false,
+      reason: "target-tab-not-registered",
+      error: "No target tab is known."
+    }));
+
+    const result = await extensionBridgeExecutionClient.execute(binding, { stage: "Collaborate" });
+    expect(result.status).toBe("blocked");
+    expect(result.dispatch?.mayHavePersisted).toBe(false);
+    expect(result.warnings.join(" ")).toMatch(/nothing was changed/i);
+  });
+});
+
+/* ================= where it got to decides what is safe ================= */
+
+describe("how far an execution got is what makes a repeat safe or not", () => {
+  const phases: ExecutionPhase[] = ["received", "target-opening", "editable", "resolved", "writing", "written"];
+
+  it("treats everything up to the commit as having changed nothing", () => {
+    // Values typed into an unsaved form are not a change to the record;
+    // abandoning them leaves it as it was found.
+    for (const phase of phases) expect(mayHavePersisted(phase)).toBe(false);
+  });
+
+  it("treats the commit and everything after it as possibly persisted", () => {
+    for (const phase of ["saving", "saved", "verified", "reported"] as ExecutionPhase[]) {
+      expect(mayHavePersisted(phase)).toBe(true);
+    }
+  });
+});
+
+/* ===================== one transaction, one mutation ===================== */
+
+describe("the same invocation delivered twice performs one mutation", () => {
+  const request = { invocationId: "inv-1", capabilityId: "update_opportunity", inputs: { stage: "Collaborate" } };
+
+  it("replays the recorded outcome instead of executing again", async () => {
+    const journal = memoryJournal();
+    let mutations = 0;
+    const execute = async (): Promise<ExecutionResult> => {
+      mutations += 1;
+      return verified;
+    };
+
+    const first = await runOnce(journal, request, execute);
+    const second = await runOnce(journal, request, execute);
+
+    expect(mutations).toBe(1);
+    expect(second).toEqual(first);
+  });
+
+  it("does NOT collapse two different invocations that ask for the same thing", async () => {
+    // The distinction the task turned on. Two calls asking for the same
+    // close date are two transactions that happen to agree — and for a
+    // capability like `create_task`, treating them as one would silently
+    // drop work the caller asked for.
+    const journal = memoryJournal();
+    let mutations = 0;
+    const execute = async (): Promise<ExecutionResult> => {
+      mutations += 1;
+      return verified;
+    };
+
+    await runOnce(journal, { ...request, invocationId: "inv-1" }, execute);
+    await runOnce(journal, { ...request, invocationId: "inv-2" }, execute);
+    expect(mutations).toBe(2);
+  });
+});
+
+/* ================= never run an unknown write again ================= */
+
+describe("a write whose outcome is unknown is not simply run again", () => {
+  it("refuses a fresh invocation while an earlier one may have saved", async () => {
+    const journal = memoryJournal();
+    let mutations = 0;
+
+    // An invocation that got as far as the commit and never reported —
+    // the context that was running it is gone, so nothing will ever
+    // complete this record.
+    journal.write({
+      invocationId: "inv-lost",
+      capabilityId: "update_opportunity",
+      inputs: { stage: "Collaborate" },
+      startedAt: "2026-09-02T00:00:00.000Z",
+      phase: "saving"
+    });
+
+    const result = await runOnce(
+      journal,
+      { invocationId: "inv-next", capabilityId: "update_opportunity", inputs: { stage: "Collaborate" } },
+      async () => {
+        mutations += 1;
+        return verified;
+      }
+    );
+
+    expect(mutations).toBe(0);
+    expect(result.status).toBe("blocked");
+    expect(result.warnings.join(" ")).toMatch(/may already have saved/i);
+    expect(result.evidence.join(" ")).toMatch(/inv-lost/);
+  });
+
+  it("lets a fresh invocation through when the earlier one stopped before writing", async () => {
+    // Opening the requested record stops the execution having touched
+    // nothing at all, so invoking again is not merely permitted — it is
+    // the documented next step.
+    const journal = memoryJournal();
+    journal.write({
+      invocationId: "inv-opened",
+      capabilityId: "update_opportunity",
+      inputs: { stage: "Collaborate" },
+      startedAt: "2026-09-02T00:00:00.000Z",
+      phase: "target-opening"
+    });
+
+    let mutations = 0;
+    const result = await runOnce(
+      journal,
+      { invocationId: "inv-next", capabilityId: "update_opportunity", inputs: { stage: "Collaborate" } },
+      async () => {
+        mutations += 1;
+        return verified;
+      }
+    );
+
+    expect(mutations).toBe(1);
+    expect(result.status).toBe("succeeded");
+  });
+
+  it("does not let one capability's outstanding write block a different capability", () => {
+    const journal = memoryJournal();
+    journal.write({
+      invocationId: "inv-lost",
+      capabilityId: "update_opportunity",
+      inputs: {},
+      startedAt: "2026-09-02T00:00:00.000Z",
+      phase: "saving"
+    });
+    expect(judgeInvocation(journal, "inv-other", "find_opportunity").action).toBe("proceed");
+  });
+});
+
+/* ============ the journal has to outlive the thing it records ============ */
+
+describe("progress is recorded as it happens, not when the run ends", () => {
+  it("leaves the last reached phase behind even if the execution never returns", async () => {
+    // The whole reason the phase is published outward: the context that
+    // knows how far it got is the one being destroyed.
+    const journal = memoryJournal();
+    let reportedPhase: ((phase: ExecutionPhase) => void) | undefined;
+
+    const running = runOnce(
+      journal,
+      { invocationId: "inv-1", capabilityId: "update_opportunity", inputs: {} },
+      (report) =>
+        new Promise<ExecutionResult>(() => {
+          reportedPhase = report;
+        })
+    );
+    void running;
+
+    await Promise.resolve();
+    reportedPhase?.("saving");
+
+    const record = journal.read("inv-1");
+    expect(record?.phase).toBe("saving");
+    // Still unfinished, which is exactly what makes it blocking.
+    expect(record?.outcome).toBeUndefined();
+    expect(mayHavePersisted(record!.phase)).toBe(true);
+  });
+});
+
+/* ==================== the ladder has to stay ordered ==================== */
+
+describe("every hop waits longer than the hop inside it", () => {
+  it("is ordered from the execution outward", () => {
+    // The inversion this guards against is not hypothetical: execution was
+    // bounded ONLY at the outermost step, so the account of a lost write
+    // came from the hop that knew least about it. An outer step that ever
+    // dips below an inner one reintroduces exactly that.
+    const { EXECUTION, CONTENT_SCRIPT, BACKGROUND, STUDIO } = EXECUTION_TIMEOUTS;
+    expect(EXECUTION).toBeLessThan(CONTENT_SCRIPT);
+    expect(CONTENT_SCRIPT).toBeLessThan(BACKGROUND);
+    expect(BACKGROUND).toBeLessThan(STUDIO);
+  });
+});
+
+/* ========= a verified execution whose answer never got delivered ========= */
+
+describe("execution evidence survives a delivery failure", () => {
+  it("hands back the recorded verification when the same invocation is redelivered", async () => {
+    // The live shape, and the reason the outcome is journalled rather than
+    // merely returned: the mutation succeeded and was verified, and only
+    // the delivery failed. That evidence still exists, and a redelivery of
+    // the SAME transaction should hand it over rather than write again.
+    const journal = memoryJournal();
+    let mutations = 0;
+
+    const lost = await runOnce(
+      journal,
+      { invocationId: "inv-1", capabilityId: "update_opportunity", inputs: { stage: "Collaborate" } },
+      async () => {
+        mutations += 1;
+        return verified;
+      }
+    );
+    expect(lost.status).toBe("succeeded");
+
+    // …the caller never received that. It asks again with the same id.
+    const redelivered = await runOnce(
+      journal,
+      { invocationId: "inv-1", capabilityId: "update_opportunity", inputs: { stage: "Collaborate" } },
+      async () => {
+        mutations += 1;
+        return verified;
+      }
+    );
+
+    expect(mutations).toBe(1);
+    expect(redelivered.status).toBe("succeeded");
+    expect(redelivered.transactions?.[0]).toMatchObject({
+      beforeValue: "Establish",
+      requestedValue: "Collaborate",
+      afterSaveValue: "Collaborate"
+    });
+  });
+});

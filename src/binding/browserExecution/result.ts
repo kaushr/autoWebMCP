@@ -1,3 +1,5 @@
+import type { ExecutionPhase } from "./dispatch";
+
 /* ------------------------------------------------------------------ *
  * Execution result types.
  *
@@ -48,7 +50,7 @@ export interface InputTransaction {
   detail: string;
 }
 
-export type ExecutionOutcomeStatus = "succeeded" | "failed" | "partially_verified" | "blocked";
+export type ExecutionOutcomeStatus = "succeeded" | "failed" | "partially_verified" | "blocked" | "unknown";
 
 /**
  * The outcome of one execution attempt. Execution is not successful merely
@@ -60,6 +62,15 @@ export type ExecutionOutcomeStatus = "succeeded" | "failed" | "partially_verifie
  */
 export interface ExecutionResult {
   status: ExecutionOutcomeStatus;
+  /**
+   * How far this invocation was observed to get.
+   *
+   * Present on every result, and the only thing that carries meaning when
+   * `status` is `unknown`: an answer that never arrived still leaves a
+   * question with a correct answer, and the last confirmed phase is what
+   * separates "nothing was touched" from "the save was issued".
+   */
+  dispatch?: ExecutionDispatch;
   /** Per-input before/requested/after-write/after-save, never collapsed. */
   transactions?: InputTransaction[];
   checks: ExecutionCheckResult[];
@@ -96,4 +107,36 @@ export interface ExecutionTarget {
   /** `verified` requires requested, pre-write and post-save to be one entity. */
   status: "verified" | "mismatch" | "unobservable" | "not-required";
   detail: string;
+}
+
+/**
+ * What is known about an invocation's journey, independent of its outcome.
+ *
+ * Its own shape rather than fields on `ExecutionResult` because it is
+ * produced in a different place and survives differently: the phase is
+ * recorded as the execution passes each point, so it is still true after
+ * the context that was executing has been destroyed, which is precisely
+ * the case that produced a successful Salesforce write and a caller that
+ * heard nothing.
+ */
+export interface ExecutionDispatch {
+  /** Correlates this attempt across every hop, and makes a redelivery recognisable. */
+  invocationId?: string;
+  phase: ExecutionPhase;
+  /**
+   * Whether a persisted change may already exist despite this result.
+   *
+   * `true` on an `unknown` outcome is the whole reason that status exists:
+   * it says a retry is not obviously safe.
+   */
+  mayHavePersisted: boolean;
+  /**
+   * Where the requested record lives, when execution stopped because it was
+   * not open.
+   *
+   * Opening it replaces the document — and with it the context executing —
+   * so the record is opened only after this result has been handed back,
+   * and the caller invokes again against a page that is now correct.
+   */
+  openRecordAt?: string;
 }

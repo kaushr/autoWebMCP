@@ -1,6 +1,6 @@
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
 import type { BrowserQueryBinding, QueryOutcome } from "../binding/browserExecution/query";
-import type { AcquisitionFailureReason } from "../../extension/src/protocol";
+import { EXECUTION_TIMEOUTS, type AcquisitionFailureReason } from "../../extension/src/protocol";
 import type { DomainInspection } from "../binding/browserExecution/execute";
 import type { ExecutionResult } from "../binding/browserExecution/result";
 
@@ -65,7 +65,7 @@ const PROBE_TIMEOUT_MS = 1_500;
 const ACQUIRE_TIMEOUT_MS = 35_000;
 
 /** What the bridge must speak for the Studio's current requests to be understood. */
-const REQUIRED_PROTOCOL = 3;
+const REQUIRED_PROTOCOL = 4;
 const BRIDGE_MARKER = "data-autowebmcp-bridge";
 
 /**
@@ -114,7 +114,25 @@ const STUDIO_BRIDGE_SOURCE = "autowebmcp-studio-bridge";
  * too eagerly would misreport a slow-but-working execution as an
  * unreachable extension.
  */
-const RESPONSE_TIMEOUT_MS = 45_000;
+const RESPONSE_TIMEOUT_MS = EXECUTION_TIMEOUTS.STUDIO;
+
+/**
+ * The outermost step of a deliberately ordered ladder, so that whichever
+ * hop actually stopped is the one that gets to say so:
+ *
+ *   38s  the execution's own ceiling, in the content script — the only
+ *        context that knows how far it got
+ *   42s  the service worker waiting on that tab
+ *   46s  the bridge waiting on the service worker
+ *   50s  here
+ *
+ * Before this, execution had a bound only at this outermost step. Every
+ * hop below was unbounded, so a content script destroyed mid-run — which
+ * is what opening a record does — produced silence that travelled the
+ * whole way out and arrived, 45 seconds later, as "the extension did not
+ * respond": a sentence about the wrong component, describing a write that
+ * had in fact been dispatched.
+ */
 
 function newRequestId(prefix = "exec"): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -185,30 +203,45 @@ function bridgeRequest<T>(
  * asked for: the extension already has live tab access; this only reaches it.
  */
 export const extensionBridgeExecutionClient: BrowserExecutionClient = {
-  execute(binding, inputs, options) {
-    return bridgeRequest<ExecutionResult>(
-      { binding, inputs, confirmed: true, ...(options?.requireTarget ? { requireTarget: true } : {}) },
-      "exec",
-      RESPONSE_TIMEOUT_MS,
-      (data) => {
-      const result = data.result as ExecutionResult | undefined;
-      if (!result) return undefined;
-      // A result produced by an older extension than this page expects is
-      // evidence about the wrong code. Three live runs were analysed that
-      // way before anything reported the mismatch.
-      const ran = typeof data.protocol === "number" ? data.protocol : 0;
-      if (ran >= REQUIRED_PROTOCOL) return result;
-      return {
-        ...result,
-        warnings: [
-          `This result came from an older Teach Mode extension (version ${ran || "unknown"}; this page expects ` +
-            `${REQUIRED_PROTOCOL}). Reload the extension at chrome://extensions, reload this page, then re-run — ` +
-            "the findings below may describe code that is no longer current.",
-          ...result.warnings
-        ]
-      };
-      }
-    );
+  async execute(binding, inputs, options) {
+    // One id for this attempt, carried to the page and back. A redelivery
+    // of THIS id is the same transaction and must not run twice; a fresh
+    // call with identical arguments is a different transaction and must.
+    const invocationId = newRequestId("inv");
+    try {
+      return await bridgeRequest<ExecutionResult>(
+        {
+          binding,
+          inputs,
+          confirmed: true,
+          invocationId,
+          ...(options?.requireTarget ? { requireTarget: true } : {})
+        },
+        "exec",
+        RESPONSE_TIMEOUT_MS,
+        (data) => {
+          const result = data.result as ExecutionResult | undefined;
+          if (!result) return undefined;
+          // A result produced by an older extension than this page expects is
+          // evidence about the wrong code. Three live runs were analysed that
+          // way before anything reported the mismatch.
+          const ran = typeof data.protocol === "number" ? data.protocol : 0;
+          if (ran >= REQUIRED_PROTOCOL) return result;
+          return {
+            ...result,
+            warnings: [
+              `This result came from an older Teach Mode extension (version ${ran || "unknown"}; this page expects ` +
+                `${REQUIRED_PROTOCOL}). Reload the extension at chrome://extensions, reload this page, then re-run — ` +
+                "the findings below may describe code that is no longer current.",
+              ...result.warnings
+            ]
+          };
+        },
+        (data) => data.reason as AcquisitionFailureReason | undefined
+      );
+    } catch (error) {
+      return executionWithoutAnswer(invocationId, error);
+    }
   },
 
   query(binding, inputs) {
@@ -241,3 +274,52 @@ export const extensionBridgeExecutionClient: BrowserExecutionClient = {
     }
   }
 };
+
+/**
+ * What to report when a dispatched execution produced no result.
+ *
+ * The distinction this exists to preserve: an execution that never left
+ * this page did not happen, and one that was handed to the extension and
+ * then went quiet MIGHT have. A live run made the difference concrete — a
+ * Salesforce Opportunity was updated exactly as requested while the caller
+ * was told the write had failed, and the agent, believing that, ran it
+ * again.
+ *
+ * `blocked` is used only where nothing could have been dispatched at all.
+ * Everything else is `unknown`, which says the honest thing: read the
+ * record before running this again.
+ */
+function executionWithoutAnswer(invocationId: string, error: unknown): ExecutionResult {
+  const reason = error instanceof BridgeError ? error.reason : undefined;
+  const detail = error instanceof Error ? error.message : String(error);
+  // These are refusals to dispatch, not lost answers: the request never
+  // reached a page, so nothing can have been written.
+  const neverDispatched =
+    reason === "extension-unavailable" || reason === "studio-bridge-outdated" || reason === "target-tab-not-registered";
+
+  if (neverDispatched) {
+    return {
+      status: "blocked",
+      dispatch: { invocationId, phase: "received", mayHavePersisted: false },
+      checks: [],
+      evidence: [],
+      warnings: [`${detail} Nothing was dispatched, so nothing was changed.`],
+      executedAt: new Date().toISOString()
+    };
+  }
+
+  return {
+    status: "unknown",
+    // Conservative on purpose. This layer cannot see how far the execution
+    // got — the context that knew may no longer exist — so it must assume
+    // the save could have been issued rather than assume it was not.
+    dispatch: { invocationId, phase: "received", mayHavePersisted: true },
+    checks: [],
+    evidence: [`Invocation ${invocationId} was dispatched and produced no result.`],
+    warnings: [
+      `${detail} The execution was dispatched, so whether it changed anything is not established. Do not simply ` +
+        "invoke this again: read the record first, and treat a repeat as a new transaction, not a retry."
+    ],
+    executedAt: new Date().toISOString()
+  };
+}

@@ -4,6 +4,7 @@ import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/
 import {
   DEFAULT_SETTINGS,
   DEFAULT_CONTROL_PLANE_ORIGIN,
+  EXECUTION_TIMEOUTS,
   isValidControlPlaneOrigin,
   type BrowserBindingExecuteResponse,
   type BrowserBindingInspectResponse,
@@ -59,6 +60,21 @@ class ContentScriptTimeoutError extends Error {}
  * directly, with no console required to see it.
  */
 const CONTENT_SCRIPT_ANSWER_TIMEOUT_MS = 15_000;
+
+/**
+ * The same watchdog, for a write — and the hop that had none.
+ *
+ * `chrome.tabs.sendMessage` neither resolves nor rejects when the frame it
+ * was sent to is destroyed mid-answer, which is exactly what a page
+ * navigation does. Execution had no bound here at all, so that silence
+ * travelled all the way out to the caller and arrived as a generic
+ * "the extension did not respond" 45 seconds later, naming the wrong thing.
+ *
+ * Above the content script's own 38s ceiling so a run that IS answering
+ * always answers first, and below the bridge's patience so this hop's
+ * account of what happened is the one that reaches the Studio.
+ */
+const EXECUTE_ANSWER_TIMEOUT_MS = EXECUTION_TIMEOUTS.CONTENT_SCRIPT;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -520,13 +536,29 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         // if one is already present, and the execute handler here has no
         // session state to duplicate.
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-        return (await chrome.tabs.sendMessage(tabId, {
-          type: "execute:run",
-          request: message.request
-        })) as BrowserBindingExecuteResponse;
+        return (await withTimeout(
+          chrome.tabs.sendMessage(tabId, { type: "execute:run", request: message.request }),
+          EXECUTE_ANSWER_TIMEOUT_MS
+        )) as BrowserBindingExecuteResponse;
       } catch (error) {
+        // A write that was dispatched and then went quiet is not a write
+        // that failed. Nobody at this hop knows which — and saying "failed"
+        // is what sent an agent to retry a Salesforce save that had already
+        // succeeded.
+        if (error instanceof ContentScriptTimeoutError) {
+          return {
+            ok: false,
+            reason: "outcome-unknown",
+            ...(message.request.invocationId ? { invocationId: message.request.invocationId } : {}),
+            error:
+              `The target tab accepted this execution and did not answer within ` +
+              `${EXECUTE_ANSWER_TIMEOUT_MS / 1000}s. It was dispatched, so whether it changed anything is not ` +
+              `known from here. The page may have navigated while it ran. Read the record before invoking again.`
+          } satisfies BrowserBindingExecuteResponse;
+        }
         return {
           ok: false,
+          ...(message.request.invocationId ? { invocationId: message.request.invocationId } : {}),
           error: error instanceof Error ? error.message : String(error)
         } satisfies BrowserBindingExecuteResponse;
       }

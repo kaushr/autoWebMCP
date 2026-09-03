@@ -6,7 +6,7 @@ import {
   safeValueChange,
   type FieldDescriptor
 } from "../../src/capture/policy";
-import { replaceMessageListener, STUDIO_BRIDGE_PROTOCOL } from "./protocol";
+import { EXECUTION_TIMEOUTS, replaceMessageListener, STUDIO_BRIDGE_PROTOCOL } from "./protocol";
 import type {
   CaptureApplicationContext,
   CaptureEvent,
@@ -28,6 +28,14 @@ import type {
   ToContentMessage
 } from "./protocol";
 import { executeConfirmed, inspectValueDomains } from "../../src/binding/browserExecution/execute";
+import {
+  mayHavePersisted,
+  runOnce,
+  type ExecutionPhase,
+  type InvocationJournal,
+  type InvocationRecord
+} from "../../src/binding/browserExecution/dispatch";
+import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 import { executeQuery } from "../../src/binding/browserExecution/query";
 import { entityIdentityPolicyForPlatform } from "../../src/binding/browserExecution/adapters";
 import {
@@ -476,30 +484,167 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
  * defense `executeConfirmed` itself applies, kept even though the sender
  * (the Studio-bridge) already required it once.
  */
-async function runExecuteRequest(request: BrowserBindingExecuteRequest): Promise<BrowserBindingExecuteResponse> {
-  if (request.confirmed !== true) {
-    return { ok: false, error: "Execution refused: no explicit confirmation was supplied." };
-  }
+/* ------------------------------------------------------------------ *
+ * Remembering what was dispatched, in a place that outlives the document.
+ *
+ * The failure this defends against destroys the JavaScript context in the
+ * middle of an execution — opening a record replaces the page, and any
+ * bookkeeping held in a variable dies with it. `sessionStorage` belongs to
+ * the tab rather than to the document, so a note written before a
+ * navigation is still readable by the script injected into the page that
+ * replaces it. Nothing else here survives that.
+ *
+ * Only AutoWebMCP's own invocation bookkeeping is stored: which capability,
+ * which arguments, and how far it got.
+ * ------------------------------------------------------------------ */
+const JOURNAL_KEY = "__autowebmcp_invocations";
+/** Bounded so a long-lived tab does not accumulate forever. Newest kept. */
+const JOURNAL_LIMIT = 20;
+
+function readJournal(): InvocationRecord[] {
   try {
-    const result = await executeConfirmed({
-      root: document,
-      binding: request.binding,
-      inputs: request.inputs,
-      adapter: resolverAdapterForPlatform(request.binding.platform),
-      confirmed: true,
-      ...(request.requireTarget ? { requireTarget: true } : {})
-    });
-    // Which pack knowledge governed this run, recorded alongside the result
-    // so an execution can be audited back to the platform facts that shaped it.
-    const provenance = resolutionProvenanceForPlatform(request.binding.platform);
+    const raw = window.sessionStorage.getItem(JOURNAL_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? (parsed as InvocationRecord[]) : [];
+  } catch {
+    // A page may deny storage entirely. Losing the journal costs safety
+    // margin, never correctness of the run itself.
+    return [];
+  }
+}
+
+const pageJournal: InvocationJournal = {
+  read: (invocationId) => readJournal().find((entry) => entry.invocationId === invocationId),
+  forCapability: (capabilityId) => readJournal().filter((entry) => entry.capabilityId === capabilityId),
+  write(record) {
+    try {
+      const kept = readJournal().filter((entry) => entry.invocationId !== record.invocationId);
+      kept.push(record);
+      window.sessionStorage.setItem(JOURNAL_KEY, JSON.stringify(kept.slice(-JOURNAL_LIMIT)));
+    } catch {
+      /* see readJournal */
+    }
+  }
+};
+
+/**
+ * An execution's own ceiling, below every hop that is waiting on it.
+ *
+ * Summed from the budgets it can legitimately spend: entering edit state
+ * and letting it settle (~10s), resolving targets (~8s), writing each
+ * value through its control (~4s per field), committing and settling
+ * (~5s), and reading back after the save (~5s). A run that exceeds this is
+ * not slow, it is stuck — and the point of bounding it HERE is that this
+ * is the only context that knows how far it got.
+ */
+const EXECUTION_BUDGET_MS = EXECUTION_TIMEOUTS.EXECUTION;
+
+async function runExecuteRequest(
+  request: BrowserBindingExecuteRequest
+): Promise<{ response: BrowserBindingExecuteResponse; afterResponding?: () => void }> {
+  if (request.confirmed !== true) {
+    return { response: { ok: false, error: "Execution refused: no explicit confirmation was supplied." } };
+  }
+
+  const invocationId = request.invocationId;
+  // Whether this is the same transaction arriving again, decided before
+  // `runOnce` folds that distinction away. A redelivery re-reports what
+  // the original run produced; it does not re-open the record, or a caller
+  // that keeps re-asking would keep reloading the page.
+  const redelivered = invocationId !== undefined && pageJournal.read(invocationId)?.outcome !== undefined;
+  try {
+    const result = await runOnce(
+      pageJournal,
+      { ...(invocationId ? { invocationId } : {}), capabilityId: request.binding.capabilityId, inputs: request.inputs },
+      async (report) => {
+        let phase: ExecutionPhase = "received";
+        const running = executeConfirmed({
+          root: document,
+          binding: request.binding,
+          inputs: request.inputs,
+          adapter: resolverAdapterForPlatform(request.binding.platform),
+          confirmed: true,
+          ...(invocationId ? { invocationId } : {}),
+          onPhase: (next) => {
+            phase = next;
+            report(next);
+          },
+          ...(request.requireTarget ? { requireTarget: true } : {})
+        });
+        const outcome = await withBudget(running, EXECUTION_BUDGET_MS, () => phase);
+        // Which pack knowledge governed this run, recorded alongside the
+        // result so an execution can be audited back to the platform facts
+        // that shaped it.
+        const provenance = resolutionProvenanceForPlatform(request.binding.platform);
+        return provenance ? { ...outcome, evidence: [provenance, ...outcome.evidence] } : outcome;
+      }
+    );
+
+    // Opening the record is the LAST thing this document does, and only
+    // once the answer is already on its way back. Doing it inside the
+    // execution is what lost a whole live invocation: the navigation
+    // replaced the page, and the context that owed everyone an answer went
+    // with it.
+    const openRecordAt = redelivered ? undefined : result.dispatch?.openRecordAt;
     return {
-      ok: true,
-      protocol: STUDIO_BRIDGE_PROTOCOL,
-      result: provenance ? { ...result, evidence: [provenance, ...result.evidence] } : result
+      response: {
+        ok: true,
+        protocol: STUDIO_BRIDGE_PROTOCOL,
+        ...(invocationId ? { invocationId } : {}),
+        ...(result.dispatch?.phase ? { phase: result.dispatch.phase } : {}),
+        result
+      },
+      ...(openRecordAt ? { afterResponding: () => window.location.assign(openRecordAt) } : {})
     };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      response: {
+        ok: false,
+        ...(invocationId ? { invocationId } : {}),
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
   }
+}
+
+/**
+ * Bounds an execution, and reports where it had got to when the bound was
+ * reached — which is the only useful thing to say about a run that stopped
+ * answering.
+ */
+function withBudget(
+  running: Promise<ExecutionResult>,
+  ms: number,
+  phaseNow: () => ExecutionPhase
+): Promise<ExecutionResult> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const phase = phaseNow();
+      resolve({
+        status: "unknown",
+        dispatch: { phase, mayHavePersisted: mayHavePersisted(phase) },
+        checks: [],
+        evidence: [`The execution reached "${phase}" and did not finish within ${Math.round(ms / 1000)}s.`],
+        warnings: [
+          mayHavePersisted(phase)
+            ? `The save had already been issued when this stopped answering, so the change may or may not have been ` +
+              "applied. Read the record before invoking this again."
+            : "Nothing had been saved when this stopped answering, so invoking again is safe."
+        ],
+        executedAt: new Date().toISOString()
+      });
+    }, ms);
+    running.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
 }
 
 /**
@@ -644,7 +789,12 @@ function contentMessageListener(...[message, _sender, sendResponse]: Parameters<
     return true;
   }
   if (request.type === "execute:run") {
-    void runExecuteRequest(request.request).then(sendResponse);
+    void runExecuteRequest(request.request).then(({ response, afterResponding }) => {
+      sendResponse(response);
+      // Ordering is the whole fix: the answer leaves this document before
+      // anything is allowed to replace it.
+      if (afterResponding) setTimeout(afterResponding, 0);
+    });
     return true;
   }
   if (request.type === "inspect:domains") {

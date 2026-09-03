@@ -857,10 +857,6 @@ async function setDateValue(
   };
 }
 
-/** Generous: an SPA route change plus a record view rendering. */
-const NAVIGATION_TIMEOUT_MS = 15_000;
-const NAVIGATION_POLL_MS = 200;
-
 const EDIT_WAIT_TIMEOUT_MS = 5_000;
 const EDIT_WAIT_POLL_MS = 100;
 
@@ -1411,38 +1407,8 @@ export function createSalesforceResolverAdapter(
      * deleted record, a permission failure — must not read as having
      * arrived.
      */
-    async navigateToEntity(
-      identity: EntityIdentity,
-      root: ParentNode,
-      _policy: ResolutionPolicy,
-      timeoutMs = NAVIGATION_TIMEOUT_MS
-    ): Promise<{ ok: boolean; detail: string }> {
-      if (!entityIdentity) {
-        return { ok: false, detail: "This platform declares no navigable route for its records." };
-      }
-      const document = root instanceof Document ? root : (root as Element).ownerDocument;
-      const view = document?.defaultView;
-      if (!document || !view) return { ok: false, detail: "No browsing context is available to navigate." };
-
-      const path = routeFor(identity, entityIdentity);
-      view.location.assign(path);
-
-      const deadline = Date.now() + timeoutMs;
-      for (;;) {
-        const observed = identityFromPath(document.location?.pathname ?? "", entityIdentity);
-        if (observed && observed.id === identity.id) {
-          // The route being right is not the view being ready.
-          await waitForApplicationReaction({ root, quietMs: 300, timeoutMs: 5_000 });
-          return { ok: true, detail: `Navigated to ${identity.entityType ?? "record"} ${identity.id}.` };
-        }
-        if (Date.now() >= deadline) {
-          return {
-            ok: false,
-            detail: `The page did not reach ${identity.id} within ${Math.round(timeoutMs / 1000)}s of navigating to ${path}.`
-          };
-        }
-        await sleep(NAVIGATION_POLL_MS);
-      }
+    entityRouteFor(identity: EntityIdentity): string | undefined {
+      return entityIdentity ? routeFor(identity, entityIdentity) : undefined;
     },
 
     /**

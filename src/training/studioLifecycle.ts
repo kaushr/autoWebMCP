@@ -261,7 +261,10 @@ const BROWSER_VALIDATION_LABEL: Record<ExecutionOutcomeStatus, string> = {
   succeeded: "Validated",
   partially_verified: "Save succeeded — value read-back unavailable",
   failed: "Failed",
-  blocked: "Blocked before writing anything"
+  blocked: "Blocked before writing anything",
+  // Dispatched, and then silence. Not a validation: nothing here proves the
+  // binding works, and nothing here proves it does not.
+  unknown: "Dispatched — outcome never established"
 };
 
 function browserValidationStage(

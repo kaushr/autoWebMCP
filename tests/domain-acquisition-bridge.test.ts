@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { extensionBridgeExecutionClient } from "../src/training/browserExecutionClient";
 import { sourceApplicationFor } from "../src/training/sourceApplication";
 import type { BrowserExecutionBinding } from "../src/binding/browserExecution/model";
+import { STUDIO_BRIDGE_PROTOCOL } from "../extension/src/protocol";
 
 /* ------------------------------------------------------------------ *
  * Which hop failed, and saying so.
@@ -39,7 +40,7 @@ let detach: (() => void) | undefined;
 /** Installs a scripted stand-in for the extension's bridge content script. */
 function bridge(
   answer: (request: Record<string, unknown>) => Record<string, unknown> | undefined,
-  protocol: number | null = 3
+  protocol: number | null = STUDIO_BRIDGE_PROTOCOL
 ): void {
   if (protocol !== null) document.documentElement.setAttribute(MARKER, String(protocol));
   const listener = (event: MessageEvent): void => {
@@ -84,7 +85,7 @@ describe("A — the whole path works and the options come back", () => {
               evidence: []
             }
           }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
 
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
@@ -109,7 +110,7 @@ describe("the exact live failure — an installed bridge that predates this requ
   it("is reported as out of date, not as a missing extension", async () => {
     // An older protocol announced: installed, enabled, and too old to
     // understand the request this page is about to send.
-    bridge(() => undefined, 2);
+    bridge(() => undefined, STUDIO_BRIDGE_PROTOCOL - 1);
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -140,7 +141,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
             reason: "target-tab-not-registered",
             error: "No target tab is known. Start a Teach Mode session on the target application first."
           }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -153,7 +154,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "content-script-unavailable", error: "The content script could not be injected." }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -165,7 +166,7 @@ describe("C & D — failures inside the extension name their own hop", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "target-tab-unreachable", error: "The target tab could not be reached." }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -179,7 +180,7 @@ describe("E — introspection itself failing is its own reason", () => {
     bridge((request) =>
       request.kind === "inspect"
         ? { ok: false, reason: "introspection-failed", error: "the component exploded while opening" }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(false);
@@ -205,7 +206,7 @@ describe("H — choices retained alongside an unproven restoration", () => {
               evidence: []
             }
           }
-        : { ok: true, protocol: 3 }
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL }
     );
     const result = await extensionBridgeExecutionClient.acquireDomains(binding);
     expect(result.ok).toBe(true);
@@ -234,7 +235,7 @@ describe("the acquisition request carries no confirmation and no inputs", () => 
               evidence: []
             }
           }
-        : { ok: true, protocol: 3 };
+        : { ok: true, protocol: STUDIO_BRIDGE_PROTOCOL };
     });
 
     await extensionBridgeExecutionClient.acquireDomains(binding);

@@ -1,4 +1,5 @@
 import {
+  EXECUTION_TIMEOUTS,
   STUDIO_BRIDGE_MARKER,
   STUDIO_BRIDGE_PROTOCOL,
   STUDIO_BRIDGE_SOURCE,
@@ -37,6 +38,15 @@ document.documentElement.setAttribute(STUDIO_BRIDGE_MARKER, String(STUDIO_BRIDGE
 
 /** Shorter than the Studio's own patience, so the bridge reports first. */
 const BACKGROUND_ANSWER_TIMEOUT_MS = 20_000;
+
+/**
+ * The same idea for a write, which had no watchdog at all.
+ *
+ * Above the background's own 42s ceiling so that hop reports first when it
+ * can, and below the Studio's patience so silence here is still attributed
+ * to the right place rather than arriving as an anonymous timeout.
+ */
+const EXECUTE_BACKGROUND_TIMEOUT_MS = EXECUTION_TIMEOUTS.BACKGROUND;
 
 type AnyRequest = Omit<
   Partial<StudioBridgeExecuteRequest & StudioBridgeInspectRequest & StudioBridgeQueryRequest>,
@@ -174,15 +184,37 @@ window.addEventListener("message", (event) => {
   }
 
   if (data.binding && data.confirmed === true) {
+    const invocationId = typeof data.invocationId === "string" ? data.invocationId : undefined;
+    let answered = false;
     const respond = (response: Omit<StudioBridgeExecuteResponse, "source" | "direction" | "requestId">): void => {
-      post({ requestId, ...response });
+      if (answered) return;
+      answered = true;
+      clearTimeout(watchdog);
+      post({ requestId, ...(invocationId ? { invocationId } : {}), ...response });
     };
+
+    // The failure this path could not report was silence, and a write is
+    // the worst thing to be silent about: an execution that was dispatched
+    // and never answered may already have saved. Saying so is the whole
+    // point — the caller can then read the record instead of guessing, and
+    // must not simply run it again.
+    const watchdog = setTimeout(() => {
+      respond({
+        ok: false,
+        reason: "outcome-unknown",
+        error:
+          "The execution was dispatched to the extension and no answer came back within " +
+          `${EXECUTE_BACKGROUND_TIMEOUT_MS / 1000}s. Whether it changed anything is not known from here.`
+      });
+    }, EXECUTE_BACKGROUND_TIMEOUT_MS);
+
     callBackground({
       type: "browser-binding:execute",
       request: {
         binding: data.binding,
         inputs: data.inputs ?? {},
         confirmed: true,
+        ...(invocationId ? { invocationId } : {}),
         // Relayed rather than decided here: only the caller knows whether
         // this is an autonomous invocation or a human's own test.
         ...(data.requireTarget === true ? { requireTarget: true } : {})

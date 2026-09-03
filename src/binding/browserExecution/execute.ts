@@ -24,6 +24,7 @@ import type {
   InputTransaction
 } from "./result";
 import { sameEntity } from "./entityIdentity";
+import { mayHavePersisted, type ExecutionPhase } from "./dispatch";
 
 export type { ExecutionOutcomeStatus, ExecutionResult } from "./result";
 
@@ -63,6 +64,18 @@ export interface ExecuteOptions {
   reaction?: { timeoutMs?: number; quietMs?: number };
   /** How long to keep retrying target resolution before giving up. Defaults to 8s; tests override it to stay fast. */
   resolveRetryMs?: number;
+  /** Correlates this attempt across every hop, so a redelivery is recognisable as the same transaction. */
+  invocationId?: string;
+  /**
+   * Called as each point is reached, BEFORE the work that follows it.
+   *
+   * The caller uses this to record progress somewhere that outlives this
+   * document. Without it, an execution whose context is destroyed leaves
+   * nothing behind, and "no answer" cannot be told apart from "never ran" —
+   * which is exactly how a successful Salesforce save was reported to an
+   * agent as a failure it then retried.
+   */
+  onPhase?: (phase: ExecutionPhase) => void;
 }
 
 /**
@@ -499,20 +512,28 @@ export function inspectValueDomains(options: InspectOptions): Promise<DomainInsp
  *   mismatch          the caller named one and a DIFFERENT one is open.
  *   unobservable      the platform cannot say what is open.
  *
- * Mismatch and unobservable both refuse. Navigation would be the better
- * answer to a mismatch and is deliberately not attempted here: a full page
- * load tears down the very content script running this function, so
- * navigating mid-execution would abandon the run rather than continue it.
- * Doing it properly means orchestrating from the service worker — navigate
- * the tab, wait for load, re-inject, then execute — which is a larger
- * change than this gate, and refusing without touching anything is the
- * safe half of it.
+ * Mismatch and unobservable both stop without touching anything, and both
+ * report WHERE the requested record can be opened when the platform
+ * declares a route. Opening it is deliberately not done here: the route
+ * replaces the document, and with it the context running this function, so
+ * an executor that navigates and then waits to see where it landed is
+ * waiting in a context the navigation has already killed. That is not a
+ * theoretical hazard — it is what a live agent invocation did, dispatching
+ * a write, opening the record, and never being heard from again.
+ *
+ * Nor is the URL simply asserted and trusted: identity is only ever read
+ * back from a route the APPLICATION set. Pushing a record's path onto the
+ * history and then reading the identity out of it would satisfy every
+ * check in this file while proving nothing, which is precisely the failure
+ * the identity gate exists to make impossible.
  */
 async function establishTarget(options: ExecuteOptions): Promise<{
   state: ExecutionTarget;
   check?: ExecutionCheckResult;
   evidence: string[];
   refuse?: string;
+  /** Where the requested record lives, when it is not the one open. */
+  openRecordAt?: string;
 }> {
   const { root, binding, inputs, adapter } = options;
   const declared = binding.context.target;
@@ -561,55 +582,42 @@ async function establishTarget(options: ExecuteOptions): Promise<{
   // stop. An agent invoking this may be looking at search results, a home
   // page, or anything else with no record identity at all — which is the
   // ordinary case, not an error.
+  //
+  // But going there is the end of this document, and of the context running
+  // this function. Opening the record here and then waiting to confirm
+  // arrival is waiting in a context the navigation has already destroyed —
+  // code that can only ever die, and did: a live agent invocation was
+  // dispatched, opened the record, and was never heard from again, leaving
+  // the caller to time out and retry a write it could not see the state of.
+  //
+  // So this stops instead, having touched nothing, and says where the
+  // record is. Whoever holds the response opens it once the answer is
+  // safely on its way back, and the next invocation finds a correct page.
   if (!observed || !sameEntity(observed, wanted)) {
-    // A capability that can only act on what is already open cannot be
-    // called by an agent: it has opened nothing and can open nothing.
-    // Establishing the precondition belongs to the execution, not to the
-    // caller — so the record is opened rather than demanded.
-    const navigated = await adapter?.navigateToEntity?.(wanted, root, policyFor(adapter));
-    const arrived = navigated?.ok ? adapter?.observeEntityIdentity?.(root, policyFor(adapter)) : undefined;
-
-    if (arrived && sameEntity(arrived, wanted)) {
-      const state: ExecutionTarget = {
-        requestedId,
-        beforeId: arrived.id,
-        ...(arrived.entityType ? { entityType: arrived.entityType } : {}),
-        status: "verified",
-        detail: observed
-          ? `Opened ${requestedId}, which was not the record showing (${observed.id}).`
-          : `Opened ${requestedId}; the page was not showing a record.`
-      };
-      return {
-        state,
-        check: { name: "target_identity", status: "pass", detail: state.detail },
-        evidence: [navigated!.detail, `Target identity confirmed after navigating: ${arrived.id}.`]
-      };
-    }
-
-    // Navigation is not proof of arrival. A route that redirects — a
-    // deleted record, a permission failure — lands somewhere else, and
-    // writing there would be the exact failure this gate exists to stop.
-    const landed = arrived?.id ?? observed?.id;
+    const route = adapter?.entityRouteFor?.(wanted, policyFor(adapter));
+    const landed = observed?.id;
     const state: ExecutionTarget = {
       requestedId,
       ...(landed ? { beforeId: landed } : {}),
       ...(observed?.entityType ? { entityType: observed.entityType } : {}),
       status: landed ? "mismatch" : "unobservable",
-      detail: navigated
-        ? `Requested ${requestedId}; after navigating, ${landed ?? "no record"} is open.`
-        : landed
+      detail: route
+        ? landed
           ? `Requested ${requestedId}, but ${landed} is open.`
-          : "The application did not expose which record is open."
+          : `Requested ${requestedId}; no record is open.`
+        : landed
+          ? `Requested ${requestedId}, but ${landed} is open, and this platform declares no route to open another.`
+          : `Requested ${requestedId}; no record is open, and this platform declares no route to open one.`
     };
     return {
       state,
       check: { name: "target_identity", status: "fail", detail: state.detail },
-      evidence: navigated ? [navigated.detail] : [],
-      refuse:
-        `Execution stopped before touching anything — ${state.detail} ` +
-        (navigated
-          ? "AutoWebMCP will not write to a record it could not reach."
-          : "This platform offers no way to open a record, so it must be opened first.")
+      evidence: route ? [`The requested record can be opened at ${route}.`] : [],
+      ...(route ? { openRecordAt: route } : {}),
+      refuse: route
+        ? `Execution stopped before touching anything — ${state.detail} The requested record is being opened now; ` +
+          "invoke again and it will be the record on screen. Nothing was written, so invoking again is safe."
+        : `Execution stopped before touching anything — ${state.detail} Open the requested record, then invoke again.`
     };
   }
 
@@ -637,6 +645,21 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const evidence: string[] = [];
   const warnings: string[] = [];
 
+  // Where this execution has got to, published outward as it goes so the
+  // fact survives the context. Every return below carries it.
+  let phase: ExecutionPhase = "received";
+  const reached = (next: ExecutionPhase): void => {
+    phase = next;
+    options.onPhase?.(next);
+  };
+  reached("received");
+  const dispatch = (extra: { openRecordAt?: string } = {}) => ({
+    ...(options.invocationId ? { invocationId: options.invocationId } : {}),
+    phase,
+    mayHavePersisted: mayHavePersisted(phase),
+    ...extra
+  });
+
   /* --- A0: WHICH entity are we about to change? ------------------------- *
    * Before the page state, before resolution, before anything is touched.
    *
@@ -653,8 +676,10 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const target = await establishTarget(options);
   if (target.check) checks.push(target.check);
   if (target.refuse) {
+    if (target.openRecordAt) reached("target-opening");
     return {
       status: "blocked",
+      dispatch: dispatch(target.openRecordAt ? { openRecordAt: target.openRecordAt } : {}),
       checks,
       evidence: [...evidence, ...target.evidence],
       warnings: [target.refuse],
@@ -662,6 +687,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       executedAt: now()
     };
   }
+  reached("target-established");
   evidence.push(...target.evidence);
 
   /* --- ensure the page is in the state the binding expects --------------- *
@@ -688,6 +714,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       });
       return {
         status: "blocked",
+        dispatch: dispatch(),
         checks,
         evidence: [...evidence, ...transition.diagnostics],
         warnings: ["Execution stopped before writing anything — the record edit state could not be established."],
@@ -717,6 +744,8 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
       }
     }
   }
+
+  reached("editable");
 
   /* --- A: resolve every target before writing anything --------------- */
   // An optional input the caller did not supply is not part of this
@@ -748,6 +777,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     checks.push({ name: "target_resolved", status: "fail", detail: resolution.reason });
     return {
       status: "blocked",
+      dispatch: dispatch(),
       checks,
       evidence: [...evidence, ...resolution.diagnostics],
       warnings: [`Execution stopped before writing anything — ${resolution.reason}`],
@@ -755,6 +785,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     };
   }
   const resolved = resolution.resolved;
+  reached("resolved");
   checks.push({
     name: "target_resolved",
     status: "pass",
@@ -808,6 +839,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   }
 
   const transactions: InputTransaction[] = [];
+  reached("writing");
   let allSet = true;
   for (const { input, target } of resolved) {
     const requestedValue = inputs[input.semanticInput];
@@ -874,6 +906,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
     evidence.push(...restoration.evidence);
     return {
       status: "blocked",
+      dispatch: dispatch(),
       transactions,
       checks,
       evidence,
@@ -883,14 +916,20 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   }
 
   /* --- C: commit --------------------------------------------------------- */
+  // The line past which a change may exist whether or not anyone hears
+  // back. Marked BEFORE the commit is invoked, because a commit that
+  // succeeds and then loses its answer is the exact case this records for.
+  reached("written");
+  reached("saving");
   const commit = await invokeSemanticAction(root, binding.commit.semanticAction, adapter);
   checks.push({ name: "commit_invoked", status: commit.ok ? "pass" : "fail", detail: commit.detail });
   if (!commit.ok) {
-    return { status: "failed", transactions, checks, evidence, warnings, executedAt: now() };
+    return { status: "failed", dispatch: dispatch(), transactions, checks, evidence, warnings, executedAt: now() };
   }
   evidence.push(commit.detail);
 
   /* --- D: wait for the application's asynchronous reaction --------------- */
+  reached("saved");
   const reaction = await waitForApplicationReaction({ root, ...options.reaction });
   evidence.push(
     reaction.settled
@@ -941,9 +980,11 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const finalTarget = confirmTargetAfterSave(target.state, root, adapter);
   if (finalTarget.check) checks.push(finalTarget.check);
   evidence.push(finalTarget.detail);
+  reached("verified");
 
   return {
     status: deriveStatus(checks),
+    dispatch: dispatch(),
     transactions,
     checks,
     evidence,

@@ -146,23 +146,27 @@ export interface PlatformResolverAdapter {
   keyCommitEvents?(element: Element, key: string): string[] | undefined;
   observeEntityIdentity?(root: ParentNode, policy: ResolutionPolicy): EntityIdentity | undefined;
   /**
-   * Brings the requested entity on screen, and proves it arrived.
+   * Where the requested entity can be opened, as a URL this document could
+   * navigate to. It does NOT navigate.
    *
-   * A capability that can only act on what is already open is unusable by
-   * an agent: it has opened nothing and can open nothing. Establishing the
-   * precondition is the execution's own job, not a requirement placed on
-   * the caller.
+   * The separation is the fix for a real failure. This route replaces the
+   * whole document, and with it the JavaScript context running the
+   * execution — so an executor that navigates and then waits to see where
+   * it landed is waiting in a context the navigation has already killed.
+   * That code could only ever die, and did: a live agent invocation
+   * dispatched the write, opened the record, and was never heard from
+   * again.
+   *
+   * So the route is returned as a fact, the execution reports that the
+   * record is not open, and whoever holds the response opens the record
+   * once the answer is safely on its way back. The caller then invokes
+   * again against a page that is correct.
    *
    * `undefined` declines — a platform with no navigable route leaves the
    * caller to open the record, and the identity gate then refuses rather
    * than writing to whatever is showing.
    */
-  navigateToEntity?(
-    identity: EntityIdentity,
-    root: ParentNode,
-    policy: ResolutionPolicy,
-    timeoutMs?: number
-  ): Promise<{ ok: boolean; detail: string }> | undefined;
+  entityRouteFor?(identity: EntityIdentity, policy: ResolutionPolicy): string | undefined;
   assessValidation?(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment | undefined;
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /**
