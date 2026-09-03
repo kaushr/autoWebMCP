@@ -4,6 +4,17 @@ import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 import OpenAI from "openai";
 
+/**
+ * What this process's API offers, bumped whenever a route is added.
+ *
+ * `server.mjs` is long-lived, so editing this file changes nothing until
+ * someone restarts it — and the symptom is a 405 from a button that looks
+ * simply broken. Three separate features were reported as not working
+ * tonight for exactly that reason. The page checks this on load and says
+ * so plainly instead.
+ */
+const CONTROL_PLANE_PROTOCOL = 2;
+
 const port = Number(process.env.PORT ?? 8787);
 const staticRoot = join(process.cwd(), "dist");
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
@@ -505,12 +516,43 @@ createServer(async (request, response) => {
       send(response, 200, { publications: [...publications.values()] }, corsHeaders(request));
       return;
     }
+    if (request.method === "DELETE" && request.url?.startsWith("/api/traces/")) {
+      const sessionId = decodeURIComponent(request.url.slice("/api/traces/".length));
+      const existed = traces.delete(sessionId);
+      console.log(existed ? `deleted trace ${sessionId}` : `trace ${sessionId} was not held`);
+      send(response, existed ? 200 : 404, existed ? { removed: 1 } : { error: "No such trace." }, corsHeaders(request));
+      return;
+    }
+    if (request.method === "DELETE" && request.url === "/api/traces") {
+      // Traces only. Publications are deliberately untouched: they are a
+      // separate decision, they survive a restart, and clearing recordings
+      // to start a clean run should not silently unregister every tool an
+      // agent can call. `/api/debug/reset` is the one that empties both,
+      // and it says so.
+      const removed = traces.size;
+      traces.clear();
+      console.log(`cleared ${removed} traces; ${publications.size} publication(s) kept`);
+      send(response, 200, { removed, publicationsKept: publications.size }, corsHeaders(request));
+      return;
+    }
+    if (request.method === "DELETE" && request.url?.startsWith("/api/capabilities/")) {
+      const id = decodeURIComponent(request.url.slice("/api/capabilities/".length));
+      const existed = publications.delete(id);
+      if (existed) savePublications();
+      console.log(existed ? `unpublished ${id}` : `capability ${id} was not published`);
+      send(response, existed ? 200 : 404, existed ? { removed: 1 } : { error: "No such capability." }, corsHeaders(request));
+      return;
+    }
     if (request.method === "DELETE" && request.url === "/api/capabilities") {
       const removed = publications.size;
       publications.clear();
       savePublications();
       console.log(`unpublished ${removed} capabilities`);
       send(response, 200, { removed }, corsHeaders(request));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/meta") {
+      send(response, 200, { controlPlaneProtocol: CONTROL_PLANE_PROTOCOL }, corsHeaders(request));
       return;
     }
     if (request.method === "GET" && request.url === "/api/traces") {

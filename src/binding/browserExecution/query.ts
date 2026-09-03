@@ -77,6 +77,18 @@ export interface BrowserQueryBinding {
   entityType: string;
   /** Where the search term is typed, and which capability input supplies it. */
   query: { inputName: string; semanticTarget: SemanticTarget };
+  /**
+   * The page the search was demonstrated on, when the demonstration
+   * reached it by navigating rather than by clicking something.
+   *
+   * A capability whose control only exists on one page has a precondition,
+   * and a caller that has opened nothing cannot satisfy it — the same
+   * defect target identity fixed for mutations, one layer over. `open`
+   * covers the case where a click established the page; this covers the
+   * case where a route did, which the recording knew and the proposal was
+   * throwing away.
+   */
+  openRoute?: string;
   /** Additional narrowing controls, when the application offers them. */
   filters?: QueryFilter[];
   /** The control that reveals the search field, when it is not already on screen. */
@@ -101,6 +113,15 @@ export interface QueryOutcome {
   evidence: string[];
   warnings: string[];
   executedAt: string;
+  /**
+   * Where this search can be run, when it could not be run here.
+   *
+   * Reported rather than performed, for the same reason a mutation reports
+   * `openRecordAt`: the route replaces the document, and with it the
+   * context that owes an answer. Whoever holds this response opens the
+   * page once the answer is on its way back.
+   */
+  openAt?: string;
 }
 
 export interface ExecuteQueryOptions {
@@ -250,6 +271,23 @@ function matchesTerm(name: string, term: string): boolean {
 }
 
 const RESULTS_WAIT_MS = 8_000;
+
+/**
+ * How long a search waits for the application to go quiet.
+ *
+ * Deliberately far shorter than a mutation's. A save has to settle before
+ * anything can be read back, so waiting is the work; a search does not —
+ * `collectCandidates` re-reads the page until results appear, so the
+ * settle is only a hint about when to start looking.
+ *
+ * The cost of getting this wrong was invisible until an agent called it.
+ * Salesforce's DOM effectively never goes quiet for 400ms, so both settle
+ * waits ran to their full five seconds and a search took ~24s — while the
+ * agent invoking it gave up at 23.7s. Every timeout AutoWebMCP owns was
+ * calibrated for a person watching a spinner, and an agent has a much
+ * shorter fuse than a person does.
+ */
+const QUERY_REACTION = { quietMs: 300, timeoutMs: 1_500 } as const;
 const RESULTS_POLL_MS = 300;
 
 /**
@@ -375,6 +413,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // box would otherwise fail on a page where the box is already showing —
   // which is exactly the state a previous search leaves behind, and it
   // reported the search control as missing when it was right there.
+  const reaction = options.reaction ?? QUERY_REACTION;
   const alreadyOpen = resolveSemanticTarget(root, binding.query.semanticTarget, adapter).ok;
   if (binding.open && !alreadyOpen) {
     const opened = await invokeSemanticAction(root, binding.open, adapter);
@@ -388,12 +427,35 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
       };
     }
     evidence.push(opened.detail);
-    await waitForApplicationReaction({ root, ...options.reaction });
+    await waitForApplicationReaction({ root, ...reaction });
   }
 
   for (const control of controls) {
     const resolution = resolveSemanticTarget(root, control.target, adapter);
     if (!resolution.ok) {
+      // The control is not here, and the demonstration recorded where it
+      // lives. Saying "not found" and stopping would make this callable
+      // only by someone who already knew to be on the right page — which
+      // an agent, having navigated nothing, never is.
+      const route = binding.openRoute;
+      // The recorded route is a path; the live address is a full URL. A
+      // page whose address cannot be read is not a page we can claim to be
+      // in the wrong place on, so it falls through to the plain failure.
+      const here = locationOf();
+      const herePath = here ? new URL(here, "http://localhost").pathname : undefined;
+      if (route && herePath !== undefined && !herePath.startsWith(route)) {
+        return {
+          status: "blocked",
+          candidates: [],
+          openAt: route,
+          evidence: [...evidence, `This search runs on ${route}; the page open is ${herePath}.`],
+          warnings: [
+            `"${control.name}" is not on this page. ${route} is being opened now — run the search again once it ` +
+              "has loaded. Nothing was searched or changed."
+          ],
+          executedAt: now()
+        };
+      }
       return {
         status: "blocked",
         candidates: [],
@@ -426,7 +488,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   const ran = binding.submit
     ? await invokeSemanticAction(root, binding.submit, adapter)
     : binding.submitKey
-      ? await pressKey(root, binding.query.semanticTarget, binding.submitKey, adapter, options.reaction)
+      ? await pressKey(root, binding.query.semanticTarget, binding.submitKey, adapter, reaction)
       : undefined;
   if (ran && !ran.ok) {
     return {
@@ -439,7 +501,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   }
   if (ran) evidence.push(ran.detail);
 
-  const settled = await waitForApplicationReaction({ root, ...options.reaction });
+  const settled = await waitForApplicationReaction({ root, ...reaction });
   evidence.push(
     settled.settled
       ? `The results settled ${settled.elapsedMs}ms after searching.`

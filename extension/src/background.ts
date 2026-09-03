@@ -455,6 +455,7 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       // Each hop reports itself, so a failure names the thing that actually
       // broke rather than collapsing into one unhelpful timeout.
       try {
+        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
       } catch (error) {
         return {
@@ -512,9 +513,31 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         };
       }
       try {
+        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-        return await chrome.tabs.sendMessage(tabId, { type: "query:run", request: message.request });
+        const found = (await withTimeout(
+          chrome.tabs.sendMessage(tabId, { type: "query:run", request: message.request }),
+          EXECUTE_ANSWER_TIMEOUT_MS
+        )) as { ok?: boolean; outcome?: { openAt?: string } };
+        // A search that could not run here says where it can. Opened from
+        // this worker, which is holding the answer already, rather than
+        // from the tab that would be destroying itself to do it.
+        await openRoute(tabId, found?.outcome?.openAt);
+        return found;
       } catch (error) {
+        // A search writes nothing, so silence here is only ever a
+        // diagnostic problem — but it was an anonymous one. Without this
+        // the caller spent its whole budget to learn "timed out", which
+        // names no hop and suggests no action.
+        if (error instanceof ContentScriptTimeoutError) {
+          return {
+            ok: false,
+            error:
+              `The target tab accepted this search and did not answer within ` +
+              `${EXECUTE_ANSWER_TIMEOUT_MS / 1000}s. Nothing was written. The page may have navigated while it ran, ` +
+              `or the search control may not exist on the page that is open.`
+          };
+        }
         return {
           ok: false,
           error: `The target tab could not be reached: ${error instanceof Error ? error.message : String(error)}`
@@ -535,6 +558,7 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
         // Idempotent: content.js declines to attach a second capture probe
         // if one is already present, and the execute handler here has no
         // session state to duplicate.
+        await waitForTabReady(tabId);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         const answer = (await withTimeout(
           chrome.tabs.sendMessage(tabId, { type: "execute:run", request: message.request }),
@@ -594,7 +618,44 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
  * page that has not moved and gets the same honest answer.
  */
 async function openRequestedRecord(tabId: number, answer: BrowserBindingExecuteResponse): Promise<void> {
-  const route = answer?.result?.dispatch?.openRecordAt;
+  await openRoute(tabId, answer?.result?.dispatch?.openRecordAt);
+}
+
+/**
+ * Opens a route a capability said it needs, from outside the tab.
+ *
+ * Shared by execution and search because the hazard is identical: the page
+ * cannot navigate itself without destroying the context that owes an
+ * answer. This worker already holds the answer, so the navigation is free.
+ */
+/**
+ * Waits for a tab to finish loading before anything is asked of it.
+ *
+ * Injecting into a document that is about to be replaced is the same
+ * failure as navigating from inside one: the content script is torn down
+ * mid-execution and the answer is never sent. It happened for real between
+ * two capabilities — a search opened the Opportunities list, an update was
+ * dispatched a moment later into the still-loading tab, and the caller
+ * waited out the full 42s to be told nothing.
+ *
+ * Bounded, and never fatal: a tab that will not settle is still worth
+ * asking, and the hop below reports honestly either way.
+ */
+async function waitForTabReady(tabId: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch {
+      return; // gone; the caller's own error reporting is better than ours
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+async function openRoute(tabId: number, route: string | undefined): Promise<void> {
   if (!route) return;
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -604,8 +665,12 @@ async function openRequestedRecord(tabId: number, answer: BrowserBindingExecuteR
     // resolving one that somehow carries an origin must not send this tab
     // somewhere else.
     if (target.origin !== new URL(tab.url).origin) return;
-    console.debug("[AutoWebMCP] background: opening the requested record at", target.href);
+    console.debug("[AutoWebMCP] background: opening", target.href);
     await chrome.tabs.update(tabId, { url: target.href });
+    // `tabs.update` resolves when the navigation STARTS. Telling the caller
+    // to invoke again while the page is still loading hands it the same
+    // race this worker just avoided.
+    await waitForTabReady(tabId);
   } catch (error) {
     console.warn("[AutoWebMCP] background: could not open the requested record:", error);
   }

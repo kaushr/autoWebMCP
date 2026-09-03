@@ -131,14 +131,33 @@ export type InvocationVerdict =
 export function judgeInvocation(
   journal: InvocationJournal,
   invocationId: string | undefined,
-  capabilityId: string
+  capabilityId: string,
+  /**
+   * An outstanding invocation the caller says it has established the
+   * outcome of.
+   *
+   * The other half of "never blindly retry", and it was missing. A refusal
+   * that cannot be resolved is not a safety property, it is a deadlock: an
+   * entry left at a phase past the commit blocked its capability forever,
+   * while the message told the reader to establish what happened and gave
+   * them no way to say that they had. Someone who has read the record
+   * knows something this process cannot, and needs to be able to say so.
+   *
+   * Deliberately a specific id rather than a "force" flag: it acknowledges
+   * ONE known transaction, so a second unrelated outstanding write still
+   * blocks.
+   */
+  acknowledged?: string
 ): InvocationVerdict {
   const existing = invocationId ? journal.read(invocationId) : undefined;
   if (existing?.outcome !== undefined) return { action: "replay", record: existing };
 
   const unfinished = journal
     .forCapability(capabilityId)
-    .filter((entry) => entry.outcome === undefined && entry.invocationId !== invocationId);
+    .filter(
+      (entry) =>
+        entry.outcome === undefined && entry.invocationId !== invocationId && entry.invocationId !== acknowledged
+    );
   const blocking = unfinished.find((entry) => mayHavePersisted(entry.phase));
   if (blocking) {
     return {
@@ -147,7 +166,8 @@ export function judgeInvocation(
       reason:
         `A previous invocation of "${capabilityId}" (${blocking.invocationId}) reached "${blocking.phase}" and ` +
         "never reported its outcome, so it may already have saved a change that nobody has seen. Running again " +
-        "now could repeat it. Establish what that invocation did before invoking this capability again."
+        "now could repeat it. Read the record; if you have established what that invocation did, acknowledge it and " +
+        "this capability becomes callable again."
     };
   }
   return { action: "proceed", unfinished };
@@ -164,11 +184,25 @@ export function judgeInvocation(
  */
 export async function runOnce(
   journal: InvocationJournal,
-  request: { invocationId?: string; capabilityId: string; inputs: Record<string, string> },
+  request: {
+    invocationId?: string;
+    capabilityId: string;
+    inputs: Record<string, string>;
+    /** An outstanding invocation whose outcome the caller has established. */
+    acknowledges?: string;
+  },
   run: (report: (phase: ExecutionPhase) => void) => Promise<ExecutionResult>
 ): Promise<ExecutionResult> {
   const { invocationId, capabilityId, inputs } = request;
-  const verdict = judgeInvocation(journal, invocationId, capabilityId);
+  const verdict = judgeInvocation(journal, invocationId, capabilityId, request.acknowledges);
+
+  // Recorded before anything else runs, so the acknowledgement outlives
+  // this attempt: it is a fact about the OLD transaction, and it must not
+  // have to be repeated if this one also loses its answer.
+  const settled = request.acknowledges ? journal.read(request.acknowledges) : undefined;
+  if (settled && settled.outcome === undefined) {
+    journal.write({ ...settled, outcome: { acknowledgedAt: new Date().toISOString() } });
+  }
 
   // Not a retry: the same transaction arriving again. Whatever it produced
   // is still the answer, and running it now would be a second side effect.

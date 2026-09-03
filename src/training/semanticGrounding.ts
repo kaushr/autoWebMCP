@@ -11,6 +11,7 @@ import {
   type ComposedDescription
 } from "../semantic/description";
 import { executionGuarantees } from "./executionSemantics";
+import { withEntityIdentityOutput } from "../semantic/composition";
 import {
   canonicalIdentityFromPath,
   entityIdentityPolicyForPlatform
@@ -158,9 +159,22 @@ export function groundCapability(
     (canonical.renames.length > 0 || identityAdded || described !== withIdentity) &&
     capability.provenance.confirmedByHuman;
 
-  const grounded: SemanticCapability = withdraw
-    ? { ...described, provenance: { ...described.provenance, source: "inferred", confirmedByHuman: false } }
+  /*
+   * The structured output declaration is added AFTER the withdrawal
+   * decision and deliberately does not feed it. It states, in machine
+   * form, exactly what the confirmed description already states in prose —
+   * that this returns candidates carrying a record identity — and WebMCP
+   * publishes no output schema, so nothing an agent reads changes because
+   * of it. Withdrawing a confirmation over it would ask a person to
+   * re-approve a sentence they had just approved.
+   */
+  const declared = resolution
+    ? withEntityIdentityOutput(described, resolution.entityType)
     : described;
+
+  const grounded: SemanticCapability = withdraw
+    ? { ...declared, provenance: { ...declared.provenance, source: "inferred", confirmedByHuman: false } }
+    : declared;
 
   // Resolved again under the names the contract now carries, so every
   // question a human is asked describes the capability in front of them
@@ -359,7 +373,11 @@ function withTargetIdentityInput(
         description: identity.description,
         type: "string",
         required: true,
-        role: "target-identity"
+        role: "target-identity",
+        // Declared, not left to be re-derived from the parameter's name.
+        // It is what lets another capability's output be recognized as a
+        // source for this one without either tool being named anywhere.
+        entityType: identity.entityType
       },
       ...capability.inputs
     ]

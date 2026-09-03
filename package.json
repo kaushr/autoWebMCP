@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:semanticizer": "node --env-file=.env.local server.mjs",
-    "build": "tsc --noEmit && vite build",
+    "build": "vite build",
     "build:extension": "node scripts/build-extension.mjs",
     "start": "node --env-file=.env.local server.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:all": "node scripts/stamp.mjs && vite build && node scripts/build-extension.mjs"
   },
   "dependencies": {
     "@rrweb/record": "^2.1.1",

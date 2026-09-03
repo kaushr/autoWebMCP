@@ -428,10 +428,12 @@ describe("7 — semantic grounding stores nothing a DOM could invalidate", () =>
     expect(serialized).not.toMatch(/queryselector|xpath|\/html\/|nth-child|clientx|offsettop|nodeid|elementref/i);
 
     // A capability is a contract, not a location: its inputs carry names,
-    // types, and value domains only.
+    // types, value domains, and — for a targeting parameter — the entity
+    // type it selects. All application-model vocabulary; nothing a page
+    // could invalidate by re-rendering.
     for (const input of grounded.capability.inputs) {
       expect(Object.keys(input).every((key) =>
-        ["name", "description", "type", "required", "enum", "role"].includes(key)
+        ["name", "description", "type", "required", "enum", "role", "entityType"].includes(key)
       )).toBe(true);
     }
   });

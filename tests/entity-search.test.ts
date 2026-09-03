@@ -701,17 +701,27 @@ describe("a synthetic key carries what the application reads", () => {
  *
  * A live search showed the term sitting in the box while the component
  * believed the field was empty: the value had been set directly, and a
- * framework that keeps its own state updates it from key events. Pressing
- * Enter then searched for nothing.
+ * framework that keeps its own state updates it from the events it
+ * listens to. Pressing Enter then searched for nothing.
+ *
+ * The correction to that was one event per character, and it turned out
+ * to have a cost nobody had measured. A live filtering list does
+ * synchronous work on every `input`, so the time scaled with the length
+ * of the term: "PS" answered in about three seconds, while "PS Project
+ * Test - updated" — twenty-five characters, a hundred events — ran past
+ * twenty-four seconds and the agent that called it gave up.
+ *
+ * What the component needs is to observe the value ARRIVING through its
+ * own events. One `input` does that as well as twenty-five.
  * ------------------------------------------------------------------ */
 
-describe("a search term is typed the way a person types it", () => {
-  it("emits key events per character, so a component can follow along", async () => {
+describe("a search term arrives through the events a component listens to", () => {
+  it("delivers the whole value in one input, not one per character", async () => {
     const { typeText } = await import("../src/binding/browserExecution/engine");
     document.body.innerHTML = `<label for="q">Search</label><input id="q" />`;
     const input = document.querySelector("#q") as HTMLInputElement;
 
-    // What a component listening for keys would see.
+    // What a component listening for input would see.
     const observed: string[] = [];
     input.addEventListener("input", () => observed.push(input.value));
 
@@ -719,8 +729,36 @@ describe("a search term is typed the way a person types it", () => {
 
     expect(result.ok).toBe(true);
     expect(input.value).toBe("Acme");
-    // Cleared first, then built up one character at a time.
-    expect(observed).toEqual(["", "A", "Ac", "Acm", "Acme"]);
+    // Cleared, then the value — regardless of how long the value is.
+    expect(observed).toEqual(["", "Acme"]);
+  });
+
+  it("costs the same for a long term as a short one", async () => {
+    // The property that matters, stated as a property: a term nobody
+    // anticipated must not be slower than the one that was tested.
+    const { typeText } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Search</label><input id="q" />`;
+    const input = document.querySelector("#q") as HTMLInputElement;
+    let inputs = 0;
+    input.addEventListener("input", () => (inputs += 1));
+
+    await typeText(document.body, { role: "field", label: "Search" }, "PS Project Test - updated", adapter());
+    expect(input.value).toBe("PS Project Test - updated");
+    expect(inputs).toBe(2); // the clear, and the value
+  });
+
+  it("still delivers a keystroke, for a control that commits on one", async () => {
+    const { typeText } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Search</label><input id="q" />`;
+    const input = document.querySelector("#q") as HTMLInputElement;
+    const keys: string[] = [];
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      input.addEventListener(type, (event) => keys.push(`${type}:${(event as KeyboardEvent).key}`));
+    }
+    await typeText(document.body, { role: "field", label: "Search" }, "Acme", adapter());
+    // The last character is the one that matters to a control that opens
+    // or commits on a key rather than on input.
+    expect(keys).toEqual(["keydown:e", "keypress:e", "keyup:e"]);
   });
 
   it("types into the control inside a component host", async () => {
@@ -887,4 +925,49 @@ describe("an unchanged page can still be showing the answer", () => {
     });
     expect(outcome.candidates.map((c) => c.name)).toEqual(["Renewal 2027"]);
   });
+});
+
+/* ============ an agent has a shorter fuse than a person ============ */
+
+describe("a search answers inside an agent's patience, not a person's", () => {
+  it("does not spend a settle budget the results poll already covers", async () => {
+    // The live failure: Salesforce's DOM never goes quiet for 400ms, so
+    // both settle waits ran their full five seconds and a search took
+    // ~24s — while the agent that invoked it gave up at 23.7s. Every
+    // timeout here had been calibrated for a person watching a spinner.
+    document.body.innerHTML = `
+      <label for="q">Search this list...</label><input id="q" type="search" />
+      <button id="go">Go</button>`;
+    // A page that is never quiet, which is the ordinary case in a real
+    // application rather than an unlucky one.
+    const churn = setInterval(() => document.body.appendChild(document.createElement("span")), 30);
+    document.querySelector("#go")!.addEventListener("click", () => {
+      const row = document.createElement("h3");
+      row.innerHTML = `<a href="/lightning/r/${ACME_A}/view">Acme Renewal</a>`;
+      document.body.appendChild(row);
+    });
+
+    const started = Date.now();
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: {
+        ...BINDING,
+        query: { inputName: "name", semanticTarget: { role: "field", label: "Search this list..." } },
+        open: undefined,
+        submit: { role: "button", label: "Go" },
+        submitKey: undefined
+      },
+      inputs: { name: "Acme" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      resultsWaitMs: 2_000
+      // reaction deliberately not supplied: the default is the thing under test.
+    });
+    clearInterval(churn);
+
+    expect(outcome.candidates.map((c) => c.id)).toEqual([ACME_A]);
+    // Comfortably inside the window an agent will wait, on a page that
+    // never settles. The old defaults alone would have spent 10s here.
+    expect(Date.now() - started).toBeLessThan(6_000);
+  }, 15_000);
 });

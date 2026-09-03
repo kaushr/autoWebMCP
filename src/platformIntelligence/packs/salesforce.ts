@@ -210,18 +210,33 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       category: "application-schema",
       strength: "documented-fact",
       summary:
-        "Salesforce Summer '26 standard object model, limited to the fields this proving ground has demonstrated. " +
-        "Standard knowledge carries no picklist values: what an org's stages actually are is tenant configuration, " +
-        "even for a standard field.",
+        "Salesforce Summer '26 standard Opportunity fields. Standard knowledge carries no picklist VALUES: that " +
+        "Stage and Lead Source are closed sets is what the vendor ships, while which stages an org actually has is " +
+        "tenant configuration.",
       sourceReferenceIds: ["sf-standard-opportunity-fields", "awmcp-application-intelligence"],
       applicationSchema: {
         release: "summer-26",
         objects: [
           {
             apiName: "Opportunity",
+            // Limited to fields Salesforce ships on every org, and to types
+            // stated rather than inferred. A gap here is not neutral: an
+            // unlisted standard field is indistinguishable from a custom one,
+            // so the grounding stage stops and asks a human for an API name
+            // the vendor has always published — which is what happened to
+            // Lead Source, a standard picklist that had been left out.
             fields: [
+              { apiName: "Name", defaultLabel: "Opportunity Name", type: "string" },
+              { apiName: "AccountId", defaultLabel: "Account Name", type: "reference" },
+              { apiName: "Amount", defaultLabel: "Amount", type: "currency" },
               { apiName: "CloseDate", defaultLabel: "Close Date", type: "date" },
-              { apiName: "StageName", defaultLabel: "Stage", type: "picklist" }
+              { apiName: "StageName", defaultLabel: "Stage", type: "picklist" },
+              { apiName: "Probability", defaultLabel: "Probability (%)", type: "number" },
+              { apiName: "Type", defaultLabel: "Type", type: "picklist" },
+              { apiName: "LeadSource", defaultLabel: "Lead Source", type: "picklist" },
+              { apiName: "NextStep", defaultLabel: "Next Step", type: "string" },
+              { apiName: "Description", defaultLabel: "Description", type: "string" },
+              { apiName: "OwnerId", defaultLabel: "Opportunity Owner", type: "reference" }
             ]
           }
         ]

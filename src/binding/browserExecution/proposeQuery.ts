@@ -136,6 +136,10 @@ export function proposeQueryBinding(
   }
 
   const opening = openingAction(trace, control.label);
+  // Where the search actually happened. A click that revealed the control
+  // is the better evidence when there is one — it is in-document and costs
+  // nothing — so this is only consulted when there is not.
+  const openRoute = opening ? undefined : routeSearchRanOn(trace, control.label);
   return {
     binding: {
       id: `query-${capability.id}-${source.id}`,
@@ -145,6 +149,7 @@ export function proposeQueryBinding(
       entityType,
       query: { inputName: queryInput.name, semanticTarget: { role: "field", label: control.label } },
       ...(opening ? { open: opening } : {}),
+      ...(openRoute ? { openRoute } : {}),
       // Submitted by key rather than by clicking: the live trace showed
       // typing followed directly by navigation, with no commit control
       // anywhere between.
@@ -159,4 +164,34 @@ export function proposeQueryBinding(
     },
     warnings: []
   };
+}
+
+/**
+ * The page the demonstration was on when it used the search control.
+ *
+ * The last route navigated to before the search term was typed. A live
+ * recording navigated from a record to `/lightning/o/Opportunity/list`,
+ * searched there, and opened a result — and the proposal read only the
+ * clicks, so the one fact establishing where this capability works was
+ * captured and thrown away. The published tool then worked only for
+ * someone who already happened to be on the right page, which an agent
+ * never is.
+ *
+ * A record's own route is never returned: a search is not performed on one
+ * record, and binding it to the record that happened to be open before
+ * would be worse than having no precondition at all.
+ */
+function routeSearchRanOn(trace: ObservationTrace, controlLabel: string): string | undefined {
+  let route: string | undefined;
+  for (const observation of trace.observations) {
+    if (observation.action === "navigate") {
+      const path = observation.page?.path;
+      route = path && !/\/lightning\/r\//.test(path) ? path : undefined;
+      continue;
+    }
+    const isSearchControl =
+      observation.action === "field_change" && observation.field?.label === controlLabel;
+    if (isSearchControl) return route;
+  }
+  return undefined;
 }

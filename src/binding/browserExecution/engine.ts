@@ -461,15 +461,60 @@ function resolveGeneric(root: ParentNode, target: SemanticTarget, policy: Resolu
 
   let matches = [...candidates];
   const appliedSignals: string[] = [];
+  /**
+   * Whether nothing on the page bears the name this target was taught by.
+   *
+   * Held rather than acted on immediately, because the signals are applied
+   * in the platform's declared order and the name usually comes first — a
+   * field can carry a definitive application identifier and render no
+   * accessible name at all, and only the whole pass knows whether anything
+   * stronger spoke up.
+   */
+  let nameMatchedNothing = false;
   for (const signal of policy.identityPriority) {
     // Deliberately no early exit on a single remaining candidate: "only one
     // field on the page" is not evidence that it is *this* target, and
     // skipping the check would happily write into whatever happened to be
     // there. Every applicable signal is applied.
     const narrowed = narrowBy(signal, matches, target, policy);
+    if (signal === "accessibleName" && narrowed?.length === 0) nameMatchedNothing = true;
     if (!narrowed || narrowed.length === 0) continue;
     matches = narrowed;
     appliedSignals.push(signal);
+  }
+
+  // A name that matched NOTHING is proof of absence, not weak evidence.
+  //
+  // Skipping a signal that would empty the set is right for a section or an
+  // identifier: a target may sit outside the section it was taught in, or
+  // carry no identifier on this rendering, and refusing over that would
+  // reject a field that is plainly there. The accessible name is different
+  // in kind — it is what the label MEANS, and if nothing bears it the
+  // control is not on this page.
+  //
+  // A live post-save read-back proved the cost of treating them alike:
+  // "*Stage" was not on the record view, the name signal was skipped, and
+  // resolution fell through to a "Sort by:" combobox — then reported that
+  // Stage read "Sort by:". Right role, confident answer, wrong control,
+  // which is the same family of failure as writing to the wrong record.
+  //
+  // An application identifier still overrides: the application naming the
+  // element outright is stronger than the label a human read off it.
+  if (nameMatchedNothing && !appliedSignals.includes("applicationIdentifier")) {
+    const seen = [
+      ...new Set(candidates.map((element) => accessibleName(element)).filter(Boolean) as string[])
+    ].slice(0, 8);
+    return {
+      ok: false,
+      reason:
+        `No element of role ${target.role} on this page is named "${target.label}". ` +
+        (seen.length ? `Names found: ${seen.map((name) => JSON.stringify(name)).join(", ")}.` : "None are named."),
+      diagnostics: {
+        candidatesConsidered: candidates.length,
+        traversal: policy.traversal,
+        appliedSignals: [...appliedSignals]
+      }
+    };
   }
 
   // Nothing narrowed at all: every candidate is still in play, which is not
@@ -684,12 +729,27 @@ export async function typeText(
   setNativeValue(element, "");
   element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
 
-  for (const character of value) {
-    dispatchKey(element, "keydown", character);
-    dispatchKey(element, "keypress", character);
-    setNativeValue(element, element.value + character);
-    element.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: character }));
-    dispatchKey(element, "keyup", character);
+  // The value arrives in one write, not one per character.
+  //
+  // Typing character by character sends four events each, and a live
+  // filtering control does synchronous work on every one of them. Against
+  // a real Salesforce list view that made the cost scale with the length
+  // of the search term: "PS" returned in about three seconds while "PS
+  // Project Test - updated" — twenty-five characters, a hundred events —
+  // ran past twenty-four seconds and the agent that called it gave up.
+  //
+  // What the component actually needs is to observe the value arriving
+  // through the events it listens to, which one `input` satisfies as well
+  // as twenty-five do. The key events for the final character are kept
+  // because some controls open or commit on a keystroke rather than on
+  // input, and that is the keystroke that matters.
+  const last = value.slice(-1);
+  if (last) dispatchKey(element, "keydown", last);
+  setNativeValue(element, value);
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: last }));
+  if (last) {
+    dispatchKey(element, "keypress", last);
+    dispatchKey(element, "keyup", last);
   }
   element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 

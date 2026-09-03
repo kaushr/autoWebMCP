@@ -100,6 +100,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * How long to wait for the application to go quiet BEFORE reading it.
+ *
+ * Short on purpose, and not the same budget as the wait after a commit.
+ * Salesforce's DOM effectively never goes quiet for 400ms, so every one of
+ * these ran to its full five seconds — a live run reported "the edit view
+ * did not settle within 6812ms" and then resolved its targets perfectly
+ * anyway. `resolveAllTargets` already retries for eight seconds, so the
+ * settle was never load-bearing: it was a hint about when to start
+ * looking, paid for at five seconds a time.
+ *
+ * That mattered once an agent called this. The whole execution has to
+ * answer inside the caller's patience, and a live agent gave up at 22.3s
+ * while these waits alone accounted for most of it.
+ */
+const PRE_READ_REACTION = { quietMs: 300, timeoutMs: 2_000 } as const;
+
+/**
+ * And after a commit, which is different.
+ *
+ * Here the waiting IS the work: nothing can be read back until the save
+ * has settled, and a verification that reads too early reports a failure
+ * the application never had. This one stays generous.
+ */
+const POST_COMMIT_REACTION = { quietMs: 400, timeoutMs: 5_000 } as const;
+
 const RESOLVE_RETRY_WINDOW_MS = 8_000;
 const RESOLVE_RETRY_INTERVAL_MS = 300;
 
@@ -221,7 +247,7 @@ async function abandonEdit(
   if (!restore) {
     return { evidence: [], warnings: ["The unsaved changes could not be discarded automatically; review the application tab."] };
   }
-  await waitForApplicationReaction({ root, ...options.reaction });
+  await waitForApplicationReaction({ root, ...PRE_READ_REACTION, ...options.reaction });
   return {
     evidence: ["Discarding the unsaved changes AutoWebMCP made:", ...restore.diagnostics],
     warnings: restore.ok
@@ -386,7 +412,7 @@ export async function inspectFieldDomains(options: InspectFieldsOptions): Promis
         result.evidence.push(`Could not inspect the live controls: ${why}.`);
         return finish(result, assess, root, policy, introspector, options);
       }
-      await waitForApplicationReaction({ root, ...options.reaction });
+      await waitForApplicationReaction({ root, ...PRE_READ_REACTION, ...options.reaction });
     }
   } else if (result.initialPageState === "unknown") {
     // Conservative by design: a transition made from an unknown baseline
@@ -472,7 +498,7 @@ async function finish(
         : "No dismiss action could be resolved, so the record could not be returned to view mode.";
     }
   }
-  await waitForApplicationReaction({ root, ...options.reaction });
+  await waitForApplicationReaction({ root, ...PRE_READ_REACTION, ...options.reaction });
   result.finalPageState = assess();
   result.evidence.push(`Final page state: ${result.finalPageState}`);
   return result;
@@ -735,7 +761,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
         // The edit surface appearing and its fields finishing rendering are
         // two different moments — the real capture this binding was built
         // from showed several seconds of application activity between them.
-        const settled = await waitForApplicationReaction({ root, ...options.reaction });
+        const settled = await waitForApplicationReaction({ root, ...PRE_READ_REACTION, ...options.reaction });
         evidence.push(
           settled.settled
             ? `The edit view settled ${settled.elapsedMs}ms after opening.`
@@ -930,7 +956,7 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
 
   /* --- D: wait for the application's asynchronous reaction --------------- */
   reached("saved");
-  const reaction = await waitForApplicationReaction({ root, ...options.reaction });
+  const reaction = await waitForApplicationReaction({ root, ...POST_COMMIT_REACTION, ...options.reaction });
   evidence.push(
     reaction.settled
       ? `The page settled ${reaction.elapsedMs}ms after committing.`

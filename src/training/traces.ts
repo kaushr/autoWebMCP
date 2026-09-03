@@ -63,6 +63,27 @@ export async function listTraces(): Promise<TraceSummary[]> {
   return body.traces ?? [];
 }
 
+/** Removes one recording. Irreversible: traces are held in memory only. */
+export async function deleteTrace(sessionId: string): Promise<void> {
+  const response = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`Could not delete trace ${sessionId} (${response.status}).`);
+}
+
+/**
+ * Empties the control plane's recordings. Publications are untouched — a
+ * clean run of the training flow is not a decision to unregister every
+ * tool an agent can currently call.
+ *
+ * Irreversible: traces are held in memory and never written to disk, so
+ * there is nothing to restore them from.
+ */
+export async function clearTraces(): Promise<number> {
+  const response = await fetch("/api/traces", { method: "DELETE" });
+  if (!response.ok) throw new Error(`Could not clear traces (${response.status}).`);
+  const body = (await response.json()) as { removed?: number };
+  return body.removed ?? 0;
+}
+
 export async function getTrace(sessionId: string): Promise<ObservationTrace> {
   const response = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`);
   if (!response.ok) throw new Error(`Could not load trace ${sessionId} (${response.status}).`);
@@ -102,4 +123,33 @@ export async function updateTraceRecording(sessionId: string, recording: Recordi
   });
   if (!response.ok) throw new Error(`Could not update the recording details (${response.status}).`);
   return (await response.json()) as TraceSummary;
+}
+
+/** What the control plane's API currently offers. */
+export const REQUIRED_CONTROL_PLANE_PROTOCOL = 2;
+
+/**
+ * Whether the control-plane PROCESS is running the code this page expects.
+ *
+ * `server.mjs` is long-lived, so editing it changes nothing until someone
+ * restarts it, and the only symptom is a 405 from a button that looks
+ * simply broken. Three features were reported as not working in one
+ * evening for exactly that reason, each costing a round of diagnosis.
+ */
+export async function controlPlaneIsCurrent(): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const stale = {
+    ok: false as const,
+    detail:
+      "The control plane is running older code than this page, so newer actions will fail. Restart it: " +
+      "npm start — traces are held in memory and will be cleared."
+  };
+  try {
+    const response = await fetch("/api/meta");
+    if (!response.ok) return stale;
+    const body = (await response.json()) as { controlPlaneProtocol?: number };
+    return (body.controlPlaneProtocol ?? 0) >= REQUIRED_CONTROL_PLANE_PROTOCOL ? { ok: true } : stale;
+  } catch {
+    // Unreachable is a different problem, already reported elsewhere.
+    return { ok: true };
+  }
 }

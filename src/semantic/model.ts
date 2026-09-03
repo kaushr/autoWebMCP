@@ -56,12 +56,39 @@ export interface CapabilityInput {
   enum?: string[];
   /** Absent means `business` — every input predating this distinction was one. */
   role?: CapabilityInputRole;
+  /**
+   * WHICH kind of entity a `target-identity` input selects, e.g. `Opportunity`.
+   *
+   * The parameter exists because an entity type was established; recording
+   * which one is strictly more honest than inferring it back out of the
+   * parameter's name later. `opportunity_id` → `Opportunity` happens to
+   * invert cleanly, and `custom_object_id` does not — the `__c` suffix is
+   * gone by then — so a contract that carries the answer is the only one
+   * that can be relied on.
+   *
+   * Meaningless on any other role, and never set there.
+   */
+  entityType?: string;
 }
+
+/**
+ * What an output IS, beyond the type of its value.
+ *
+ * `entity-identity` means the output carries the application's own stable
+ * identity for entities of a named type — the thing an identity-gated tool
+ * requires as its target. It is the producer half of the only relationship
+ * this system derives between capabilities, and it is declared rather than
+ * guessed at from a name.
+ */
+export type CapabilityOutputRole = "entity-identity";
 
 export interface CapabilityOutput {
   name: string;
   description: string;
   type: "object" | "array" | "string" | "number" | "boolean";
+  role?: CapabilityOutputRole;
+  /** The entity type an `entity-identity` output identifies, e.g. `Opportunity`. */
+  entityType?: string;
 }
 
 /**

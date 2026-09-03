@@ -456,11 +456,23 @@ describe("17 & 18 — tenant knowledge cannot reach platform safety", () => {
 /* ----------------------------- the pack ----------------------------- */
 
 describe("standard application knowledge lives in the versioned pack", () => {
-  it("declares only the demonstrated Opportunity fields, with provenance", () => {
+  it("declares the standard Opportunity fields the vendor ships, with provenance", () => {
+    // A gap here is not neutral. A standard field the pack omits is
+    // indistinguishable from a custom one, so grounding stops and asks a
+    // human for an API name the vendor has always published — which is
+    // exactly what a live run did for Lead Source, a standard picklist
+    // that had been left out of a list "limited to what was demonstrated".
     const declared = defaultPlatformIntelligenceProvider.getApplicationSchema(PLATFORM);
     expect(declared?.schema.release).toBe("summer-26");
     const opportunity = declared?.schema.objects.find((object) => object.apiName === "Opportunity");
-    expect(opportunity?.fields.map((field) => field.apiName).sort()).toEqual(["CloseDate", "StageName"]);
+    const fields = opportunity?.fields ?? [];
+    for (const apiName of ["CloseDate", "StageName", "LeadSource", "Amount", "Name"]) {
+      expect(fields.map((field) => field.apiName)).toContain(apiName);
+    }
+    // The closed sets are declared as closed, which is a vendor fact —
+    // unlike WHICH values they hold, which is the tenant's.
+    expect(fields.find((field) => field.apiName === "LeadSource")?.type).toBe("picklist");
+    expect(fields.find((field) => field.apiName === "StageName")?.type).toBe("picklist");
     expect(declared?.provenance.sourceReferenceIds.length).toBeGreaterThan(0);
   });
 

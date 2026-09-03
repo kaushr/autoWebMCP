@@ -25,7 +25,7 @@ export interface BrowserExecutionClient {
   execute(
     binding: BrowserExecutionBinding,
     inputs: Record<string, string>,
-    options?: { requireTarget?: boolean }
+    options?: { requireTarget?: boolean; acknowledgesInvocationId?: string }
   ): Promise<ExecutionResult>;
   /**
    * Asks the live application which values its closed-domain controls
@@ -215,6 +215,9 @@ export const extensionBridgeExecutionClient: BrowserExecutionClient = {
           inputs,
           confirmed: true,
           invocationId,
+          ...(options?.acknowledgesInvocationId
+            ? { acknowledgesInvocationId: options.acknowledgesInvocationId }
+            : {}),
           ...(options?.requireTarget ? { requireTarget: true } : {})
         },
         "exec",
@@ -310,10 +313,11 @@ function executionWithoutAnswer(invocationId: string, error: unknown): Execution
 
   return {
     status: "unknown",
-    // Conservative on purpose. This layer cannot see how far the execution
-    // got — the context that knew may no longer exist — so it must assume
-    // the save could have been issued rather than assume it was not.
-    dispatch: { invocationId, phase: "received", mayHavePersisted: true },
+    // No phase, because this layer observed none: the context that knew is
+    // gone. Conservative on the one thing that matters — the save COULD
+    // have been issued — without inventing a position in the sequence it
+    // never saw.
+    dispatch: { invocationId, mayHavePersisted: true },
     checks: [],
     evidence: [`Invocation ${invocationId} was dispatched and produced no result.`],
     warnings: [

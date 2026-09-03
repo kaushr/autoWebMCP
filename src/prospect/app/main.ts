@@ -2,7 +2,7 @@ import "./styles.css";
 import { bindingActionFor, invokeProspectBinding } from "../bindings";
 import { getCompany, getContact } from "../service";
 import { registerCapability } from "../../webmcp/compiler";
-import { listPublishedCapabilities } from "../../webmcp/publication";
+import { listPublishedCapabilities, publishedCapabilityContract } from "../../webmcp/publication";
 import { describeReadiness, type AgentReadiness } from "./agentReadiness";
 import { companyHref, parseRoute, searchHref, type ContactFilters, type Route } from "./router";
 import { APP_NAME, renderRoute, renderShell } from "./views";
@@ -32,13 +32,19 @@ async function syncPublishedCapabilities(): Promise<void> {
     published = [];
   }
 
+  // Composition hints may only mention tools this document can actually
+  // offer, so the peer set is what is registrable here — not everything
+  // the control plane lists. A capability taught elsewhere that this site
+  // cannot run must not be suggested to an agent as somewhere to go next.
+  const peers = published.map(publishedCapabilityContract).filter(bindingActionFor);
+
   for (const record of published) {
     // A capability taught somewhere else can be published without this site
     // being able to run it. It is registered not at all, and claimed nowhere.
     if (!bindingActionFor(record.capability)) continue;
     if (registeredCapabilities.has(record.capability.id)) continue;
 
-    if (registerCapability(record.capability, invokeProspectBinding) === "registered") {
+    if (registerCapability(publishedCapabilityContract(record), invokeProspectBinding, peers) === "registered") {
       registeredCapabilities.set(record.capability.id, record.capability.name);
     }
   }

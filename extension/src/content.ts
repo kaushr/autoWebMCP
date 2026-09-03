@@ -2,6 +2,10 @@ import { record } from "@rrweb/record";
 import {
   controlKindFor,
   detectPlatform,
+  choiceKey,
+  isSensitiveField,
+  optionsFor,
+  optionsInListbox,
   pagePath,
   safeValueChange,
   type FieldDescriptor
@@ -268,12 +272,62 @@ function readableValue(element: Element): string | undefined {
   return undefined;
 }
 
+/* ------------------------------------------------------------------ *
+ * The choices a custom picklist was offering, remembered as they close.
+ *
+ * A native `<select>` still holds its options when the change fires, so it
+ * can be read directly. A component-library picklist cannot: it renders
+ * its listbox only while open and tears it down when a choice is made, so
+ * by the time `change` arrives there is nothing left to read — a live
+ * capture of a Salesforce Stage picklist recorded `options: none` for
+ * exactly this reason, having had all six on screen a moment earlier.
+ *
+ * The listener below runs in the capture phase, before the application
+ * handles the click, so the listbox is still there. What it was offering
+ * is kept against the control's own label and attached to the change that
+ * follows.
+ * ------------------------------------------------------------------ */
+const offeredChoices = new Map<string, string[]>();
+
+/**
+ * Which control a listbox belongs to.
+ *
+ * By the application's own declaration — a combobox names the listbox it
+ * controls — rather than by proximity. Proximity would attach one
+ * control's choices to another's label on a page with several open at
+ * once, which is how a published contract ends up asserting values the
+ * field never offered.
+ */
+function labelForListbox(listbox: Element): string | undefined {
+  const id = listbox.getAttribute("id");
+  const owner = id
+    ? document.querySelector(`[aria-controls~="${CSS.escape(id)}"], [aria-owns~="${CSS.escape(id)}"]`)
+    : null;
+  if (owner) return accessibleLabel(owner);
+  return compact(listbox.getAttribute("aria-label"));
+}
+
+function rememberOfferedChoices(target: Element): void {
+  const listbox = target.closest('[role="listbox"]');
+  if (!listbox) return;
+  const label = labelForListbox(listbox);
+  if (!label) return;
+  const options = optionsInListbox(listbox);
+  if (options) offeredChoices.set(choiceKey(label), options);
+}
+
 function fieldContext(element: Element): CaptureFieldContext {
   const descriptor = descriptorFor(element);
+  const options =
+    optionsFor(element, descriptor) ??
+    (descriptor.label && !isSensitiveField(descriptor)
+      ? offeredChoices.get(choiceKey(descriptor.label))
+      : undefined);
   return {
     ...(descriptor.label ? { label: descriptor.label } : {}),
     ...(sectionContext(element) ? { section: sectionContext(element)! } : {}),
-    control: controlKindFor(descriptor)
+    control: controlKindFor(descriptor),
+    ...(options ? { options } : {})
   };
 }
 
@@ -377,6 +431,9 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   const onClick = (event: Event): void => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    // Before the application handles this: a choice being clicked is the
+    // last moment its siblings are still on the page.
+    rememberOfferedChoices(target);
     const actionable = target.closest(ACTIONABLE) ?? target;
     const context = elementContext(actionable);
     const captured = push("click", {
@@ -420,6 +477,12 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
   };
 
   const listeners: Array<[keyof DocumentEventMap, EventListener]> = [
+    ["mousedown", (event: Event) => {
+      // Some component libraries close their listbox on mousedown, which is
+      // earlier than the click this recorder listens for. Remembering only,
+      // never recorded as an interaction of its own.
+      if (event.target instanceof Element) rememberOfferedChoices(event.target);
+    }],
     ["click", onClick],
     ["focusin", onFocus],
     ["change", onChange],
@@ -550,7 +613,12 @@ async function runExecuteRequest(
   try {
     const result = await runOnce(
       pageJournal,
-      { ...(invocationId ? { invocationId } : {}), capabilityId: request.binding.capabilityId, inputs: request.inputs },
+      {
+        ...(invocationId ? { invocationId } : {}),
+        capabilityId: request.binding.capabilityId,
+        inputs: request.inputs,
+        ...(request.acknowledgesInvocationId ? { acknowledges: request.acknowledgesInvocationId } : {})
+      },
       async (report) => {
         let phase: ExecutionPhase = "received";
         const running = executeConfirmed({

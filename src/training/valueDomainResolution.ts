@@ -33,7 +33,21 @@ import type { BrowserExecutionBinding } from "../binding/browserExecution/model"
  * ------------------------------------------------------------------ */
 
 /** Where a resolved domain came from. Retained even when acquisition is invisible to the user. */
-export type ValueDomainSource = "tenant-metadata" | "live-application-state" | "human-confirmed";
+export type ValueDomainSource =
+  | "tenant-metadata"
+  /**
+   * What the control was offering when the human used it.
+   *
+   * The strongest evidence available without touching the application
+   * again, and it costs nothing: the person opened the picklist to make
+   * their choice, so the whole set was on screen and was recorded with
+   * everything else. Weaker than a live read only in one respect — an org
+   * can reconfigure a picklist after a demonstration — which is why a live
+   * acquisition still supersedes it.
+   */
+  | "demonstrated"
+  | "live-application-state"
+  | "human-confirmed";
 
 /** One field whose valid values are needed before it can safely be given a value. */
 export interface ValueDomainNeed {

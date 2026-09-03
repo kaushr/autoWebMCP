@@ -459,3 +459,66 @@ describe("opening the requested record never depends on the page surviving", () 
     expect(navigations).toEqual([]);
   });
 });
+
+/* ========== a refusal that cannot be lifted is a deadlock ========== */
+
+describe("an outstanding write can be acknowledged and stops blocking", () => {
+  const outstanding = {
+    invocationId: "inv-lost",
+    capabilityId: "update_opportunity",
+    inputs: { stage: "Collaborate" },
+    startedAt: "2026-09-03T18:22:26.611Z",
+    phase: "verified" as ExecutionPhase
+  };
+
+  it("blocks until someone says they established what it did", async () => {
+    // The live deadlock: an entry left at a phase past the commit blocked
+    // its capability permanently, while the message told the reader to
+    // establish what happened and offered no way to say that they had.
+    const journal = memoryJournal();
+    journal.write(outstanding);
+
+    let mutations = 0;
+    const run = async (): Promise<ExecutionResult> => {
+      mutations += 1;
+      return verified;
+    };
+    const request = { invocationId: "inv-next", capabilityId: "update_opportunity", inputs: {} };
+
+    expect((await runOnce(journal, request, run)).status).toBe("blocked");
+    expect(mutations).toBe(0);
+
+    // Someone reads the record and says so.
+    const after = await runOnce(journal, { ...request, acknowledges: "inv-lost" }, run);
+    expect(after.status).toBe("succeeded");
+    expect(mutations).toBe(1);
+  });
+
+  it("does not have to be acknowledged twice", async () => {
+    // The acknowledgement is a fact about the OLD transaction, so it
+    // outlives the attempt that carried it — including one that also loses
+    // its answer.
+    const journal = memoryJournal();
+    journal.write(outstanding);
+    await runOnce(journal, { invocationId: "a", capabilityId: "update_opportunity", inputs: {}, acknowledges: "inv-lost" }, async () => verified);
+
+    const later = await runOnce(journal, { invocationId: "b", capabilityId: "update_opportunity", inputs: {} }, async () => verified);
+    expect(later.status).toBe("succeeded");
+  });
+
+  it("acknowledges one transaction, not everything outstanding", async () => {
+    // A blanket "force" would wave through a second write nobody has
+    // looked at. Naming the id keeps the remaining one blocking.
+    const journal = memoryJournal();
+    journal.write(outstanding);
+    journal.write({ ...outstanding, invocationId: "inv-other", phase: "saving" });
+
+    const result = await runOnce(
+      journal,
+      { invocationId: "inv-next", capabilityId: "update_opportunity", inputs: {}, acknowledges: "inv-lost" },
+      async () => verified
+    );
+    expect(result.status).toBe("blocked");
+    expect(result.evidence.join(" ")).toMatch(/inv-other/);
+  });
+});

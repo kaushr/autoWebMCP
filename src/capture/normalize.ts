@@ -72,7 +72,19 @@ export interface NormalizedObservation {
   /** Milliseconds since session start. */
   t: number;
   page?: { host: string; path: string };
-  field?: { label?: string; context?: string; control?: string };
+  field?: {
+    label?: string;
+    context?: string;
+    control?: string;
+    /**
+     * The choices the control was offering when the human used it.
+     *
+     * Observed, not inferred, and carried through so a capability's legal
+     * values come from the demonstration rather than from a later live
+     * trip back into the application.
+     */
+    options?: string[];
+  };
   oldValue?: string;
   newValue?: string;
   /** Accessible label of the control that was actuated. */
@@ -317,7 +329,8 @@ export function normalizeCapture(events: readonly CaptureEvent[]): NormalizedObs
             field: {
               ...(event.field.label ? { label: event.field.label } : {}),
               ...(event.field.section ? { context: event.field.section } : {}),
-              control: event.field.control
+              control: event.field.control,
+              ...(event.field.options?.length ? { options: [...event.field.options] } : {})
             }
           }
         : {}),

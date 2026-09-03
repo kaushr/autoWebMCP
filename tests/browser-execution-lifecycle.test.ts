@@ -477,3 +477,34 @@ describe("an optional input nobody supplied is not part of the invocation", () =
     expect(result.status).not.toBe("succeeded");
   });
 });
+
+/* ============ an execution must answer inside a caller's patience ============ */
+
+describe("waiting before a read is not the same as waiting after a save", () => {
+  it("does not spend a five-second settle on a page that never goes quiet", async () => {
+    // The live failure. Salesforce's DOM never quiets for 400ms, so every
+    // pre-read settle ran its full timeout — one run reported "the edit
+    // view did not settle within 6812ms" and then resolved its targets
+    // perfectly anyway, because resolveAllTargets retries regardless. Four
+    // such waits put the whole execution past 22.3s, which is where the
+    // agent invoking it gave up.
+    const root = mountEditForm();
+    const churn = setInterval(() => root.appendChild(document.createElement("span")), 30);
+
+    const started = Date.now();
+    const result = await executeConfirmed({
+      root: document,
+      binding: BINDING,
+      inputs: { close_date: "2026-12-15" },
+      adapter: salesforceAdapter(),
+      confirmed: true
+      // reaction deliberately not supplied: the defaults are what is under test.
+    });
+    void root;
+    clearInterval(churn);
+
+    expect(result.status).not.toBe("blocked");
+    // Comfortably inside an agent's window, on a page that never settles.
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, 30_000);
+});

@@ -66,6 +66,21 @@ export interface CaptureFieldContext {
   /** Nearest enclosing section/card/fieldset heading, e.g. "Opportunity Details". */
   section?: string;
   control: CaptureControlKind;
+  /**
+   * What the control offered at the moment it was used.
+   *
+   * The same class of evidence as the label: text the application itself
+   * rendered, visible on screen, carrying no selector, coordinate or
+   * identifier. It was always there to be read — a person changing a
+   * picklist opens it first — and not recording it meant the only way to
+   * learn a field's legal values was to drive the browser back into edit
+   * mode later and open the control again, which is both the slowest and
+   * the most fragile path in the system.
+   *
+   * Absent when the control is not a closed set, when it was never opened,
+   * or when the field is masked by policy. Never inferred.
+   */
+  options?: string[];
 }
 
 /** A field value transition. `masked` means the value was withheld by policy. */

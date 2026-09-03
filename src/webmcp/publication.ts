@@ -1,4 +1,5 @@
 import { assertSemanticCapability, type SemanticCapability } from "../semantic/model";
+import { withDeclaredIdentityEntity, withEntityIdentityOutput } from "../semantic/composition";
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
 import type { BrowserQueryBinding } from "../binding/browserExecution/query";
 
@@ -48,6 +49,37 @@ export function assertPublishable(capability: SemanticCapability): SemanticCapab
   if (source && source.id !== capability.binding.application) {
     throw new Error("An execution binding must belong to the application the capability was learned from.");
   }
+  return capability;
+}
+
+/**
+ * The published contract, with the identity facts its own accepted
+ * bindings already establish.
+ *
+ * Composition hints are derived from contracts, so a contract that does
+ * not say which entity its targeting parameter selects produces no hint.
+ * That is the right default for something unknown — and the wrong answer
+ * here, because the fact IS known and already published: an accepted
+ * execution binding carries `context.target`, which is precisely what the
+ * runtime verifies a write against, and an accepted query binding carries
+ * the `entityType` whose identities its results are read as.
+ *
+ * So the facts are recovered from the record rather than requiring every
+ * capability confirmed before these declarations existed to be taught
+ * again. Nothing is invented and nothing is overwritten: a contract that
+ * already declares its own identity is returned untouched, and a record
+ * with no accepted binding contributes nothing.
+ *
+ * Deliberately not applied at publication time. This derives a VIEW for
+ * registration; writing it back would edit a contract after the human
+ * confirmed it, which is the one thing the confirmation gate exists to
+ * prevent.
+ */
+export function publishedCapabilityContract(record: PublicationRecord): SemanticCapability {
+  let capability = record.capability;
+  const target = record.executionBinding?.context.target;
+  if (target) capability = withDeclaredIdentityEntity(capability, target);
+  if (record.queryBinding) capability = withEntityIdentityOutput(capability, record.queryBinding.entityType);
   return capability;
 }
 
@@ -157,6 +189,12 @@ export async function listPublishedCapabilities(): Promise<PublicationRecord[]> 
   const response = await fetch("/api/capabilities");
   if (!response.ok) throw new Error(`Could not read published capabilities (${response.status}).`);
   return parsePublicationList(await response.json());
+}
+
+/** Removes one published capability. WebMCP has no unregister, so a reload clears the tool surface. */
+export async function unpublishCapability(capabilityId: string): Promise<void> {
+  const response = await fetch(`/api/capabilities/${encodeURIComponent(capabilityId)}`, { method: "DELETE" });
+  if (!response.ok) throw new Error(`Could not unpublish ${capabilityId} (${response.status}).`);
 }
 
 export async function unpublishAll(): Promise<number> {

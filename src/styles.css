@@ -50,6 +50,12 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 .acquire-domain { display: grid; gap: .45rem; margin: 0 0 .6rem; padding: .7rem .8rem; border: 1px solid #33507d; border-radius: 10px; background: rgba(10,22,41,.5); }
 button:disabled { opacity: .55; cursor: not-allowed; }
+/* A working button is not a disabled one, even though it cannot be pressed:
+   dimming it reads as "unavailable" when the truthful state is "busy". It
+   keeps full contrast and shows its spinner instead. */
+button[aria-busy="true"], button.is-working { opacity: 1; cursor: progress; }
+button[aria-busy="true"] .spinner, button.is-working .spinner { border-color: rgba(7,16,31,.35); border-top-color: #07101f; }
+.secondary[aria-busy="true"] .spinner { border-color: #3d5580; border-top-color: #d8e3f8; }
 
 /* A parameter row now carries its agent-facing description as well as its
    name and type. The description is the widest field and the one most
@@ -57,3 +63,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
    squeezing the controls above it. */
 .input-list > div { flex-wrap: wrap; }
 .input-list > div > label.input-description { flex: 1 0 100%; display: grid; gap: .3rem; color: #b7c6df; font-size: .75rem; }
+.agent-tool { margin: .7rem 0 0; }.agent-tool .eyebrow { margin: 0 0 .2rem; color: #8493ad; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; letter-spacing: .04em; text-transform: none; }.agent-tool .admin-json { max-height: 20rem; }
+.trace-list > li { position: relative; min-width: 0; }
+.trace-delete { position: absolute; top: .4rem; right: .4rem; padding: .18rem .42rem; border: 1px solid #4a3040; border-radius: 6px; background: rgba(6,15,29,.75); color: #c08d84; font-size: .68rem; font-weight: 650; opacity: 0; transition: opacity .12s ease; }
+.trace-list > li:hover .trace-delete, .trace-delete:focus-visible { opacity: 1; }
+.trace-delete:hover { border-color: #a15a4a; color: #f3d8d0; }

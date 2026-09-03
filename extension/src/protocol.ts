@@ -99,6 +99,15 @@ export interface BrowserBindingExecuteRequest {
    * comes back on the response.
    */
   invocationId?: string;
+  /**
+   * An outstanding invocation of the same capability whose outcome the
+   * caller has established by reading the record.
+   *
+   * Without this a refusal is permanent: an invocation left past the
+   * commit blocks its capability forever, and the message telling someone
+   * to establish what happened gives them no way to say that they did.
+   */
+  acknowledgesInvocationId?: string;
 }
 
 /**
@@ -314,6 +323,8 @@ export interface StudioBridgeExecuteRequest {
   requireTarget?: boolean;
   /** See `BrowserBindingExecuteRequest.invocationId`. */
   invocationId?: string;
+  /** See `BrowserBindingExecuteRequest.acknowledgesInvocationId`. */
+  acknowledgesInvocationId?: string;
 }
 
 export interface StudioBridgeQueryRequest {

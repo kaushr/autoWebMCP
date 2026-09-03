@@ -118,3 +118,81 @@ export function detectPlatform(host: string, markers: PlatformMarkers): CaptureP
   if (markers.prospect) return "prospect-intelligence";
   return "generic";
 }
+
+/** No page should be able to make a capture unboundedly large. */
+const MAX_OPTIONS = 60;
+const MAX_OPTION_LENGTH = 80;
+
+/**
+ * The choices a closed-set control was offering, as text.
+ *
+ * Read from whatever the application had on screen: a native `<select>`'s
+ * own options, or the listbox a custom combobox declares it controls.
+ * Nothing is opened, nothing is clicked, and a control that is not showing
+ * its choices simply yields none — an absent set is honest, while a
+ * fabricated one would put values into a published contract that the
+ * application never offered.
+ *
+ * Masked fields yield nothing regardless: a set of choices for a sensitive
+ * control is still content from a sensitive control.
+ */
+export function optionsInListbox(listbox: Element): string[] | undefined {
+  const texts: string[] = [];
+  for (const option of Array.from(listbox.querySelectorAll('[role="option"]'))) {
+    const text = (option.getAttribute("title") ?? option.textContent)?.replace(/\s+/g, " ").trim();
+    if (!text || text.length > MAX_OPTION_LENGTH || texts.includes(text)) continue;
+    texts.push(text);
+  }
+  return texts.length > 0 ? texts.slice(0, MAX_OPTIONS) : undefined;
+}
+
+export function optionsFor(element: Element, field: FieldDescriptor): string[] | undefined {
+  if (isSensitiveField(field)) return undefined;
+
+  const texts: string[] = [];
+  const push = (value: string | null | undefined): void => {
+    const text = value?.replace(/\s+/g, " ").trim();
+    if (!text || text.length > MAX_OPTION_LENGTH || texts.includes(text)) return;
+    texts.push(text);
+  };
+
+  if (element instanceof HTMLSelectElement) {
+    for (const option of Array.from(element.options)) push(option.label || option.textContent);
+  } else {
+    // A custom combobox names the listbox it owns. Following that
+    // declaration is the application's own answer about which choices
+    // belong to this control — unlike picking whichever listbox happens to
+    // be open, which on a busy page is a different control's.
+    const owned = element.getAttribute("aria-controls") ?? element.getAttribute("aria-owns");
+    const listbox = owned
+      ? (element.ownerDocument?.getElementById(owned) ?? undefined)
+      : undefined;
+    for (const option of Array.from(listbox?.querySelectorAll('[role="option"]') ?? [])) {
+      push(option.getAttribute("title") ?? option.textContent);
+    }
+  }
+
+  return texts.length > 0 ? texts.slice(0, MAX_OPTIONS) : undefined;
+}
+
+/**
+ * The key a control's choices are remembered under.
+ *
+ * One control can present two spellings of its own name: an application
+ * marks a required field by rendering an asterisk into the label, and
+ * whether that asterisk is included depends on which element the name was
+ * read from. A live capture recorded a Salesforce picklist's choices
+ * against "Stage" and then looked for them under "*Stage", so all six
+ * values were captured and then dropped — while the optional field beside
+ * it, having no asterisk to disagree about, worked perfectly.
+ *
+ * Only for matching. The label itself is stored as the application wrote
+ * it, because that is what the binding resolves against.
+ */
+export function choiceKey(label: string): string {
+  return label
+    .replace(/^[*\u2022\s]+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}

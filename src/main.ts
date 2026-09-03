@@ -2,6 +2,7 @@ import "./styles.css";
 import { confirmCandidate, semanticizeTrace, type SemanticizerRun } from "./training/semanticizer";
 import { semanticContract } from "./training/semanticContract";
 import { composeDescription, type ComposedDescription } from "./semantic/description";
+import { compositionHintsFor } from "./semantic/composition";
 import { localRegistryBindingProvider, resolveAdvertisedBinding } from "./training/bindingProvider";
 import { sourceApplicationFor } from "./training/sourceApplication";
 import {
@@ -22,6 +23,9 @@ import {
 import { deriveStudioLifecycle, type StudioLifecycleView } from "./training/studioLifecycle";
 import {
   getTrace,
+  clearTraces,
+  controlPlaneIsCurrent,
+  deleteTrace,
   listTraces,
   summaryDurationMs,
   updateTraceRecording,
@@ -39,7 +43,9 @@ import type { CaptureEvent, CapturePlatform } from "./capture/types";
 import {
   listPublishedCapabilities,
   publishCapability,
+  publishedCapabilityContract,
   unpublishAll,
+  unpublishCapability,
   withResolvedValueDomains,
   type PublicationRecord
 } from "./webmcp/publication";
@@ -71,6 +77,8 @@ import type { DomainInspection } from "./binding/browserExecution/execute";
 import type { ExecutionResult } from "./binding/browserExecution/result";
 import { assessExecutionReadiness } from "./training/executionReadiness";
 import { planValueDomainAcquisition, type ValueDomainSource } from "./training/valueDomainResolution";
+import { choiceKey } from "./capture/policy";
+import { BUILD_STAMP } from "./buildStamp";
 import {
   beginOperation,
   failed,
@@ -254,7 +262,7 @@ async function acquireValueDomains(): Promise<void> {
   if (!binding || !candidate) return;
   if (domainAcquisitionFor === binding.id || isWorking(operations, "acquire-domains")) return;
 
-  const fields = buildTestFormFields(candidate, binding, liveValueDomains);
+  const fields = buildTestFormFields(candidate, binding, valueDomainsFor(binding));
   const plan = planValueDomainAcquisition(fields, binding);
   domainAcquisitionTrail = plan.trail;
   if (plan.acquirable.length === 0) return;
@@ -326,6 +334,42 @@ function describeNeeds(needs: readonly { label: string }[]): string {
 }
 
 /** The busy/result line for one action, announced to assistive technology. */
+
+/**
+ * A button that shows its own work.
+ *
+ * Every action here crosses page → extension → target tab → application,
+ * and several take tens of seconds. Before this, a click was
+ * indistinguishable from a no-op: "Propose capability from trace" sat
+ * inert for up to a minute, and the only feedback was a status line
+ * elsewhere on the page that a person watching the button never looked at.
+ *
+ * So the busy state lives ON the control that was pressed. Uniformly, and
+ * regardless of how quick the action usually is — a rule that only applies
+ * to the slow ones is a rule nobody can rely on, and "usually quick" is
+ * exactly when a stall is most confusing.
+ *
+ * `busyLabel` is present tense on purpose ("Proposing…"), because it
+ * describes what is happening rather than what was asked for.
+ */
+function actionButton(options: {
+  id: string;
+  kind: OperationKind;
+  label: string;
+  busyLabel: string;
+  disabled?: boolean;
+  className?: string;
+}): string {
+  const working = isWorking(operations, options.kind);
+  const classes = [options.className, working ? "is-working" : ""].filter(Boolean).join(" ");
+  return `<button type="button" id="${options.id}"${classes ? ` class="${classes}"` : ""}
+    ${working || options.disabled ? "disabled" : ""} aria-busy="${working}">
+    ${working ? '<span class="spinner" aria-hidden="true"></span>' : ""}${escapeHtml(
+      working ? options.busyLabel : options.label
+    )}
+  </button>`;
+}
+
 function renderOperationStatus(kind: OperationKind, fallback = ""): string {
   const state = operations[kind];
   if (!state) return fallback ? `<p class="semanticizer-status">${escapeHtml(fallback)}</p>` : "";
@@ -374,9 +418,14 @@ let clarificationDraft: Record<string, string> = {};
 export function useTenantIntelligence(source: TenantIntelligenceSource): void {
   tenantIntelligence = source;
 }
-import { acceptedBrowserBinding, type BrowserBindingCandidateRecord, type BrowserBindingValidationRecord } from "./binding/browserExecution/model";
+import {
+  acceptedBrowserBinding,
+  type BrowserBindingCandidateRecord,
+  type BrowserBindingValidationRecord,
+  type BrowserExecutionBinding
+} from "./binding/browserExecution/model";
 import { extensionBridgeExecutionClient } from "./training/browserExecutionClient";
-import { registerCapability } from "./webmcp/compiler";
+import { compileCapability, registerCapability } from "./webmcp/compiler";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root not found.");
@@ -404,6 +453,15 @@ const browserExecutionRegistered = new Set<string>();
  * withhold, and the panel is only allowed to claim what is present.
  * ---------------------------------------------------------------------- */
 const webMcpSurface = describeWebMcpSurface(document.modelContext);
+/**
+ * How long to keep asking the browser about a tool just registered.
+ *
+ * `registerTool` is fire-and-forget: it returns before `getTools()` will
+ * admit the tool exists, and nothing in the API says when that changes.
+ */
+const REGISTRATION_SETTLE_MS = 2_000;
+const REGISTRATION_POLL_MS = 100;
+
 /** Tools as the browser reports them. Empty until `getTools()` answers. */
 let discoveredTools: RegisteredTool[] = [];
 let discoveryError = "";
@@ -422,10 +480,25 @@ let harnessStatus = "";
  * on the surface an agent reads. Only the second supports the claim the
  * panel is here to make.
  */
-async function refreshDiscoveredTools(): Promise<void> {
+async function refreshDiscoveredTools(expected: readonly string[] = []): Promise<void> {
   if (!webMcpSurface.canDiscover || !document.modelContext) return;
   try {
-    discoveredTools = await document.modelContext.getTools();
+    // Asked more than once, because `registerTool` returning is not the
+    // browser having published the tool. Reading immediately after
+    // registering showed only `hello_webmcp` — registered at module load,
+    // and so the only one that had settled — while the same call from a
+    // console seconds later listed all three. The panel then said nothing
+    // was registered about a document an agent was successfully calling.
+    //
+    // Bounded and evidence-led: it stops the moment the browser reports
+    // what was just registered, and gives up quickly rather than insisting.
+    const deadline = Date.now() + REGISTRATION_SETTLE_MS;
+    for (;;) {
+      discoveredTools = await document.modelContext.getTools();
+      const missing = expected.filter((name) => !discoveredTools.some((tool) => tool.name === name));
+      if (missing.length === 0 || Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, REGISTRATION_POLL_MS));
+    }
     discoveryError = "";
     if (!discoveredTools.some((tool) => tool.name === selectedToolName)) {
       selectedToolName = discoveredTools.find((tool) => tool.name !== "hello_webmcp")?.name ?? "";
@@ -535,9 +608,59 @@ function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: Capa
   return extensionBridgeExecutionClient.execute(executionBinding, stringInputs, { requireTarget: true });
 }
 
+/**
+ * The choices each field was offering during the demonstration.
+ *
+ * Read from the capture rather than from the application, because the
+ * evidence was already collected: a person changing a picklist opens it,
+ * and what it offered was recorded alongside the label. Live acquisition
+ * remains available and still wins where it disagrees — an org can
+ * reconfigure a picklist after a recording — but it is now a refresh
+ * rather than a precondition, and nothing has to drive the browser back
+ * into edit mode before a capability can be tested at all.
+ */
+function demonstratedValueDomains(binding: BrowserExecutionBinding): Record<string, string[]> {
+  // Keyed tolerantly for the same reason the recorder is: an application
+  // spells a required field's name with and without its asterisk depending
+  // on which element the name is read from, and a strict match silently
+  // drops choices that were captured correctly.
+  const byLabel = new Map<string, string[]>();
+  for (const observation of selectedTrace?.observations ?? []) {
+    const label = observation.field?.label;
+    const options = observation.field?.options;
+    if (!label || !options?.length || byLabel.has(choiceKey(label))) continue;
+    byLabel.set(choiceKey(label), [...options]);
+  }
+  const domains: Record<string, string[]> = {};
+  for (const input of binding.inputs) {
+    const options = byLabel.get(choiceKey(input.semanticTarget.label));
+    if (options) domains[input.semanticInput] = options;
+  }
+  return domains;
+}
+
+/**
+ * Every field's choices, best evidence first.
+ *
+ * A live read wins where the two disagree, because an org can reconfigure
+ * a picklist after a demonstration. Where there is no live read, the
+ * demonstration stands on its own — which is the whole point: a capability
+ * is testable from its recording, without a round trip through the edit
+ * surface first.
+ */
+function valueDomainsFor(binding: BrowserExecutionBinding): Record<string, string[]> {
+  return { ...demonstratedValueDomains(binding), ...liveValueDomains };
+}
+
 /** Registers any published capability this control-mode document has not already exposed. */
 function syncBrowserExecutionRegistrations(): void {
   if (!controlMode) return;
+  // What else an agent will be able to call. A composition hint says "if
+  // you lack this identity, that tool hands out candidates", which is only
+  // true of a tool that is actually on the surface — so the peer set is
+  // the published capabilities, read at registration time rather than
+  // assumed when the contract was confirmed.
+  const peers = publications.map(publishedCapabilityContract);
   for (const record of publications) {
     // Either binding makes a capability callable. A search has a query
     // binding and no execution binding — requiring the latter published it
@@ -545,7 +668,9 @@ function syncBrowserExecutionRegistrations(): void {
     // everywhere except the surface an agent reads.
     const callable = record.executionBinding ?? record.queryBinding;
     if (!callable || browserExecutionRegistered.has(record.capability.id)) continue;
-    if (registerCapability(record.capability, invokeBrowserExecutionBinding) === "registered") {
+    if (
+      registerCapability(publishedCapabilityContract(record), invokeBrowserExecutionBinding, peers) === "registered"
+    ) {
       browserExecutionRegistered.add(record.capability.id);
     }
   }
@@ -561,6 +686,18 @@ let semanticizerStatus = "Review the proposed contract, then confirm its meaning
 let extensionTraces: TraceSummary[] = [];
 let selectedTrace: ObservationTrace | undefined;
 let traceStatus = "Record a session with the Teach Mode extension, then refresh.";
+/** Whether "Clear all traces" has been pressed once and is awaiting confirmation. */
+let clearTracesArmed = false;
+/**
+ * The one trace whose delete has been pressed once and awaits confirmation.
+ *
+ * A single id rather than a flag, so arming one card never arms the rest —
+ * a confirm that spans every row is one stray click away from deleting the
+ * wrong recording.
+ */
+let traceDeleteArmed: string | undefined;
+/** The one capability whose unpublish has been pressed once. Same rule as traces. */
+let unpublishArmed: string | undefined;
 /** Every semanticizer invocation this session made, oldest first. Ephemeral. */
 let semanticizerRuns: SemanticizerRun[] = [];
 /** Traces loaded side by side for the comparison table. Ephemeral. */
@@ -587,6 +724,13 @@ let browserTestErrors: string[] = [];
 let traceDetailsStatus = "";
 let browserBindingValidation: BrowserBindingValidationRecord | undefined;
 let browserValidationStatus = "";
+/**
+ * An outstanding invocation the user has said they checked.
+ *
+ * Held here rather than sent immediately, because acknowledging is not the
+ * action — running is. This is the precondition the next run carries.
+ */
+let acknowledgedInvocation: string | undefined;
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
 /**
@@ -728,7 +872,11 @@ function renderTraceCard(trace: TraceSummary): string {
       <span>${escapeHtml(subtitle)}</span>
       <span>${escapeHtml(capturedAt)} · ${trace.observations} obs${escapeHtml(duration)} · <small>${escapeHtml(trace.sessionId.slice(0, 14))}</small></span>
       ${description ? `<span class="trace-description">${escapeHtml(description)}</span>` : ""}
-    </button></li>`;
+    </button>
+    <button type="button" class="trace-delete" data-delete-trace="${escapeHtml(trace.sessionId)}"
+      title="Delete this recording" aria-label="Delete recording ${escapeHtml(heading)}">${
+        traceDeleteArmed === trace.sessionId ? "Delete — confirm" : "Delete"
+      }</button></li>`;
 }
 
 /**
@@ -795,6 +943,72 @@ function renderTraceDetailsEditor(): string {
   </details>`;
 }
 
+/**
+ * What the capture already establishes, before anything live is consulted.
+ *
+ * Added because the honest answer to "why is it going back to the
+ * application for that?" was invisible. A recording either carries a
+ * field's choices or it does not, and there was no way to tell from the
+ * Studio — so a live acquisition that ran anyway looked like a design
+ * decision rather than a gap in the evidence.
+ *
+ * Reads the trace and nothing else: no live call, no inference, no
+ * proposal. Every row is something a person did and something the
+ * application showed them while they did it.
+ */
+function renderCapturedSemantics(trace: ObservationTrace): string {
+  const fields = new Map<
+    string,
+    { control?: string; section?: string; options?: string[]; values: string[] }
+  >();
+  const actions: string[] = [];
+
+  for (const observation of trace.observations) {
+    if (observation.action === "field_change" && observation.field?.label) {
+      const label = observation.field.label;
+      const entry = fields.get(label) ?? { values: [] };
+      entry.control ??= observation.field.control;
+      entry.section ??= observation.field.context;
+      if (observation.field.options?.length) entry.options = [...observation.field.options];
+      const change = [observation.oldValue, observation.newValue].filter(Boolean).join(" → ");
+      if (change && !entry.values.includes(change)) entry.values.push(change);
+      fields.set(label, entry);
+    }
+    if (observation.target && !actions.includes(observation.target)) actions.push(observation.target);
+  }
+
+  if (fields.size === 0 && actions.length === 0) {
+    return `<p class="semanticizer-status">This capture records no field changes or named actions.</p>`;
+  }
+
+  const rows = [...fields.entries()]
+    .map(([label, entry]) => {
+      // The distinction that matters: choices RECORDED at demonstration
+      // time need no live trip; their absence is exactly why one happens.
+      const choices = entry.options?.length
+        ? `<strong>${entry.options.length}</strong> captured — ${escapeHtml(entry.options.join(", "))}`
+        : entry.control === "select" || entry.control === "combobox"
+          ? `<span class="ambiguity">none captured — the picklist was not open when this was recorded, so its values must be read from the application</span>`
+          : "not a fixed set";
+      return `<tr>
+        <td><code>${escapeHtml(label)}</code>${entry.section ? `<br /><small>${escapeHtml(entry.section)}</small>` : ""}</td>
+        <td>${escapeHtml(entry.control ?? "unknown")}</td>
+        <td>${escapeHtml(entry.values.join("; ") || "—")}</td>
+        <td>${choices}</td>
+      </tr>`;
+    })
+    .join("");
+
+  return `<details class="admin-panel">
+    <summary>What this capture already knows <span>— read from the recording, nothing live</span></summary>
+    <div class="table-scroll"><table class="comparison">
+      <thead><tr><th>Field</th><th>Control</th><th>Values seen</th><th>Choices offered</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${actions.length ? `<p class="semanticizer-status">Actions: ${actions.map((a) => `<code>${escapeHtml(a)}</code>`).join(", ")}</p>` : ""}
+  </details>`;
+}
+
 function renderExtensionTraces(): string {
   const list = extensionTraces.length
     ? extensionTraces.map(renderTraceCard).join("")
@@ -808,6 +1022,7 @@ function renderExtensionTraces(): string {
          → ${selectedTrace.observations.length} normalized observations
          → ${(selectedTrace.executionEvidence ?? []).length} execution evidence groups.
          Details are under Admin / Debug.</p>
+       ${renderCapturedSemantics(selectedTrace)}
        ${renderTraceDetailsEditor()}`
     : "";
 
@@ -816,13 +1031,78 @@ function renderExtensionTraces(): string {
     <ul class="trace-list">${list}</ul>
     ${detail}
     <div class="studio-actions">
-      <button id="refresh-traces" class="secondary" ${isWorking(operations, "refresh-traces") ? "disabled" : ""}>${
-        isWorking(operations, "refresh-traces") ? "Refreshing…" : "Refresh traces"
-      }</button>
-      <button id="semanticize-extension-trace" ${selectedTrace ? "" : "disabled"}>Propose capability from trace</button>
+      ${actionButton({ id: "refresh-traces", kind: "refresh-traces", label: "Refresh traces", busyLabel: "Refreshing…", className: "secondary" })}
+      ${actionButton({ id: "semanticize-extension-trace", kind: "propose-capability", label: "Propose capability from trace", busyLabel: "Reading the capture…", disabled: !selectedTrace })}
+      ${actionButton({ id: "clear-traces", kind: "clear-traces", label: clearTracesArmed ? "Clear all traces — confirm" : "Clear all traces", busyLabel: "Clearing…", disabled: extensionTraces.length === 0, className: "secondary" })}
       <p class="semanticizer-status">${escapeHtml(traceStatus)}</p>
     </div>
   </section>`;
+}
+
+/**
+ * The published capability as a WebMCP tool, beside the capability itself.
+ *
+ * Compiled here rather than read back from `document.modelContext`,
+ * because the Studio deliberately does not register anything — publishing
+ * and hosting are different acts, and only `?control=1` hosts. So this is
+ * labelled as what WILL be registered, never as what a browser reported.
+ * The control page remains the surface that can make the stronger claim,
+ * and says so in its own words.
+ *
+ * It exists because the interesting half became invisible: a description
+ * now carries sentences composed at registration — the guarantees the
+ * runtime actually keeps, and what the other published tools can do for
+ * this one — none of which appear in the capability a person confirmed.
+ * Reading them meant invoking something and opening a console.
+ *
+ * `execute` is dropped: it is a live function, it is not what an agent
+ * reads, and `JSON.stringify` would silently omit it anyway.
+ */
+function agentFacingTool(record: PublicationRecord): string {
+  const peers = publications.map((entry) => entry.capability);
+  try {
+    // `execute` is dropped: a live function is not what an agent reads,
+    // and `JSON.stringify` would omit it silently anyway.
+    const { execute: _execute, ...tool } = compileCapability(record.capability, () => undefined, peers);
+    return JSON.stringify(tool, null, 2);
+  } catch (error) {
+    return `This capability could not be compiled to a tool: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * Every published capability as the tool an agent receives.
+ *
+ * Deliberately below the cards rather than inside them. The cards are a
+ * fixed grid of equal-height summaries, and a JSON block belongs to
+ * neither of those constraints: it is wide, it is tall, and it made every
+ * sibling card stretch to match the one that happened to be open.
+ *
+ * Compiled here rather than read back from `document.modelContext`,
+ * because the Studio deliberately does not register anything — publishing
+ * and hosting are different acts, and only `?control=1` hosts. So this
+ * says what WILL be registered; the control page makes the stronger claim
+ * in its own words, from the browser's own answer.
+ *
+ * It exists because the interesting half became invisible: a description
+ * now carries sentences composed at registration — the guarantees the
+ * runtime keeps, and what the other published tools can do for this one —
+ * none of which appear in the capability a person confirmed. Reading them
+ * meant invoking something and opening a console.
+ */
+function renderAgentFacingTools(): string {
+  if (publications.length === 0) return "";
+  return `<details class="admin-panel">
+    <summary>What an agent sees <span>— each published capability as a WebMCP tool</span></summary>
+    ${publications
+      .map(
+        (record) => `<div class="agent-tool">
+          <p class="eyebrow">${escapeHtml(record.capability.id)}</p>
+          <pre class="admin-json">${escapeHtml(agentFacingTool(record))}</pre>
+        </div>`
+      )
+      .join("")}
+  </details>`;
 }
 
 function renderPublications(): string {
@@ -832,7 +1112,11 @@ function renderPublications(): string {
           (record) => `<li><div class="trace-option"><strong>${escapeHtml(record.capability.name)}</strong>
             <span><code>${escapeHtml(record.capability.id)}</code> · ${record.capability.inputs.length} inputs · published ${escapeHtml(
               record.publishedAt.slice(11, 19)
-            )}</span></div></li>`
+            )}</span></div>
+            <button type="button" class="trace-delete" data-unpublish="${escapeHtml(record.capability.id)}"
+              title="Unpublish this capability" aria-label="Unpublish ${escapeHtml(record.capability.name)}">${
+                unpublishArmed === record.capability.id ? "Unpublish — confirm" : "Unpublish"
+              }</button></li>`
         )
         .join("")}</ul>`
     : "<p class=empty>No capability has been published. Cooperative sites expose nothing until one is.</p>";
@@ -840,9 +1124,10 @@ function renderPublications(): string {
   return `<section class="extension-traces" aria-label="Published capabilities">
     <div class="panel-heading"><div><p class="eyebrow">Control plane</p><h2>Published capabilities</h2></div><span>${publications.length}</span></div>
     ${list}
+    ${renderAgentFacingTools()}
     <div class="studio-actions">
-      <button id="refresh-publications" class="secondary">Refresh</button>
-      <button id="unpublish-all" class="secondary" ${publications.length ? "" : "disabled"}>Unpublish all</button>
+      ${actionButton({ id: "refresh-publications", kind: "refresh-publications", label: "Refresh", busyLabel: "Loading…", className: "secondary" })}
+      ${actionButton({ id: "unpublish-all", kind: "unpublish-all", label: "Unpublish all", busyLabel: "Unpublishing…", disabled: publications.length === 0, className: "secondary" })}
       <p class="semanticizer-status">${escapeHtml(publishStatus)}</p>
     </div>
   </section>`;
@@ -911,6 +1196,36 @@ function renderExecutionSemantics(): string {
       states something this system enforces, so it is derived from the runtime rather than written about it.</p>
     ${guarantees}
     ${rejected}
+  </div>`;
+}
+
+/**
+ * What this capability will say about the OTHER tools an agent can call.
+ *
+ * Shown for the same reason the execution semantics are: a person is about
+ * to publish something an agent reads, and they should see all of it. It
+ * is deliberately not part of the confirmed contract — the sentence is
+ * true only while its peer is published, so it is derived at registration
+ * from the live tool set and appears or disappears with that tool rather
+ * than being frozen into a description confirmed before it existed.
+ *
+ * Which is exactly why it is rendered against what is published RIGHT NOW,
+ * and says so.
+ */
+function renderCompositionHints(capability: SemanticCapability): string {
+  const hints = compositionHintsFor(capability, publications.map(publishedCapabilityContract));
+  const inputHints = Object.entries(hints.inputs);
+  if (hints.tool.length === 0 && inputHints.length === 0) return "";
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Composition hints</p>
+    <p class="semanticizer-status">Added to the published tool metadata because another currently published
+      capability exchanges the same record identity with this one. Derived from the two contracts rather than from a
+      model, and it disappears on its own if that capability is unpublished.</p>
+    <ul class="reasons">${[
+      ...hints.tool.map((hint) => `<li>${escapeHtml(hint)}</li>`),
+      ...inputHints.map(([name, hint]) => `<li><code>${escapeHtml(name)}</code> · ${escapeHtml(hint)}</li>`)
+    ].join("")}</ul>
   </div>`;
 }
 
@@ -998,9 +1313,7 @@ function renderExecutionStage(capability: SemanticCapability, view: StudioLifecy
           }</button>
           ${
             view.execution.canValidate
-              ? `<button type="button" id="validate-binding" ${isWorking(operations, "validate-binding") ? "disabled" : ""}>${
-                  isWorking(operations, "validate-binding") ? "Validating…" : "Validate this execution path"
-                }</button>`
+              ? actionButton({ id: "validate-binding", kind: "validate-binding", label: "Validate this execution path", busyLabel: "Validating…" })
               : ""
           }
           ${
@@ -1106,15 +1419,13 @@ function renderBrowserExecutionStage(view: StudioLifecycleView): string {
     ${renderEpistemicNeeds()}
     ${body}
     <div class="studio-actions">
-      <button type="button" id="suggest-browser-binding" class="secondary" ${
-        isWorking(operations, "suggest-binding") ? "disabled" : ""
-      }>${
-        isWorking(operations, "suggest-binding")
-          ? "Suggesting…"
-          : browserBindingCandidate
-            ? "Suggest again"
-            : "Suggest browser execution"
-      }</button>
+      ${actionButton({
+        id: "suggest-browser-binding",
+        kind: "suggest-binding",
+        label: browserBindingCandidate ? "Suggest again" : "Suggest browser execution",
+        busyLabel: "Reading the evidence…",
+        className: "secondary"
+      })}
       ${
         view.browserExecution.status === "proposed" && view.browserExecution.canReject
           ? `<button type="button" id="reject-browser-binding" class="secondary">Reject this suggestion</button>`
@@ -1426,9 +1737,8 @@ function renderBrowserTestForm(
   capability: SemanticCapability,
   binding: NonNullable<BrowserBindingCandidateRecord["proposal"]["binding"]>
 ): string {
-  const fields = buildTestFormFields(capability, binding, liveValueDomains);
+  const fields = buildTestFormFields(capability, binding, valueDomainsFor(binding));
   const readiness = assessExecutionReadiness(fields, binding);
-  const testing = isWorking(operations, "run-browser-test");
   // The form is where the need becomes concrete, so it is where resolving
   // it begins. Guarded inside against re-entry from repeated renders.
   void acquireValueDomains();
@@ -1448,9 +1758,13 @@ function renderBrowserTestForm(
       .join("")}
     ${browserTestErrors.length ? `<p class="ambiguity">${browserTestErrors.map(escapeHtml).join(" · ")}</p>` : ""}
     <div class="studio-actions">
-      <button type="button" id="run-browser-test" ${
-        readiness.canRun && !testing && !isWorking(operations, "acquire-domains") ? "" : "disabled"
-      }>${testing ? "Running test…" : "Run test"}</button>
+      ${actionButton({
+        id: "run-browser-test",
+        kind: "run-browser-test",
+        label: "Run test",
+        busyLabel: "Running against the application…",
+        disabled: !readiness.canRun || isWorking(operations, "acquire-domains")
+      })}
       ${
         readiness.canRun
           ? renderOperationStatus("run-browser-test")
@@ -1500,15 +1814,40 @@ function renderTransactions(result: ExecutionResult): string {
  * and never reported — where "which phase did it reach" is the difference
  * between a safe repeat and a write nobody can account for.
  */
+/**
+ * The one action a blocked-by-outstanding-write result asks for.
+ *
+ * The refusal tells the reader to establish what an earlier invocation
+ * did, and until now gave them nothing to press once they had. A refusal
+ * with no remedy is a deadlock, not a safety property.
+ */
+function renderAcknowledgement(result: ExecutionResult): string {
+  const blocked = /Outstanding invocation (\S+) started/.exec(result.evidence.join(" "));
+  if (result.status !== "blocked" || !blocked) return "";
+  const id = blocked[1];
+  if (acknowledgedInvocation === id) {
+    return `<p class="semanticizer-status">Acknowledged ${escapeHtml(id)}. Run the test again.</p>`;
+  }
+  return `<div class="studio-actions">
+    <button type="button" class="secondary" id="acknowledge-invocation" data-invocation="${escapeHtml(id)}">
+      I have read the record — acknowledge ${escapeHtml(id)}
+    </button>
+  </div>`;
+}
+
 function renderDispatch(result: ExecutionResult): string {
   const dispatch = result.dispatch;
   if (!dispatch || (result.status !== "unknown" && !dispatch.openRecordAt)) return "";
   const lines = [
-    `Last confirmed phase: ${dispatch.phase}.`,
+    dispatch.phase
+      ? `Last confirmed phase: ${dispatch.phase}.`
+      : "How far it got could not be established from here.",
     dispatch.openRecordAt ? `The requested record is being opened at ${dispatch.openRecordAt}.` : undefined,
     result.status === "unknown"
       ? dispatch.mayHavePersisted
+        ? dispatch.phase
         ? "The save had already been issued, so this may or may not have been applied. Read the record before running it again."
+        : "It may or may not have saved. Read the record before running it again."
         : "Nothing had been saved when this stopped answering, so running it again is safe."
       : undefined,
     dispatch.invocationId ? `Invocation ${dispatch.invocationId}.` : undefined
@@ -1534,6 +1873,7 @@ function renderBrowserValidationStage(view: StudioLifecycleView): string {
     .join("")}</ul>
     ${renderTransactions(result)}
     ${renderDispatch(result)}
+    ${renderAcknowledgement(result)}
     ${result.evidence.length ? `<ul class="reasons">${result.evidence.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>` : ""}
     ${result.warnings.length ? `<p class="ambiguity">${result.warnings.map(escapeHtml).join(" · ")}</p>` : ""}`;
 
@@ -1578,9 +1918,7 @@ function renderQueryStage(capability: SemanticCapability): string {
            <input type="text" id="query-term" value="${escapeHtml(queryTerm)}" placeholder="e.g. Acme Renewal" />
          </label>
          <div class="studio-actions">
-           <button type="button" id="run-query" ${isWorking(operations, "run-query") ? "disabled" : ""}>${
-             isWorking(operations, "run-query") ? "Searching…" : "Run search"
-           }</button>
+           ${actionButton({ id: "run-query", kind: "run-query", label: "Run search", busyLabel: "Searching the application…" })}
            ${
              queryOutcome && queryOutcome.candidates.length > 0 && !queryAccepted
                ? `<button type="button" id="accept-query">Accept search</button>`
@@ -2044,7 +2382,7 @@ function renderReset(): string {
     `<p class="semanticizer-status">Clears every local Teach Mode trace, inference run, candidate and
       publication from this control plane. It does not touch the source application, its data, the
       extension, or any configuration, and everything it drops is already lost on restart.</p>
-     <div class="studio-actions"><button id="reset-control-plane" class="secondary">Clear all traces and artifacts</button></div>`
+     <div class="studio-actions">${actionButton({ id: "reset-control-plane", kind: "reset-control-plane", label: "Reset everything — traces AND published capabilities", busyLabel: "Resetting…", className: "secondary" })}</div>`
   );
 }
 
@@ -2147,6 +2485,7 @@ function renderTrainingStudio(): string {
         <label>Capability name<input name="name" value="${escapeHtml(capability.name)}" /></label>
         <label>Description<textarea name="description">${escapeHtml(capability.description)}</textarea></label>
         ${renderExecutionSemantics()}
+        ${renderCompositionHints(capability)}
         ${renderTargetIdentityInputs(capability)}
         <div class="input-list">${capability.inputs
           .map((input, index) =>
@@ -2354,12 +2693,39 @@ function renderWebMcpHarness(): string {
           : `<li>Nothing registered yet.</li>`
       }</ul>`;
 
-  // Normalized before display too: showing the browser's raw string would
-  // render an escaped blob, which is what first revealed the shape.
+  // The whole tool, not just its inputs.
+  //
+  // A capability's description now carries composed sentences that were
+  // never in the confirmed contract — the execution guarantees the runtime
+  // actually keeps, and hints about what the other published tools can do
+  // for this one. Those are the half an agent reads first and the half
+  // nothing in this UI was showing, so the only way to see what had
+  // actually reached the tool surface was to invoke something and read a
+  // console.
+  //
+  // Taken from `getTools()`, deliberately: this is the browser's own
+  // answer about what it will hand an agent, not our compiled object read
+  // back to us. The two agreeing is the point; assuming it is not.
   const normalizedSchema = normalizeInputSchema(tool?.inputSchema);
-  const schema = normalizedSchema
-    ? `<details class="admin-raw" open><summary>Agent-facing input schema</summary>
-        <pre class="admin-json">${escapeHtml(JSON.stringify(normalizedSchema, null, 2))}</pre>
+  const schema = tool
+    ? `<details class="admin-raw" open><summary>The tool exactly as an agent receives it</summary>
+        <p class="semanticizer-status">Read back from <code>document.modelContext.getTools()</code> — the
+          browser's own answer, including any sentence composed at registration.</p>
+        <pre class="admin-json">${escapeHtml(
+          // Only the declared fields. The object `getTools()` hands back is
+          // the BROWSER's, and it carries live references — spreading it
+          // into JSON.stringify hit a circular structure through `Window`,
+          // which threw inside render and blanked the whole panel.
+          JSON.stringify(
+            {
+              name: tool.name,
+              ...(tool.description ? { description: tool.description } : {}),
+              ...(normalizedSchema ? { inputSchema: normalizedSchema } : {})
+            },
+            null,
+            2
+          )
+        )}</pre>
       </details>`
     : "";
 
@@ -2377,9 +2743,7 @@ function renderWebMcpHarness(): string {
         <div class="studio-actions">
           ${
             webMcpSurface.canInvoke
-              ? `<button type="button" id="invoke-webmcp" ${isWorking(operations, "invoke-webmcp") ? "disabled" : ""}>
-                   ${isWorking(operations, "invoke-webmcp") ? "Invoking…" : "Invoke via WebMCP"}
-                 </button>`
+              ? actionButton({ id: "invoke-webmcp", kind: "invoke-webmcp", label: "Invoke via WebMCP", busyLabel: "Invoking…" })
               : ""
           }
         </div>
@@ -2500,6 +2864,91 @@ function render(): void {
       ${renderConnectionBanner()}
       ${renderTrainingStudio()}
     </main>`;
+
+  // Two presses, because this is irreversible: traces live in memory and
+  // are never written to disk, so there is nothing to restore them from.
+  // Deliberately not a browser confirm() — every other destructive action
+  // here states its consequence in the button itself.
+  document.querySelectorAll<HTMLButtonElement>("[data-unpublish]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.unpublish;
+      if (!id) return;
+      if (unpublishArmed !== id) {
+        unpublishArmed = id;
+        publishStatus = `Unpublishing "${id}" removes it from the agent-facing surface. Press again to confirm.`;
+        render();
+        return;
+      }
+      unpublishArmed = undefined;
+      connectionIssue = undefined;
+      try {
+        await unpublishCapability(id);
+        publications = publications.filter((entry) => entry.capability.id !== id);
+        // WebMCP has no unregister, so this document keeps offering the tool
+        // until it is reloaded. Saying so beats letting someone discover it
+        // by calling something that no longer exists.
+        publishStatus = `Unpublished ${id}. Reload this page to clear it from the registered tool surface.`;
+      } catch (error) {
+        publishStatus = describeActionFailure("Unpublishing", error);
+      }
+      render();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-delete-trace]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const sessionId = button.dataset.deleteTrace;
+      if (!sessionId) return;
+      // Two presses, and armed per card: traces live in memory and are
+      // never written to disk, so there is nothing to restore one from.
+      if (traceDeleteArmed !== sessionId) {
+        traceDeleteArmed = sessionId;
+        traceStatus = "This recording cannot be recovered. Press Delete again to confirm.";
+        render();
+        return;
+      }
+      traceDeleteArmed = undefined;
+      connectionIssue = undefined;
+      try {
+        await deleteTrace(sessionId);
+        extensionTraces = extensionTraces.filter((entry) => entry.sessionId !== sessionId);
+        if (selectedTrace?.sessionId === sessionId) {
+          selectedTrace = undefined;
+          clearExecutionState();
+        }
+        traceStatus = extensionTraces.length
+          ? "Recording deleted."
+          : "Recording deleted. No traces remain.";
+      } catch (error) {
+        traceStatus = describeActionFailure("Deleting the recording", error);
+      }
+      render();
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#clear-traces")?.addEventListener("click", () => {
+    if (!clearTracesArmed) {
+      clearTracesArmed = true;
+      traceStatus =
+        `This removes all ${extensionTraces.length} recording(s) and cannot be undone. ` +
+        "Published capabilities are kept. Press again to confirm.";
+      render();
+      return;
+    }
+    void withBusy("clear-traces", async () => {
+      clearTracesArmed = false;
+      connectionIssue = undefined;
+      try {
+        const removed = await clearTraces();
+        extensionTraces = [];
+        selectedTrace = undefined;
+        traceStatus = `Cleared ${removed} recording(s). Published capabilities were kept.`;
+      } catch (error) {
+        traceStatus = describeActionFailure("Clearing traces", error);
+      }
+      render();
+    });
+  });
 
   document.querySelector<HTMLButtonElement>("#refresh-traces")?.addEventListener("click", () =>
     void withBusy("refresh-traces", async () => {
@@ -2792,6 +3241,18 @@ function render(): void {
         const declared = input.applicationField?.options;
         if (declared?.length) domains[input.semanticInput] = [...declared];
       }
+      // What the demonstration saw the control offering, then whatever a
+      // live read established — best evidence last, so a live read wins.
+      //
+      // The demonstrated half was reaching the Studio's own test form and
+      // stopping there: a published `stage` went out as a bare string
+      // while its seven values sat in the recording, so the agent-facing
+      // schema offered no choices and the harness rendered a text box for
+      // a picklist. The contract an agent reads is the point; filling only
+      // the form we look at ourselves is filling the wrong one.
+      for (const [name, values] of Object.entries(accepted ? valueDomainsFor(accepted) : {})) {
+        if (values.length) domains[name] = [...values];
+      }
       for (const [name, values] of Object.entries(liveValueDomains)) {
         if (values.length) domains[name] = [...values];
       }
@@ -2998,12 +3459,20 @@ function render(): void {
     });
   }
 
+  document.querySelector<HTMLButtonElement>("#acknowledge-invocation")?.addEventListener("click", (event) => {
+    // Recorded, not acted on: the acknowledgement is a precondition the
+    // next run carries, so nothing touches the application here.
+    acknowledgedInvocation = (event.currentTarget as HTMLElement).dataset.invocation;
+    browserValidationStatus = `Acknowledged. The next test run may proceed.`;
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#run-browser-test")?.addEventListener("click", () =>
     void withBusy("run-browser-test", async () => {
     const binding = browserBindingCandidate?.proposal.binding;
     if (!candidate || !binding) return;
 
-    const fields = buildTestFormFields(candidate, binding, liveValueDomains);
+    const fields = buildTestFormFields(candidate, binding, valueDomainsFor(binding));
     const validation = validateTestInputs(fields, browserTestValues);
     if (!validation.ok) {
       // Invalid or missing required inputs block here — the target
@@ -3035,7 +3504,10 @@ function render(): void {
     connectionIssue = undefined;
     render();
     try {
-      const result = await extensionBridgeExecutionClient.execute(binding, inputs);
+      const result = await extensionBridgeExecutionClient.execute(binding, inputs, {
+        ...(acknowledgedInvocation ? { acknowledgesInvocationId: acknowledgedInvocation } : {})
+      });
+      acknowledgedInvocation = undefined;
       browserBindingCandidate = browserBindingCandidate ? { ...browserBindingCandidate, state: "tested" } : undefined;
       browserBindingValidation = { state: "tested", binding, result };
       browserBindingStatus = `Test finished: ${result.status}.`;
@@ -3145,19 +3617,22 @@ function render(): void {
     render();
   });
 
-  document.querySelector<HTMLButtonElement>("#refresh-publications")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#refresh-publications")?.addEventListener("click", () =>
+    void withBusy("refresh-publications", async () => {
     connectionIssue = undefined;
     try {
       publications = await listPublishedCapabilities();
       publishStatus = publications.length ? "Published capabilities loaded." : "Nothing has been published yet.";
       syncBrowserExecutionRegistrations();
+      void refreshDiscoveredTools([...browserExecutionRegistered]).then(render);
     } catch (error) {
       publishStatus = describeActionFailure("Refreshing publications", error);
     }
     render();
-  });
+  }));
 
-  document.querySelector<HTMLButtonElement>("#unpublish-all")?.addEventListener("click", async () => {
+  document.querySelector<HTMLButtonElement>("#unpublish-all")?.addEventListener("click", () =>
+    void withBusy("unpublish-all", async () => {
     connectionIssue = undefined;
     try {
       const removed = await unpublishAll();
@@ -3167,18 +3642,54 @@ function render(): void {
       publishStatus = describeActionFailure("Unpublish all", error);
     }
     render();
-  });
+  }));
 }
 
 render();
+
+/**
+ * Whether the extension loaded in this browser was built from the same
+ * source as this page.
+ *
+ * Checked from an attribute rather than a message: it must be answerable
+ * before anything is attempted, and the failure it guards against is
+ * someone reloading one half and testing the other.
+ */
+function staleExtensionWarning(): string | undefined {
+  const loaded = document.documentElement.getAttribute("data-autowebmcp-build");
+  if (loaded === null || loaded === BUILD_STAMP) return undefined;
+
+  // WHICH one is behind decides what to do, and the first version of this
+  // banner did not check: it reported the mismatch and told the reader to
+  // reload the extension either way. Building the extension restamps, so
+  // an already-open page is older by construction — and the advice was
+  // wrong in exactly the common case.
+  const pageIsOlder = loaded > BUILD_STAMP;
+  return pageIsOlder
+    ? `This page was built at ${BUILD_STAMP} and the Teach Mode extension at ${loaded}. Reload THIS PAGE ` +
+      "(the extension is the newer of the two) — until then you are testing code that is not running."
+    : `The Teach Mode extension loaded in this browser was built at ${loaded} and this page at ${BUILD_STAMP}. ` +
+      "Reload THE EXTENSION at chrome://extensions, then reload this page — until then you are testing code " +
+      "that is not running.";
+}
+
+const staleExtension = staleExtensionWarning();
+if (staleExtension) connectionIssue = staleExtension;
+
+void controlPlaneIsCurrent().then((state) => {
+  if (state.ok) return;
+  // Both can be stale at once, and each needs a different reload.
+  connectionIssue = staleExtension ? `${staleExtension} ${state.detail}` : state.detail;
+  render();
+});
 
 void listPublishedCapabilities()
   .then((records) => {
     publications = records;
     if (records.length) publishStatus = "Published capabilities loaded.";
     syncBrowserExecutionRegistrations();
-    // Registration has happened; ask the browser what it can now see.
-    void refreshDiscoveredTools().then(render);
+    // Registration has been ASKED FOR; wait for the browser to agree.
+    void refreshDiscoveredTools([...browserExecutionRegistered]).then(render);
     render();
   })
   .catch((error) => {

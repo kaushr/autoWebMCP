@@ -1,3 +1,4 @@
+import { BUILD_STAMP } from "../../src/buildStamp";
 import {
   EXECUTION_TIMEOUTS,
   STUDIO_BRIDGE_MARKER,
@@ -35,6 +36,14 @@ import {
 // Detectable without a round trip: the Studio can tell instantly whether a
 // current bridge is present, rather than inferring it from a timeout.
 document.documentElement.setAttribute(STUDIO_BRIDGE_MARKER, String(STUDIO_BRIDGE_PROTOCOL));
+// Which build of the extension this browser actually has loaded.
+//
+// The page and the extension are built and reloaded separately, by hand.
+// Reloading one and not the other is silent, and produces confident
+// results about code that is not running — an evening went into
+// diagnosing behaviour that had already been fixed. Stamped where the page
+// can read it without a round trip, so it can say so instead.
+document.documentElement.setAttribute("data-autowebmcp-build", BUILD_STAMP);
 
 /** Shorter than the Studio's own patience, so the bridge reports first. */
 const BACKGROUND_ANSWER_TIMEOUT_MS = 20_000;
@@ -167,19 +176,39 @@ window.addEventListener("message", (event) => {
   }
 
   if (data.kind === "query" && data.queryBinding) {
+    // The same watchdog the execute path has. A search that goes quiet is
+    // harmless but was indistinguishable from a broken extension, and cost
+    // the caller its full budget to say nothing useful.
+    let answered = false;
+    const settle = (payload: Record<string, unknown>): void => {
+      if (answered) return;
+      answered = true;
+      clearTimeout(watchdog);
+      post({ requestId, ...payload });
+    };
+    const watchdog = setTimeout(() => {
+      settle({
+        ok: false,
+        reason: "introspection-timeout",
+        error:
+          "The search was dispatched to the extension and no answer came back within " +
+          `${EXECUTE_BACKGROUND_TIMEOUT_MS / 1000}s. Nothing was written.`
+      });
+    }, EXECUTE_BACKGROUND_TIMEOUT_MS);
+
     callBackground({
       type: "browser-binding:query",
       request: { binding: data.queryBinding, inputs: data.inputs ?? {} }
     })
       .then((response) => {
         const answer = response as { ok?: boolean; outcome?: unknown; error?: string };
-        post(
+        settle(
           answer?.ok
-            ? { requestId, ok: true, outcome: answer.outcome }
-            : { requestId, ok: false, error: answer?.error ?? "The search could not be run." }
+            ? { ok: true, outcome: answer.outcome }
+            : { ok: false, error: answer?.error ?? "The search could not be run." }
         );
       })
-      .catch((error) => post({ requestId, ok: false, error: String(error) }));
+      .catch((error) => settle({ ok: false, error: String(error) }));
     return;
   }
 
@@ -215,6 +244,9 @@ window.addEventListener("message", (event) => {
         inputs: data.inputs ?? {},
         confirmed: true,
         ...(invocationId ? { invocationId } : {}),
+        ...(typeof data.acknowledgesInvocationId === "string"
+          ? { acknowledgesInvocationId: data.acknowledgesInvocationId }
+          : {}),
         // Relayed rather than decided here: only the caller knows whether
         // this is an autonomous invocation or a human's own test.
         ...(data.requireTarget === true ? { requireTarget: true } : {})

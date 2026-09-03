@@ -281,3 +281,37 @@ describe("compareObservedValue — display format vs wire format", () => {
     expect(compareObservedValue("Acme", "Globex")).toBe("mismatch");
   });
 });
+
+/* ====== a confident answer about the wrong control ====== */
+
+describe("a name that matches nothing is proof of absence", () => {
+  it("refuses rather than falling through to an unrelated control of the same role", () => {
+    // The live failure. After saving, "*Stage" was no longer on the record
+    // view, the name signal was skipped as "weak evidence", and resolution
+    // landed on a "Sort by:" combobox — then reported that Stage read
+    // "Sort by:". Right role, confident answer, wrong control.
+    const root = mount(`
+      <label for="sort">Sort by:</label>
+      <select id="sort"><option>Newest</option></select>`);
+    const outcome = resolveSemanticTarget(root, { role: "field", label: "*Stage" });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toMatch(/named "\*Stage"/);
+      // The names that WERE there, so the mismatch does not have to be
+      // guessed at from outside.
+      expect(outcome.reason).toMatch(/Sort by:/);
+    }
+  });
+
+  it("still resolves when the application names the element itself", () => {
+    // An identifier the application put there outranks a label a human read
+    // off the screen — a field can carry one and render no name at all.
+    const root = mount(`<input name="CloseDate" />`);
+    expect(resolveSemanticTarget(root, { role: "field", label: "*Close Date", applicationIdentifier: "CloseDate" }).ok).toBe(true);
+  });
+
+  it("ignores a required marker, which is decoration and not a name", () => {
+    const root = mount(`<label for="s">Stage</label><select id="s"><option>Engage</option></select>`);
+    expect(resolveSemanticTarget(root, { role: "field", label: "*Stage" }).ok).toBe(true);
+  });
+});

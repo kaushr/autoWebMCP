@@ -122,7 +122,16 @@ export interface ExecutionTarget {
 export interface ExecutionDispatch {
   /** Correlates this attempt across every hop, and makes a redelivery recognisable. */
   invocationId?: string;
-  phase: ExecutionPhase;
+  /**
+   * How far the execution was OBSERVED to get.
+   *
+   * Absent when nobody could see. A caller whose answer was lost knows the
+   * request was dispatched and nothing more, and naming a phase there
+   * would be an observation it never made — it printed "last confirmed
+   * phase: received" beside "the save had already been issued", two
+   * sentences that cannot both be true.
+   */
+  phase?: ExecutionPhase;
   /**
    * Whether a persisted change may already exist despite this result.
    *
