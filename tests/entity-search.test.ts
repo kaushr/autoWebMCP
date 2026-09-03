@@ -202,9 +202,13 @@ describe("ambiguity is returned, never resolved", () => {
     // decide where a later write lands.
     return run({ name: "Acme Renewal" }).then((outcome) => {
       expect(outcome.status).toBe("succeeded");
-      expect(outcome.candidates).toHaveLength(2);
-      expect(outcome.candidates.map((candidate) => candidate.name)).toEqual(["Acme Renewal", "Acme Renewal"]);
-      expect(outcome.candidates.map((candidate) => candidate.id)).toEqual([ACME_A, ACME_B]);
+      // Both Opportunities, plus the Account the page also offered — a
+      // search returns what the application found, each labelled with what
+      // it is, and leaves the choosing to the caller.
+      const opportunities = outcome.candidates.filter((c) => c.entityType === "Opportunity");
+      expect(opportunities.map((c) => c.name)).toEqual(["Acme Renewal", "Acme Renewal"]);
+      expect(opportunities.map((c) => c.id)).toEqual([ACME_A, ACME_B]);
+      expect(outcome.candidates.some((c) => c.entityType === "Account")).toBe(true);
       expect(outcome.warnings.join(" ")).toMatch(/none has been chosen/i);
     });
   });
@@ -321,6 +325,33 @@ describe("the search is performed through the application's own controls", () =>
       reaction: { timeoutMs: 40, quietMs: 10 }
     });
     expect((document.querySelector("#acc") as HTMLInputElement).value).toBe("Acme Corporation");
+  });
+});
+
+describe("what a search returns is the caller's to choose from", () => {
+  it("returns every identifiable record, each labelled with what it is", () => {
+    // The demonstration ended on an Opportunity, which does not establish
+    // that Opportunities are all a caller wants: someone searching "Acme"
+    // may well mean the Account. Discarding the rest would hide results
+    // the application itself offered.
+    const candidates = candidatesOnPage(mountResults(), undefined, IDENTITY, adapter());
+    expect(new Set(candidates.map((c) => c.entityType))).toEqual(new Set(["Opportunity", "Account"]));
+  });
+
+  it("still drops what it cannot identify", () => {
+    // An id with no type is not a usable handoff: a caller cannot tell
+    // what it refers to, which is how a custom object's identifier reached
+    // a list of Opportunities.
+    document.body.innerHTML = `
+      <a href="/lightning/r/${ACME_A}/view">Typed</a>
+      <a href="/lightning/r/a0A5w00000yIci8EAC/view">Untypeable</a>
+    `;
+    expect(candidatesOnPage(document.body, undefined, IDENTITY, adapter()).map((c) => c.name)).toEqual(["Typed"]);
+  });
+
+  it("narrows when a type is explicitly asked for", () => {
+    const only = candidatesOnPage(mountResults(), "Account", IDENTITY, adapter());
+    expect(only.every((c) => c.entityType === "Account")).toBe(true);
   });
 });
 

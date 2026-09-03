@@ -133,7 +133,17 @@ const RESULT_SELECTOR = "a[href]";
  */
 export function candidatesOnPage(
   root: ParentNode,
-  entityType: string,
+  /**
+   * Narrow to one entity type, or omit to return everything identifiable.
+   *
+   * Omitting is the normal case. A demonstration that ended on an
+   * Opportunity does not establish that Opportunities are all a caller
+   * wants — someone searching "Acme" may well mean the Account — and
+   * discarding the rest would hide results the application itself offered.
+   * Type enforcement belongs at the mutation, where `update_opportunity`
+   * already refuses a record whose observed type is not the one it binds.
+   */
+  entityType: string | undefined,
   identity: EntityIdentityPolicy,
   adapter?: PlatformResolverAdapter
 ): EntityCandidate[] {
@@ -156,13 +166,14 @@ export function candidatesOnPage(
     const parsed = canonicalIdentityFromPath(path, identity);
     if (!parsed) continue;
 
-    // Filtering by type requires KNOWING the type. `sameEntity` matches on
-    // id alone when either side is untyped, which is right for comparing
-    // two references to one record and wrong here: a live search returned
-    // six candidates of which four were not Opportunities at all — a
-    // custom object and two other prefixes the pack does not declare — and
-    // every one of them passed an Opportunity filter by being unknown.
-    if (parsed.entityType !== entityType) continue;
+    // A candidate whose type cannot be established is dropped whatever was
+    // asked for. Returning an id without being able to say what it refers
+    // to is how a custom object's identifier reached a list of
+    // Opportunities in a live run.
+    if (!parsed.entityType) continue;
+    // And when a type IS requested, it must match exactly rather than
+    // merely fail to contradict.
+    if (entityType && parsed.entityType !== entityType) continue;
     if (found.has(parsed.id)) continue;
 
     // Whitespace collapsed, case preserved. `normalizeLabel` exists for
@@ -172,7 +183,9 @@ export function candidatesOnPage(
     const name = (accessibleName(element) ?? "").replace(/\s+/g, " ").trim();
     if (!name) continue;
 
-    found.set(parsed.id, { id: parsed.id, name, entityType });
+    // The candidate's OWN type, which the guard above proved it has —
+    // never the type that was asked for.
+    found.set(parsed.id, { id: parsed.id, name, entityType: parsed.entityType });
   }
 
   return [...found.values()];
@@ -198,7 +211,7 @@ const RESULTS_POLL_MS = 300;
  */
 async function collectCandidates(
   root: ParentNode,
-  entityType: string,
+  entityType: string | undefined,
   identity: EntityIdentityPolicy,
   adapter: PlatformResolverAdapter | undefined,
   waitMs = RESULTS_WAIT_MS
@@ -255,7 +268,12 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // opened. A control that is not on screen cannot be resolved, and the
   // failure would read as "the search box is missing" rather than "it has
   // not been opened yet".
-  if (binding.open) {
+  // Only if it is not already open. A binding taught from a closed search
+  // box would otherwise fail on a page where the box is already showing —
+  // which is exactly the state a previous search leaves behind, and it
+  // reported the search control as missing when it was right there.
+  const alreadyOpen = resolveSemanticTarget(root, binding.query.semanticTarget, adapter).ok;
+  if (binding.open && !alreadyOpen) {
     const opened = await invokeSemanticAction(root, binding.open, adapter);
     if (!opened.ok) {
       return {
@@ -328,12 +346,13 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // An empty answer after the whole window is still a real answer — a term
   // that matches nothing must not spin for the full budget every time, but
   // it is the only case that pays it.
-  const candidates = await collectCandidates(root, binding.entityType, identity, adapter, options.resultsWaitMs);
+  // Everything identifiable, not only the type the recording ended on.
+  const candidates = await collectCandidates(root, undefined, identity, adapter, options.resultsWaitMs);
   evidence.push(
     candidates.length === 0
-      ? `No ${binding.entityType} links were found on the page after searching.`
-      : `Found ${candidates.length} ${binding.entityType} candidate(s): ${candidates
-          .map((candidate) => `${candidate.name} (${candidate.id})`)
+      ? "No identifiable records were found on the page after searching."
+      : `Found ${candidates.length} candidate(s): ${candidates
+          .map((candidate) => `${candidate.name} [${candidate.entityType}] (${candidate.id})`)
           .join(", ")}.`
   );
 
