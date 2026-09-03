@@ -341,3 +341,43 @@ describe("a result is found through however many envelopes it arrives in", () =>
     expect(readToolResult(JSON.stringify({ status: "succeeded" }), "webmcp").execution).toBeUndefined();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * A published capability is one shape or the other.
+ *
+ * A search returns candidates where an execution returns checks. Reading
+ * only for the second reported a live search that had worked perfectly as
+ * a tool answering badly.
+ * ------------------------------------------------------------------ */
+
+describe("a search's answer is read as a search's answer", () => {
+  const query = {
+    status: "succeeded",
+    candidates: [{ id: "0065w00002AZ0GeAAL", name: "PS Project Test", entityType: "Opportunity" }],
+    evidence: [],
+    warnings: [],
+    executedAt: "2026-09-03T00:00:00.000Z"
+  };
+
+  it("decodes candidates through the same envelope a live call returns", () => {
+    const live = JSON.stringify({ content: [{ type: "text", text: JSON.stringify(query) }] });
+    const outcome = readToolResult(live, "webmcp");
+    expect(outcome.query?.candidates[0]?.id).toBe("0065w00002AZ0GeAAL");
+    expect(outcome.execution).toBeUndefined();
+    expect(outcome.unparsed).toBeUndefined();
+  });
+
+  it("reads an empty search as an answer, not a failure", () => {
+    // The exact payload a live run produced and the panel rejected.
+    const empty = JSON.stringify({ status: "no-results", candidates: [], evidence: [], warnings: [], executedAt: "t" });
+    const outcome = readToolResult(empty, "webmcp");
+    expect(outcome.query?.status).toBe("no-results");
+    expect(outcome.unparsed).toBeUndefined();
+  });
+
+  it("keeps the two shapes apart", () => {
+    const execution = JSON.stringify({ status: "succeeded", checks: [], evidence: [], warnings: [], executedAt: "t" });
+    expect(readToolResult(execution, "webmcp").execution).toBeDefined();
+    expect(readToolResult(execution, "webmcp").query).toBeUndefined();
+  });
+});

@@ -555,25 +555,13 @@ async function establishTarget(options: ExecuteOptions): Promise<{
   }
 
   const observed = adapter?.observeEntityIdentity?.(root, policyFor(adapter));
-  if (!observed) {
-    const state: ExecutionTarget = {
-      requestedId,
-      ...(declared?.entityType ? { entityType: declared.entityType } : {}),
-      status: "unobservable",
-      detail: "The application did not expose which record is currently open."
-    };
-    return {
-      state,
-      check: { name: "target_identity", status: "fail", detail: state.detail },
-      evidence: [],
-      refuse:
-        `Execution stopped before touching anything — ${state.detail} Without knowing what is open, no write can ` +
-        `be shown to have landed on ${requestedId}.`
-    };
-  }
-
   const wanted = { id: requestedId, ...(declared?.entityType ? { entityType: declared.entityType } : {}) };
-  if (!sameEntity(observed, wanted)) {
+
+  // Not knowing what is open is a reason to GO somewhere, not a reason to
+  // stop. An agent invoking this may be looking at search results, a home
+  // page, or anything else with no record identity at all — which is the
+  // ordinary case, not an error.
+  if (!observed || !sameEntity(observed, wanted)) {
     // A capability that can only act on what is already open cannot be
     // called by an agent: it has opened nothing and can open nothing.
     // Establishing the precondition belongs to the execution, not to the
@@ -587,7 +575,9 @@ async function establishTarget(options: ExecuteOptions): Promise<{
         beforeId: arrived.id,
         ...(arrived.entityType ? { entityType: arrived.entityType } : {}),
         status: "verified",
-        detail: `Opened ${requestedId}, which was not the record showing (${observed.id}).`
+        detail: observed
+          ? `Opened ${requestedId}, which was not the record showing (${observed.id}).`
+          : `Opened ${requestedId}; the page was not showing a record.`
       };
       return {
         state,
@@ -599,15 +589,17 @@ async function establishTarget(options: ExecuteOptions): Promise<{
     // Navigation is not proof of arrival. A route that redirects — a
     // deleted record, a permission failure — lands somewhere else, and
     // writing there would be the exact failure this gate exists to stop.
-    const landed = arrived?.id ?? observed.id;
+    const landed = arrived?.id ?? observed?.id;
     const state: ExecutionTarget = {
       requestedId,
-      beforeId: landed,
-      ...(observed.entityType ? { entityType: observed.entityType } : {}),
-      status: "mismatch",
+      ...(landed ? { beforeId: landed } : {}),
+      ...(observed?.entityType ? { entityType: observed.entityType } : {}),
+      status: landed ? "mismatch" : "unobservable",
       detail: navigated
-        ? `Requested ${requestedId}; after navigating, ${landed} is open.`
-        : `Requested ${requestedId}, but ${landed} is open.`
+        ? `Requested ${requestedId}; after navigating, ${landed ?? "no record"} is open.`
+        : landed
+          ? `Requested ${requestedId}, but ${landed} is open.`
+          : "The application did not expose which record is open."
     };
     return {
       state,

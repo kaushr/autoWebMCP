@@ -467,6 +467,12 @@ async function invokeSelectedTool(): Promise<void> {
 }
 
 function describeOutcome(outcome: HarnessInvocationOutcome): string {
+  if (outcome.query) {
+    const found = outcome.query.candidates.length;
+    return found === 0
+      ? "The search ran and found nothing."
+      : `The search found ${found} candidate${found === 1 ? "" : "s"} — choose one by its identity.`;
+  }
   if (!outcome.execution) return outcome.unparsed ?? "The tool returned a response.";
   switch (outcome.execution.status) {
     case "succeeded":
@@ -2150,6 +2156,28 @@ function renderHarnessTransactions(outcome: HarnessInvocationOutcome): string {
   </table></div>`;
 }
 
+/** A search's answer: the candidates, and the identity each one hands on. */
+function renderHarnessCandidates(outcome: HarnessInvocationOutcome): string {
+  const query = outcome.query;
+  if (!query) return "";
+  if (query.candidates.length === 0) {
+    return `<p class="semanticizer-status">${escapeHtml(
+      query.warnings.join(" ") || "The search found nothing."
+    )}</p>`;
+  }
+  return `<div class="table-scroll"><table class="comparison">
+      <thead><tr><th>Name</th><th>Type</th><th>Identity</th></tr></thead>
+      <tbody>${query.candidates
+        .map(
+          (candidate) =>
+            `<tr><td>${escapeHtml(candidate.name)}</td><td>${escapeHtml(candidate.entityType)}</td>
+             <td><code>${escapeHtml(candidate.id)}</code></td></tr>`
+        )
+        .join("")}</tbody>
+    </table></div>
+    ${query.warnings.length ? `<p class="ambiguity">${query.warnings.map(escapeHtml).join(" ")}</p>` : ""}`;
+}
+
 function renderHarnessResult(): string {
   if (!harnessOutcome) return "";
   const execution = harnessOutcome.execution;
@@ -2168,7 +2196,8 @@ function renderHarnessResult(): string {
            <pre class="admin-json">${escapeHtml(harnessOutcome.text)}</pre>`
         : ""
     }
-    ${execution ? `<p><strong>${escapeHtml(describeOutcome(harnessOutcome))}</strong></p>` : ""}
+    ${execution || harnessOutcome.query ? `<p><strong>${escapeHtml(describeOutcome(harnessOutcome))}</strong></p>` : ""}
+    ${renderHarnessCandidates(harnessOutcome)}
     ${renderHarnessTransactions(harnessOutcome)}
     ${
       checks.length

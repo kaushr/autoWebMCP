@@ -1,4 +1,5 @@
 import type { ExecutionResult } from "../binding/browserExecution/result";
+import type { QueryOutcome } from "../binding/browserExecution/query";
 import type { JsonObjectSchema, ModelContext, WebMcpToolResult } from "./types";
 
 /* ------------------------------------------------------------------ *
@@ -237,6 +238,14 @@ export interface HarnessInvocationOutcome {
   route: InvocationRoute;
   /** The decoded execution result, when the tool returned one. */
   execution?: ExecutionResult;
+  /**
+   * The decoded search result, when the tool was a search.
+   *
+   * A capability is one shape or the other. A search has candidates where
+   * an execution has checks, and reading only for the second reported a
+   * search that had worked as a tool answering badly.
+   */
+  query?: QueryOutcome;
   /** The raw text the tool returned, always kept. */
   text: string;
   /** Set when the text was not a result this panel understands. */
@@ -295,6 +304,7 @@ export function readToolResult(result: WebMcpToolResult | string, route: Invocat
     }
 
     if (isExecutionResult(parsed)) return { route, execution: parsed, text };
+    if (isQueryOutcome(parsed)) return { route, query: parsed, text };
 
     // Not a result, but possibly another envelope around one.
     const inner = textFromEnvelope(parsed);
@@ -305,6 +315,13 @@ export function readToolResult(result: WebMcpToolResult | string, route: Invocat
   }
 
   return { route, text, unparsed: "The tool's response was nested more deeply than this panel unwraps." };
+}
+
+/** Whether a decoded payload is a search's outcome: candidates rather than checks. */
+function isQueryOutcome(value: unknown): value is QueryOutcome {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as QueryOutcome;
+  return Array.isArray(candidate.candidates) && typeof candidate.status === "string";
 }
 
 /** Whether a decoded payload is an execution result rather than something else shaped like JSON. */
