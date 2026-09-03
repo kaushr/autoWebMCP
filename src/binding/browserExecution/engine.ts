@@ -619,6 +619,9 @@ export async function readSemanticOptions(
  * the search field" describes an intention, not a coordinate or a
  * recorded event sequence.
  */
+/** Legacy codes for the keys this engine sends. Only what is needed. */
+const KEY_CODES: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9 };
+
 export async function pressKey(
   root: ParentNode,
   target: SemanticTarget,
@@ -631,14 +634,35 @@ export async function pressKey(
     return { ok: false, detail: `Could not find "${target.label}" to press ${key} on: ${resolution.reason}` };
   }
 
-  const element = resolution.target.element;
+  // The control a person would actually type into, when the resolved
+  // element merely wraps one. A component host does not listen for keys;
+  // its input does, and dispatching at the wrapper reaches no handler.
+  const resolved = resolution.target.element;
+  const native = collectElements(resolved, "input, textarea", policyFor(adapter)).find(
+    (candidate) => candidate instanceof HTMLElement && isVisible(candidate)
+  );
+  const element = native ?? resolved;
   if (element instanceof HTMLElement) element.focus();
-  // The full sequence an application listens for. Dispatching only one of
-  // the three is the usual reason a synthetic key does nothing.
+
+  // The full sequence, carrying the legacy identifiers as well as the
+  // modern ones. `new KeyboardEvent()` leaves `keyCode` and `which` at 0
+  // however `key` is set, and frameworks that predate `key` — Aura among
+  // them — read exactly those, so a synthetic Enter arrives looking like
+  // no key at all. They are deprecated and still load-bearing.
+  const legacy = KEY_CODES[key];
   for (const type of ["keydown", "keypress", "keyup"] as const) {
-    element.dispatchEvent(
-      new KeyboardEvent(type, { key, code: key, bubbles: true, cancelable: true, composed: true })
-    );
+    const event = new KeyboardEvent(type, {
+      key,
+      code: key,
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    });
+    if (legacy !== undefined) {
+      Object.defineProperty(event, "keyCode", { get: () => legacy });
+      Object.defineProperty(event, "which", { get: () => legacy });
+    }
+    element.dispatchEvent(event);
   }
   await waitForApplicationReaction({ root, ...reaction });
   return { ok: true, detail: `Pressed ${key} on "${target.label}".` };

@@ -558,3 +558,53 @@ describe("what search returns is what update requires", () => {
     expect(BINDING.query.semanticTarget).toEqual({ role: "field", label: "Search" });
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Pressing a key an application can actually recognise.
+ *
+ * A live search reported every step succeeding — opened, typed, Enter
+ * pressed, page settled — and the address never changed. The key was
+ * dispatched and ignored: `new KeyboardEvent()` leaves `keyCode` and
+ * `which` at 0 however `key` is set, and frameworks predating `key` read
+ * exactly those.
+ * ------------------------------------------------------------------ */
+
+describe("a synthetic key carries what the application reads", () => {
+  it("sends the legacy identifiers alongside the modern ones", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Search</label><input id="q" />`;
+    const seen: Array<{ type: string; key: string; keyCode: number; which: number }> = [];
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      document.querySelector("#q")!.addEventListener(type, (event) => {
+        const e = event as KeyboardEvent;
+        seen.push({ type, key: e.key, keyCode: e.keyCode, which: e.which });
+      });
+    }
+
+    await pressKey(document.body, { role: "field", label: "Search" }, "Enter", adapter(), {
+      timeoutMs: 40,
+      quietMs: 10
+    });
+
+    expect(seen.map((entry) => entry.type)).toEqual(["keydown", "keypress", "keyup"]);
+    // The identifiers a framework that predates `key` reads.
+    expect(seen.every((entry) => entry.keyCode === 13 && entry.which === 13)).toBe(true);
+    expect(seen.every((entry) => entry.key === "Enter")).toBe(true);
+  });
+
+  it("presses the control a person would type into, not the wrapper around it", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    // A component host does not listen for keys; its input does.
+    document.body.innerHTML = `
+      <div role="textbox" aria-label="Search" id="host"><input id="inner" /></div>
+    `;
+    let onInner = 0;
+    document.querySelector("#inner")!.addEventListener("keydown", () => (onInner += 1));
+
+    await pressKey(document.body, { role: "field", label: "Search" }, "Enter", adapter(), {
+      timeoutMs: 40,
+      quietMs: 10
+    });
+    expect(onInner).toBe(1);
+  });
+});
