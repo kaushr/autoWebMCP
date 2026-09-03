@@ -111,6 +111,8 @@ export interface ExecuteQueryOptions {
   /** How this platform encodes entity identity, from its pack. */
   identity: EntityIdentityPolicy;
   reaction?: { timeoutMs?: number; quietMs?: number };
+  /** How long to keep looking for results before concluding there are none. */
+  resultsWaitMs?: number;
 }
 
 const RESULT_SELECTOR = "a[href]";
@@ -181,6 +183,31 @@ function safePath(href: string): string | undefined {
     return new URL(href).pathname;
   } catch {
     return undefined;
+  }
+}
+
+const RESULTS_WAIT_MS = 8_000;
+const RESULTS_POLL_MS = 300;
+
+/**
+ * Reads the page for candidates until some appear or the window closes.
+ *
+ * Deliberately not a fixed sleep: the common case returns as soon as the
+ * application has rendered, and only a genuinely empty result pays the
+ * full wait.
+ */
+async function collectCandidates(
+  root: ParentNode,
+  entityType: string,
+  identity: EntityIdentityPolicy,
+  adapter: PlatformResolverAdapter | undefined,
+  waitMs = RESULTS_WAIT_MS
+): Promise<EntityCandidate[]> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const found = candidatesOnPage(root, entityType, identity, adapter);
+    if (found.length > 0 || Date.now() >= deadline) return found;
+    await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
 }
 
@@ -292,7 +319,16 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
       : `The page did not settle within ${settled.elapsedMs}ms; results were read anyway.`
   );
 
-  const candidates = candidatesOnPage(root, binding.entityType, identity, adapter);
+  // Results arrive asynchronously, and a settle signal is not the same as
+  // results existing: a live run read an empty page immediately after
+  // submitting and reported no matches, while the application was still
+  // fetching them. So the page is re-read for a bounded window and returns
+  // the moment anything appears.
+  //
+  // An empty answer after the whole window is still a real answer — a term
+  // that matches nothing must not spin for the full budget every time, but
+  // it is the only case that pays it.
+  const candidates = await collectCandidates(root, binding.entityType, identity, adapter, options.resultsWaitMs);
   evidence.push(
     candidates.length === 0
       ? `No ${binding.entityType} links were found on the page after searching.`

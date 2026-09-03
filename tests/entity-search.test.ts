@@ -69,7 +69,8 @@ const run = (inputs: Record<string, string>) =>
     inputs,
     adapter: adapter(),
     identity: IDENTITY,
-    reaction: { timeoutMs: 40, quietMs: 10 }
+    reaction: { timeoutMs: 40, quietMs: 10 },
+    resultsWaitMs: 300
   });
 
 /* ===================== identity extraction ===================== */
@@ -224,11 +225,42 @@ describe("ambiguity is returned, never resolved", () => {
       inputs: { name: "Nothing At All" },
       adapter: adapter(),
       identity: IDENTITY,
-      reaction: { timeoutMs: 40, quietMs: 10 }
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      // A genuinely empty result is the only case that pays the full wait.
+      resultsWaitMs: 50
     });
     expect(outcome.status).toBe("no-results");
     expect(outcome.candidates).toEqual([]);
     expect(outcome.warnings).toEqual([]);
+  });
+});
+
+describe("results that arrive late are still found", () => {
+  it("keeps looking until the application renders them", async () => {
+    // The live failure this covers: reading once, immediately after
+    // submitting, found an empty page and reported no matches while
+    // Salesforce was still fetching. A settle signal is not the same as
+    // results existing.
+    document.body.innerHTML = `<label for="q">Search</label><input id="q" /><button id="go">Search</button>`;
+    setTimeout(() => {
+      const late = document.createElement("a");
+      late.setAttribute("href", `/lightning/r/${ACME_A}/view`);
+      late.textContent = "Arrived Late";
+      document.body.appendChild(late);
+    }, 250);
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: { ...BINDING, submit: undefined, submitKey: undefined },
+      inputs: { name: "Acme" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 3_000
+    });
+
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.candidates.map((c) => c.name)).toEqual(["Arrived Late"]);
   });
 });
 
