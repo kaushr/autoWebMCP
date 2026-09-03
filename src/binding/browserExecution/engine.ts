@@ -460,9 +460,20 @@ function resolveGeneric(root: ParentNode, target: SemanticTarget, policy: Resolu
   // Nothing narrowed at all: every candidate is still in play, which is not
   // a match, it is an unfiltered list.
   if (appliedSignals.length === 0) {
+    // The names that WERE found, so a mismatch does not have to be guessed
+    // at from outside. "No element with that name" and "an element with a
+    // very slightly different name" look identical without this, and the
+    // difference is the whole diagnosis.
+    const seen = [
+      ...new Set(candidates.map((element) => accessibleName(element)).filter(Boolean) as string[])
+    ].slice(0, 8);
     return {
       ok: false,
-      reason: `No element with the accessible name "${target.label}" was found on the page.`,
+      reason:
+        `No element with the accessible name "${target.label}" was found on the page. ` +
+        `${candidates.length} ${target.role} element(s) were considered` +
+        (seen.length ? `, named: ${seen.map((name) => JSON.stringify(name)).join(", ")}` : ", none of them named") +
+        ".",
       diagnostics: { candidatesConsidered: candidates.length, traversal: policy.traversal, appliedSignals }
     };
   }
