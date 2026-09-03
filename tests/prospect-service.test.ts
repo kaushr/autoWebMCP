@@ -176,3 +176,33 @@ describe("Reference capability contracts", () => {
     expect(invokeProspectBinding(byId("get_company"), { company_id: "nope" })).toEqual({ company: null });
   });
 });
+
+/* ====== an input named after the label a human read off the screen ====== */
+
+describe("a taught input reaches the action it was bound to", () => {
+  it("matches a name derived from the form's own label", async () => {
+    // The live failure: SignalBase labels its search "Company name, domain,
+    // or industry", so the taught input became
+    // `company_name_domain_or_industry` — which no alias list anticipated.
+    // The agent's call returned {"company":null,"contacts":[]} for an
+    // account plainly on the page.
+    const { prospectBindings } = await import("../src/prospect/bindings");
+    const result = prospectBindings.find_relevant_contacts({
+      company_name_domain_or_industry: "Tesla",
+      function: "Procurement",
+      seniority: "VP"
+    }) as { company: unknown; contacts: unknown[] };
+
+    expect(result.company).not.toBeNull();
+    expect(result.contacts.length).toBeGreaterThan(0);
+  });
+
+  it("still prefers an exact name over one that merely starts with it", async () => {
+    const { prospectBindings } = await import("../src/prospect/bindings");
+    const result = prospectBindings.find_relevant_contacts({
+      company: "Tesla",
+      company_name_domain_or_industry: "Northstar"
+    }) as { company: { name?: string } | null };
+    expect(result.company?.name).toBe("Tesla Motors");
+  });
+});

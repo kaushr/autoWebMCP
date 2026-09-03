@@ -20,10 +20,28 @@ function optional(value: CapabilityInputValue): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
-/** A human may rename an input during confirmation, so accept the near synonyms. */
+/**
+ * The first supplied value among several names a taught input might carry.
+ *
+ * An exact alias first, then a name that merely STARTS with one. A
+ * capability's input names come from the demonstration, so a label reading
+ * "Company name, domain, or industry" becomes
+ * `company_name_domain_or_industry` — which no alias list can enumerate,
+ * and which a live agent call turned into `{"company":null,"contacts":[]}`
+ * for an account plainly on the page.
+ *
+ * Prefix rather than substring, so `company_name_domain_or_industry`
+ * matches `company` while a differently-meant input that merely mentions
+ * one of these words does not.
+ */
 function firstOf(inputs: CapabilityInputValues, names: string[]): CapabilityInputValue {
+  const supplied = (name: string): boolean => inputs[name] !== undefined && text(inputs[name]) !== "";
   for (const name of names) {
-    if (inputs[name] !== undefined && text(inputs[name]) !== "") return inputs[name];
+    if (supplied(name)) return inputs[name];
+  }
+  for (const name of names) {
+    const prefixed = Object.keys(inputs).find((key) => key.startsWith(name) && supplied(key));
+    if (prefixed) return inputs[prefixed];
   }
   return undefined;
 }
