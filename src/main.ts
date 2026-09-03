@@ -510,7 +510,12 @@ function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: Capa
 function syncBrowserExecutionRegistrations(): void {
   if (!controlMode) return;
   for (const record of publications) {
-    if (!record.executionBinding || browserExecutionRegistered.has(record.capability.id)) continue;
+    // Either binding makes a capability callable. A search has a query
+    // binding and no execution binding — requiring the latter published it
+    // to the control plane and then never registered it, so it existed
+    // everywhere except the surface an agent reads.
+    const callable = record.executionBinding ?? record.queryBinding;
+    if (!callable || browserExecutionRegistered.has(record.capability.id)) continue;
     if (registerCapability(record.capability, invokeBrowserExecutionBinding) === "registered") {
       browserExecutionRegistered.add(record.capability.id);
     }
