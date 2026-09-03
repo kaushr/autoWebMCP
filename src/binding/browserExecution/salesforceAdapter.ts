@@ -1445,6 +1445,25 @@ export function createSalesforceResolverAdapter(
       }
     },
 
+    /**
+     * What Lightning listens for instead of the keys themselves.
+     *
+     * `lightning-input` consumes the key sequence and re-emits `commit`
+     * when a value is committed with Enter; its consumers bind to that.
+     * A synthetic Enter is therefore delivered flawlessly and means
+     * nothing — a live list-view search took the term, took the key, and
+     * never searched.
+     *
+     * Dispatched on the control and composed, so it crosses the component
+     * boundary and reaches a consumer bound to the host — which is where
+     * such a listener lives.
+     */
+    keyCommitEvents(element: Element, key: string): string[] | undefined {
+      if (key !== "Enter") return undefined;
+      const host = element.closest("lightning-input, lightning-primitive-input-simple");
+      return host ? ["commit"] : undefined;
+    },
+
     assessValidation(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment {
       return assessSalesforceValidation(root, policy, pageState, verification);
     },

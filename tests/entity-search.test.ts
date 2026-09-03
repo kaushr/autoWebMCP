@@ -767,3 +767,40 @@ describe("a search input has an event of its own", () => {
     expect(fired).toBe(0);
   });
 });
+
+describe("a component library may listen for its own signal, not for keys", () => {
+  it("fires Lightning's commit event, which reaches a listener on the host", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    // `lightning-input` consumes the key sequence and re-emits `commit`.
+    // A synthetic Enter is otherwise delivered flawlessly and means
+    // nothing, which is what left a live list-view search unperformed.
+    document.body.innerHTML = `
+      <lightning-input id="host"><label for="q">Search this list...</label><input id="q" type="search" /></lightning-input>
+    `;
+    let committed = 0;
+    document.querySelector("#host")!.addEventListener("commit", () => (committed += 1));
+
+    const result = await pressKey(
+      document.body,
+      { role: "field", label: "Search this list..." },
+      "Enter",
+      adapter(),
+      { timeoutMs: 40, quietMs: 10 }
+    );
+
+    expect(committed).toBe(1);
+    expect(result.detail).toMatch(/commit/);
+  });
+
+  it("does not fire it for a control that is not a Lightning input", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Plain</label><input id="q" />`;
+    let committed = 0;
+    document.querySelector("#q")!.addEventListener("commit", () => (committed += 1));
+    await pressKey(document.body, { role: "field", label: "Plain" }, "Enter", adapter(), {
+      timeoutMs: 40,
+      quietMs: 10
+    });
+    expect(committed).toBe(0);
+  });
+});

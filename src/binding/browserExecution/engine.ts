@@ -133,6 +133,17 @@ export interface PlatformResolverAdapter {
    * rather than proceed when this cannot be answered. Nothing here reads a
    * NAME: two records may share one, and a name is not an identity.
    */
+  /**
+   * Events this platform's own components expect when a key commits a
+   * value, beyond the key sequence itself.
+   *
+   * A component library can consume keys and re-emit its own signal:
+   * Lightning's input fires `commit` on Enter and its consumers listen for
+   * that, never for the keys. A synthetic key sequence is then delivered
+   * perfectly and means nothing, which is exactly what a live search did —
+   * the term typed, the key received, and no search performed.
+   */
+  keyCommitEvents?(element: Element, key: string): string[] | undefined;
   observeEntityIdentity?(root: ParentNode, policy: ResolutionPolicy): EntityIdentity | undefined;
   /**
    * Brings the requested entity on screen, and proves it arrived.
@@ -752,10 +763,17 @@ export async function pressKey(
     element.dispatchEvent(new Event("search", { bubbles: true, composed: true }));
   }
 
+  // Whatever else this platform's components listen for instead of keys.
+  const platformEvents = adapter?.keyCommitEvents?.(element, key) ?? [];
+  for (const name of platformEvents) {
+    element.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true }));
+  }
+
   await waitForApplicationReaction({ root, ...reaction });
+  const also = [...(searchInput && key === "Enter" ? ["search"] : []), ...platformEvents];
   return {
     ok: true,
-    detail: `Pressed ${key} on "${target.label}"${searchInput && key === "Enter" ? ", and fired its search event" : ""}.`
+    detail: `Pressed ${key} on "${target.label}"${also.length ? `, and fired ${also.join(", ")}` : ""}.`
   };
 }
 
