@@ -77,6 +77,31 @@ export interface HarnessField {
 }
 
 /**
+ * The tool's input schema, whatever shape the browser hands it back in.
+ *
+ * Chrome's WebMCP prototype returns `inputSchema` as a JSON STRING from
+ * `getTools()`, while `registerTool` takes an object. Assuming the object
+ * form produced a form with no fields at all — and an invocation with no
+ * arguments, which the page reported as a tool that answered badly rather
+ * than as a caller that asked badly.
+ *
+ * Both shapes are accepted because both are real: the object is what this
+ * page registered, and the string is what the browser gives back.
+ */
+export function normalizeInputSchema(schema: unknown): JsonObjectSchema | undefined {
+  if (typeof schema === "string") {
+    try {
+      return normalizeInputSchema(JSON.parse(schema));
+    } catch {
+      return undefined;
+    }
+  }
+  if (!schema || typeof schema !== "object") return undefined;
+  const candidate = schema as JsonObjectSchema;
+  return candidate.type === "object" && candidate.properties ? candidate : undefined;
+}
+
+/**
  * Builds the judge's form from the tool's own input schema.
  *
  * Nothing here knows what a Stage or a Close Date is, and it must stay that
@@ -86,11 +111,12 @@ export interface HarnessField {
  * handle becomes `unsupported` and is shown as raw schema — an honest
  * "I don't render this" beats a control that silently sends the wrong type.
  */
-export function harnessFieldsFor(schema: JsonObjectSchema | undefined): HarnessField[] {
-  if (!schema || schema.type !== "object" || !schema.properties) return [];
-  const required = new Set(schema.required ?? []);
+export function harnessFieldsFor(schema: JsonObjectSchema | string | undefined): HarnessField[] {
+  const parsed = normalizeInputSchema(schema);
+  if (!parsed) return [];
+  const required = new Set(parsed.required ?? []);
 
-  return Object.entries(schema.properties).map(([name, property]) => {
+  return Object.entries(parsed.properties).map(([name, property]) => {
     const base = {
       name,
       description: property?.description ?? "",
@@ -218,10 +244,27 @@ export interface HarnessInvocationOutcome {
 }
 
 export function readToolResult(result: WebMcpToolResult, route: InvocationRoute): HarnessInvocationOutcome {
-  const text = (result?.content ?? [])
-    .filter((block) => block?.type === "text")
-    .map((block) => block.text)
-    .join("\n");
+  // Deliberately permissive about the envelope and strict about the
+  // payload. The envelope is the browser's, and a `content` entry missing
+  // its `type` is not a reason to discard text that is plainly there;
+  // whether that text is an execution result is a separate question,
+  // answered below.
+  const content = result?.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((block) => (typeof block?.text === "string" ? block.text : ""))
+            .filter(Boolean)
+            .join("\n")
+        : typeof result === "string"
+          ? result
+          : "";
+
+  if (!text) {
+    return { route, text: "", unparsed: "The tool returned no readable content." };
+  }
 
   try {
     const parsed = JSON.parse(text) as ExecutionResult;

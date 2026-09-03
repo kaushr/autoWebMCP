@@ -3,6 +3,7 @@ import {
   collectInvocationArguments,
   describeWebMcpSurface,
   harnessFieldsFor,
+  normalizeInputSchema,
   readToolResult,
   verdictFor
 } from "../src/webmcp/harness";
@@ -226,5 +227,65 @@ describe("results are read faithfully", () => {
     expect(verdictFor({ verified: "unreadable" })).toBe("unverifiable");
     expect(verdictFor({ verified: "no" })).toBe("mismatch");
     expect(verdictFor({ verified: "yes" })).toBe("verified");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The shape the browser actually returns.
+ *
+ * A live run found this: Chrome's WebMCP prototype hands `inputSchema`
+ * back from `getTools()` as a JSON STRING, while `registerTool` takes an
+ * object. Assuming the object form produced a form with NO fields, so the
+ * judge invoked with no arguments — and the page blamed the tool's
+ * response rather than the caller's request.
+ * ------------------------------------------------------------------ */
+
+describe("the schema is read in whatever shape the browser returns it", () => {
+  const schema = {
+    type: "object" as const,
+    properties: {
+      opportunity_id: { type: "string" as const, description: "Which Opportunity" },
+      stage: { type: "string" as const, description: "The stage", enum: ["Engage", "Confirm"] }
+    },
+    required: ["opportunity_id"],
+    additionalProperties: false as const
+  };
+
+  it("builds the same form from an object and from its JSON string", () => {
+    const fromObject = harnessFieldsFor(schema);
+    const fromString = harnessFieldsFor(JSON.stringify(schema));
+    expect(fromString).toEqual(fromObject);
+    expect(fromString.map((field) => [field.name, field.control, field.required])).toEqual([
+      ["opportunity_id", "text", true],
+      ["stage", "enum", false]
+    ]);
+  });
+
+  it("returns nothing for a string that is not a schema, rather than throwing", () => {
+    expect(harnessFieldsFor("not json at all")).toEqual([]);
+    expect(harnessFieldsFor(JSON.stringify({ notASchema: true }))).toEqual([]);
+    expect(normalizeInputSchema(undefined)).toBeUndefined();
+  });
+
+  it("normalizes a string schema back to the object it encodes", () => {
+    expect(normalizeInputSchema(JSON.stringify(schema))).toEqual(schema);
+    expect(normalizeInputSchema(schema)).toEqual(schema);
+  });
+});
+
+describe("an unreadable tool response is reported as such", () => {
+  it("distinguishes empty content from unparseable content", () => {
+    // "returned nothing" and "returned something that is not a result" are
+    // different failures and need different debugging.
+    expect(readToolResult({ content: [] }, "webmcp").unparsed).toMatch(/no readable content/i);
+    expect(readToolResult({ content: [{ type: "text", text: "nope" }] }, "webmcp").unparsed).toMatch(/not JSON/i);
+  });
+
+  it("reads text from a content entry that omits its type", () => {
+    // The envelope is the browser's; discarding text that is plainly there
+    // because a field is missing would report a caller error as a tool error.
+    const payload = JSON.stringify({ status: "blocked", checks: [], evidence: [], warnings: [], executedAt: "t" });
+    const outcome = readToolResult({ content: [{ text: payload } as never] }, "webmcp");
+    expect(outcome.execution?.status).toBe("blocked");
   });
 });

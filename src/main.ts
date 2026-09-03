@@ -46,6 +46,7 @@ import {
   collectInvocationArguments,
   describeWebMcpSurface,
   harnessFieldsFor,
+  normalizeInputSchema,
   readToolResult,
   verdictFor,
   type HarnessField,
@@ -2104,9 +2105,12 @@ function renderWebMcpHarness(): string {
           : `<li>Nothing registered yet.</li>`
       }</ul>`;
 
-  const schema = tool?.inputSchema
+  // Normalized before display too: showing the browser's raw string would
+  // render an escaped blob, which is what first revealed the shape.
+  const normalizedSchema = normalizeInputSchema(tool?.inputSchema);
+  const schema = normalizedSchema
     ? `<details class="admin-raw" open><summary>Agent-facing input schema</summary>
-        <pre class="admin-json">${escapeHtml(JSON.stringify(tool.inputSchema, null, 2))}</pre>
+        <pre class="admin-json">${escapeHtml(JSON.stringify(normalizedSchema, null, 2))}</pre>
       </details>`
     : "";
 
