@@ -4,6 +4,7 @@ import type { TenantIntelligenceSource } from "../../applicationIntelligence/mod
 import type { ApplicationIntelligence } from "../fieldMapping";
 import { createSalesforceResolverAdapter } from "./salesforceAdapter";
 import { DEFAULT_RESOLUTION_POLICY, type ResolutionPolicy } from "./resolutionPolicy";
+import type { EntityIdentityPolicy } from "./entityIdentity";
 import { DEFAULT_PAGE_STATE_POLICY, type PageStatePolicy } from "./pageState";
 import { DEFAULT_VERIFICATION_POLICY, type VerificationPolicy } from "./verificationPolicy";
 import type { PlatformResolverAdapter } from "./engine";
@@ -24,7 +25,11 @@ import type { PlatformResolverAdapter } from "./engine";
 
 const ADAPTERS: Record<
   string,
-  (pageState: PageStatePolicy, verification: VerificationPolicy) => PlatformResolverAdapter
+  (
+    pageState: PageStatePolicy,
+    verification: VerificationPolicy,
+    entityIdentity: EntityIdentityPolicy | undefined
+  ) => PlatformResolverAdapter
 > = {
   "salesforce-lightning": createSalesforceResolverAdapter
 };
@@ -92,6 +97,28 @@ export function pageStatePolicyForPlatform(
       : [...DEFAULT_PAGE_STATE_POLICY.dismissActionLabels];
 
   return { patterns, commitActionLabels, dismissActionLabels };
+}
+
+/**
+ * How this platform's entity identity is read, compiled from its pack.
+ *
+ * `undefined` when a platform declares nothing: identity is then
+ * unobservable, and a binding that requires one refuses rather than
+ * guessing. There is deliberately no generic fallback — inventing a
+ * route shape for an unknown platform is exactly the kind of guess that
+ * would put a write on the wrong record.
+ */
+export function entityIdentityPolicyForPlatform(
+  platform: string,
+  intelligence: PlatformIntelligenceProvider = defaultPlatformIntelligenceProvider
+): EntityIdentityPolicy | undefined {
+  const declared = intelligence.getEntityIdentity(platform);
+  if (!declared) return undefined;
+  return {
+    routePattern: declared.entityIdentity.routePattern,
+    trustworthyForMutation: declared.entityIdentity.trustworthyForMutation,
+    routeTemplate: declared.entityIdentity.routeTemplate
+  };
 }
 
 /**
@@ -167,7 +194,8 @@ export function resolverAdapterForPlatform(
   if (!factory) return undefined;
   const adapter = factory(
     pageStatePolicyForPlatform(platform, intelligence),
-    verificationPolicyForPlatform(platform, intelligence)
+    verificationPolicyForPlatform(platform, intelligence),
+    entityIdentityPolicyForPlatform(platform, intelligence)
   );
   return { ...adapter, resolutionPolicy: resolutionPolicyForPlatform(platform, intelligence) };
 }

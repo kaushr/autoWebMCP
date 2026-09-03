@@ -16,7 +16,14 @@ import type { BrowserBindingInput, BrowserExecutionBinding, SemanticTarget } fro
 import type { PageState } from "./pageState";
 import { inferDateRepresentation } from "./dateRepresentation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
-import type { ExecutionCheckResult, ExecutionOutcomeStatus, ExecutionResult, InputTransaction } from "./result";
+import type {
+  ExecutionCheckResult,
+  ExecutionOutcomeStatus,
+  ExecutionResult,
+  ExecutionTarget,
+  InputTransaction
+} from "./result";
+import { sameEntity } from "./entityIdentity";
 
 export type { ExecutionOutcomeStatus, ExecutionResult } from "./result";
 
@@ -44,6 +51,15 @@ export interface ExecuteOptions {
    * system cannot help.
    */
   confirmed: true;
+  /**
+   * Demand an explicit target identity even when the binding declares none.
+   *
+   * The published tool sets this; the Studio's manual test does not. That
+   * asymmetry is the whole point: a human testing a binding has chosen the
+   * record by opening it, while an agent has chosen nothing, and the
+   * agent-facing contract must not silently inherit "whatever is open".
+   */
+  requireTarget?: boolean;
   reaction?: { timeoutMs?: number; quietMs?: number };
   /** How long to keep retrying target resolution before giving up. Defaults to 8s; tests override it to stay fast. */
   resolveRetryMs?: number;
@@ -470,6 +486,115 @@ export function inspectValueDomains(options: InspectOptions): Promise<DomainInsp
   });
 }
 
+/**
+ * Establishes which entity this execution will act on, before anything is
+ * touched.
+ *
+ * Four outcomes, and only the first proceeds:
+ *
+ *   not required      the binding is not identity-gated and the caller is
+ *                     the Studio's own manual test, where a human chose the
+ *                     record by opening it.
+ *   verified          the caller named an entity and that entity is open.
+ *   mismatch          the caller named one and a DIFFERENT one is open.
+ *   unobservable      the platform cannot say what is open.
+ *
+ * Mismatch and unobservable both refuse. Navigation would be the better
+ * answer to a mismatch and is deliberately not attempted here: a full page
+ * load tears down the very content script running this function, so
+ * navigating mid-execution would abandon the run rather than continue it.
+ * Doing it properly means orchestrating from the service worker — navigate
+ * the tab, wait for load, re-inject, then execute — which is a larger
+ * change than this gate, and refusing without touching anything is the
+ * safe half of it.
+ */
+async function establishTarget(options: ExecuteOptions): Promise<{
+  state: ExecutionTarget;
+  check?: ExecutionCheckResult;
+  evidence: string[];
+  refuse?: string;
+}> {
+  const { root, binding, inputs, adapter } = options;
+  const declared = binding.context.target;
+  const requestedId = declared ? inputs[declared.inputName]?.trim() : undefined;
+
+  // No identity requirement and none supplied: the human-driven path, where
+  // the person operating the Studio chose the record by opening it.
+  if (!declared && !options.requireTarget) {
+    return {
+      state: {
+        status: "not-required",
+        detail: "This binding is not identity-gated; it acts on the record currently open."
+      },
+      evidence: []
+    };
+  }
+
+  if (!requestedId) {
+    const state: ExecutionTarget = {
+      status: "unobservable",
+      detail: `No target identity was supplied for "${declared?.inputName ?? "the entity"}".`
+    };
+    return {
+      state,
+      check: { name: "target_identity", status: "fail", detail: state.detail },
+      evidence: [],
+      refuse:
+        `Execution stopped before touching anything — ${state.detail} An autonomous invocation must say which ` +
+        "record it means; it is not enough to act on whichever one happens to be open."
+    };
+  }
+
+  const observed = adapter?.observeEntityIdentity?.(root, policyFor(adapter));
+  if (!observed) {
+    const state: ExecutionTarget = {
+      requestedId,
+      ...(declared?.entityType ? { entityType: declared.entityType } : {}),
+      status: "unobservable",
+      detail: "The application did not expose which record is currently open."
+    };
+    return {
+      state,
+      check: { name: "target_identity", status: "fail", detail: state.detail },
+      evidence: [],
+      refuse:
+        `Execution stopped before touching anything — ${state.detail} Without knowing what is open, no write can ` +
+        `be shown to have landed on ${requestedId}.`
+    };
+  }
+
+  if (!sameEntity(observed, { id: requestedId, ...(declared?.entityType ? { entityType: declared.entityType } : {}) })) {
+    const state: ExecutionTarget = {
+      requestedId,
+      beforeId: observed.id,
+      ...(observed.entityType ? { entityType: observed.entityType } : {}),
+      status: "mismatch",
+      detail: `Requested ${requestedId}, but ${observed.id} is open.`
+    };
+    return {
+      state,
+      check: { name: "target_identity", status: "fail", detail: state.detail },
+      evidence: [],
+      refuse:
+        `Execution stopped before touching anything — ${state.detail} Open the requested record first; AutoWebMCP ` +
+        "will not navigate during an execution, and will not write to a record that was not asked for."
+    };
+  }
+
+  const state: ExecutionTarget = {
+    requestedId,
+    beforeId: observed.id,
+    ...(observed.entityType ? { entityType: observed.entityType } : {}),
+    status: "verified",
+    detail: `The requested record ${requestedId} is the one open.`
+  };
+  return {
+    state,
+    check: { name: "target_identity", status: "pass", detail: state.detail },
+    evidence: [`Target identity confirmed before writing: ${observed.entityType ?? "entity"} ${observed.id}.`]
+  };
+}
+
 export async function executeConfirmed(options: ExecuteOptions): Promise<ExecutionResult> {
   if (options.confirmed !== true) {
     throw new Error("executeConfirmed refuses to run without an explicit confirmed: true.");
@@ -479,6 +604,33 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   const checks: ExecutionCheckResult[] = [];
   const evidence: string[] = [];
   const warnings: string[] = [];
+
+  /* --- A0: WHICH entity are we about to change? ------------------------- *
+   * Before the page state, before resolution, before anything is touched.
+   *
+   * Field verification cannot answer this question. Writing "Confirm" to
+   * the Stage of the wrong Opportunity passes every field check there is —
+   * the value was requested, written, saved and read back, all correctly,
+   * on a record nobody asked for. Identity is a separate dimension and has
+   * to be established separately.
+   *
+   * The gate is deliberately placed where a refusal costs nothing: no edit
+   * surface has been opened and no control has been touched, so refusing
+   * here leaves the application exactly as it was found.
+   */
+  const target = await establishTarget(options);
+  if (target.check) checks.push(target.check);
+  if (target.refuse) {
+    return {
+      status: "blocked",
+      checks,
+      evidence: [...evidence, ...target.evidence],
+      warnings: [target.refuse],
+      target: target.state,
+      executedAt: now()
+    };
+  }
+  evidence.push(...target.evidence);
 
   /* --- ensure the page is in the state the binding expects --------------- *
    * A read-only "record" page and an editable "edit" page are different DOM
@@ -745,5 +897,91 @@ export async function executeConfirmed(options: ExecuteOptions): Promise<Executi
   });
   checks.push(...verification);
 
-  return { status: deriveStatus(checks), transactions, checks, evidence, warnings, executedAt: now() };
+  /* --- F: is it STILL the record we verified before writing? ------------- *
+   * The second half of the identity invariant. A save that navigates, a
+   * Lightning route change, or a record swapped underneath mid-execution
+   * would all leave the field checks passing on a record nobody asked for.
+   *
+   *   requested == pre-write == post-save
+   *
+   * Anything less is not a verified write, however green the values look.
+   */
+  const finalTarget = confirmTargetAfterSave(target.state, root, adapter);
+  if (finalTarget.check) checks.push(finalTarget.check);
+  evidence.push(finalTarget.detail);
+
+  return {
+    status: deriveStatus(checks),
+    transactions,
+    checks,
+    evidence,
+    warnings: [...warnings, ...finalTarget.warnings],
+    target: finalTarget.state,
+    executedAt: now()
+  };
+}
+
+/**
+ * Re-reads the identity after the save and holds it against what was
+ * verified before the write.
+ *
+ * Returns a failing check rather than throwing, so the transactions and
+ * field checks are still reported: a run that wrote the right values to the
+ * wrong record is evidence a person needs to see in full, not an exception
+ * that hides what happened.
+ */
+function confirmTargetAfterSave(
+  before: ExecutionTarget,
+  root: ParentNode & Node,
+  adapter: PlatformResolverAdapter | undefined
+): { state: ExecutionTarget; check?: ExecutionCheckResult; detail: string; warnings: string[] } {
+  if (before.status === "not-required") {
+    return { state: before, detail: "No target identity was required for this execution.", warnings: [] };
+  }
+
+  const observed = adapter?.observeEntityIdentity?.(root, policyFor(adapter));
+  if (!observed) {
+    const state: ExecutionTarget = {
+      ...before,
+      status: "unobservable",
+      detail: "The record open after saving could not be identified, so the write cannot be tied to a record."
+    };
+    return {
+      state,
+      check: { name: "target_identity", status: "fail", detail: state.detail },
+      detail: state.detail,
+      warnings: [state.detail]
+    };
+  }
+
+  const expected = before.requestedId ?? before.beforeId;
+  if (expected && observed.id !== expected) {
+    const state: ExecutionTarget = {
+      ...before,
+      afterSaveId: observed.id,
+      status: "mismatch",
+      detail:
+        `The record changed during execution: verified ${expected} before writing, but ${observed.id} is open ` +
+        "after saving. The values below were not necessarily persisted to the requested record."
+    };
+    return {
+      state,
+      check: { name: "target_identity", status: "fail", detail: state.detail },
+      detail: state.detail,
+      warnings: [state.detail]
+    };
+  }
+
+  const state: ExecutionTarget = {
+    ...before,
+    afterSaveId: observed.id,
+    status: "verified",
+    detail: `The same record (${observed.id}) was open before the write and after the save.`
+  };
+  return {
+    state,
+    check: { name: "target_identity", status: "pass", detail: state.detail },
+    detail: state.detail,
+    warnings: []
+  };
 }

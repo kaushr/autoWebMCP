@@ -23,6 +23,7 @@ export type KnowledgeCategory =
   | "component-framework-behavior"
   | "resolution-policy"
   | "page-state-semantics"
+  | "entity-identity"
   | "verification-semantics"
   | "application-schema"
   | "binding-knowledge"
@@ -208,6 +209,40 @@ export interface ReferenceEntry extends KnowledgeEntryBase {
  * observations the generic engine already made, never the other way
  * around.
  */
+/**
+ * How a platform exposes the identity of the entity currently on screen.
+ *
+ * Platform knowledge, deliberately, not application knowledge: "a Lightning
+ * record page carries its object and record id in the route" is true of
+ * every object Salesforce ships, while "an Opportunity's identity parameter
+ * is called opportunity_id" belongs to the application layer. Keeping the
+ * split means the generic engine can ask "what entity is open?" without
+ * knowing what a Salesforce record id looks like.
+ *
+ * `routePattern` is a regular expression over the page path with two named
+ * groups, `entity` and `id`. A pattern rather than code so that a platform's
+ * routing is declared, versioned and provenanced like every other fact here
+ * — and so a second platform needs a pack entry, not an engine change.
+ */
+export interface EntityIdentityEntry extends KnowledgeEntryBase {
+  category: "entity-identity";
+  entityIdentity: {
+    /** Must contain named groups `entity` and `id`. */
+    routePattern: string;
+    /**
+     * Whether an identity read from the route is stable enough to gate a
+     * write on. False would mean "observable, but do not trust it alone".
+     */
+    trustworthyForMutation: boolean;
+    /**
+     * How a caller would navigate to one, as a path template using `{entity}`
+     * and `{id}`. Declared even though V0.1 does not navigate, because the
+     * refusal message can then say what navigating WOULD look like.
+     */
+    routeTemplate: string;
+  };
+}
+
 export interface PageStateSemanticsEntry extends KnowledgeEntryBase {
   category: "page-state-semantics";
   pageState: {
@@ -294,6 +329,7 @@ export type KnowledgeEntry =
   | ComponentFrameworkBehaviorEntry
   | ResolutionPolicyEntry
   | PageStateSemanticsEntry
+  | EntityIdentityEntry
   | VerificationSemanticsEntry
   | ApplicationSchemaEntry
   | BindingKnowledgeEntry

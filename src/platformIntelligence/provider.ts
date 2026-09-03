@@ -9,6 +9,7 @@ import type {
   KnowledgeEntry,
   PlatformIntelligencePack,
   PlatformIntelligenceTrace,
+  EntityIdentityEntry,
   PageStateSemanticsEntry,
   PolicyEntry,
   VerificationSemanticsEntry,
@@ -39,6 +40,12 @@ export interface SupportedInterfaceQuery {
  * declare more than one independently-provenanced way to recognize
  * record-edit (see `PageStateSemanticsEntry`).
  */
+export interface EntityIdentityIntelligence {
+  platform: string;
+  entityIdentity: EntityIdentityEntry["entityIdentity"];
+  provenance: PlatformIntelligenceTrace;
+}
+
 export interface PageStateIntelligence {
   platform: string;
   entries: PageStateSemanticsEntry[];
@@ -89,6 +96,8 @@ export interface PlatformIntelligenceProvider {
    * generic default.
    */
   getPageStateSemantics(platformId: string): PageStateIntelligence | undefined;
+  /** How this platform exposes the identity of the entity currently on screen. */
+  getEntityIdentity(platformId: string): EntityIdentityIntelligence | undefined;
   /** How a committed save is verified — validation vs the platform's own success notification. */
   getVerificationSemantics(platformId: string): VerificationIntelligence | undefined;
   /**
@@ -167,6 +176,16 @@ export function createPlatformIntelligenceProvider(
       );
       if (entries.length === 0) return undefined;
       return { platform: platformId, entries, provenance: traceFor(pack, entries) };
+    },
+
+    getEntityIdentity(platformId) {
+      const pack = byPlatform.get(platformId);
+      if (!pack) return undefined;
+      const entry = active(pack.knowledge).find(
+        (candidate): candidate is EntityIdentityEntry => candidate.category === "entity-identity"
+      );
+      if (!entry) return undefined;
+      return { platform: platformId, entityIdentity: entry.entityIdentity, provenance: traceFor(pack, [entry]) };
     },
 
     getVerificationSemantics(platformId) {

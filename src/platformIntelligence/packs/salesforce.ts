@@ -175,6 +175,26 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       tags: ["lightning", "verification", "toast", "validation", "execution"]
     },
     {
+      id: "sf-record-route-identity",
+      category: "entity-identity",
+      strength: "validated-platform-rule",
+      summary:
+        "A Lightning record page carries the object and the record id in its own route: /lightning/r/<Object>/<Id>/<view|edit>. " +
+        "The id is the platform's stable identity for that record and is what a mutation must be gated on — a record's NAME is " +
+        "not an identity, because two Opportunities may share one.",
+      entityIdentity: {
+        // Named groups, because the engine reads them by name rather than
+        // by position: a platform whose route puts the id first needs a
+        // different pattern here, not different code there.
+        routePattern: "/lightning/r/(?<entity>[A-Za-z0-9_]+)/(?<id>[A-Za-z0-9]{15,18})(?:/|$)",
+        trustworthyForMutation: true,
+        routeTemplate: "/lightning/r/{entity}/{id}/view"
+      },
+      sourceReferenceIds: ["awmcp-salesforce-recording", "awmcp-platform-intelligence"],
+      lifecycle: { status: "active", since: "0.7.0" },
+      tags: ["lightning", "identity", "routing", "execution", "safety"]
+    },
+    {
       id: "sf-standard-application-model",
       category: "application-schema",
       strength: "documented-fact",

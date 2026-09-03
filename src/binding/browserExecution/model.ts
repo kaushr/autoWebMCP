@@ -109,11 +109,41 @@ export interface BrowserBindingInput {
   required?: boolean;
 }
 
+/**
+ * The entity a mutation is required to act on.
+ *
+ * The gap this closes: a binding knew the object TYPE it was taught on
+ * ("Opportunity") and nothing about WHICH record. Executing therefore meant
+ * "change whatever Opportunity is currently open", which is safe only
+ * because a human deliberately opened it. An agent invoking the published
+ * tool has made no such choice, and post-save field verification cannot
+ * detect the difference: the right values on the wrong record pass every
+ * field check there is.
+ *
+ * `inputName` is the capability input carrying the identity. It is NOT a
+ * demonstrated form field — nobody typed a record id into the edit form —
+ * which is why it is declared here, by the binding, rather than discovered
+ * from the trace.
+ */
+export interface BrowserBindingTarget {
+  /** The capability input carrying the identity, e.g. `opportunity_id`. */
+  inputName: string;
+  /** The entity type this binding mutates, e.g. `Opportunity`. */
+  entityType: string;
+}
+
 export type PageMode = "record-view" | "edit-form" | "edit-or-record";
 
 export interface BrowserBindingContext {
   /** Object/record type the capability acts on, when the evidence named one. */
   recordType?: string;
+  /**
+   * Which entity this mutation must act on, when the platform can identify
+   * one. Absent means the binding is not identity-gated — legitimate for a
+   * platform with no identity scheme, and the reason `requireTarget` on the
+   * execution call exists to demand one anyway for autonomous invocation.
+   */
+  target?: BrowserBindingTarget;
   /**
    * What the runtime should ensure before resolving input targets.
    * `edit-or-record` means: enter edit mode first if the page is not already

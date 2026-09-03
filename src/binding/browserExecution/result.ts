@@ -7,6 +7,7 @@
 
 export interface ExecutionCheckResult {
   name:
+    | "target_identity"
     | "editable_state"
     | "target_resolved"
     | "value_set"
@@ -65,4 +66,34 @@ export interface ExecutionResult {
   evidence: string[];
   warnings: string[];
   executedAt: string;
+  /**
+   * Which entity this execution actually acted on, observed rather than
+   * assumed — and observed twice, before the write and after the save.
+   *
+   * Kept beside the per-input transactions rather than inside them because
+   * it is one fact about the whole execution, and because the invariant
+   * that matters spans them: correct values on the wrong record must never
+   * read as success.
+   */
+  target?: ExecutionTarget;
+}
+
+/**
+ * The identity dimension of an execution, independent of field values.
+ *
+ * A run can have a verified target and an incomparable date, or verified
+ * values on an unverified target. Collapsing the two into one boolean is
+ * exactly how "the right values on the wrong record" would have passed.
+ */
+export interface ExecutionTarget {
+  /** What the caller asked for, when it supplied an identity. */
+  requestedId?: string;
+  /** What was open before anything was written. */
+  beforeId?: string;
+  /** What was open once the save had settled. */
+  afterSaveId?: string;
+  entityType?: string;
+  /** `verified` requires requested, pre-write and post-save to be one entity. */
+  status: "verified" | "mismatch" | "unobservable" | "not-required";
+  detail: string;
 }

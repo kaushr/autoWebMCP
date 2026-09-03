@@ -66,6 +66,21 @@ export type { ExecutionCheckResult };
  * engine, it never replaces it, and the generic layer stays usable for any
  * application with no adapter of its own.
  */
+/**
+ * The entity a page is currently showing, as the PLATFORM identifies it.
+ *
+ * Deliberately opaque to everything generic: `id` is a string the platform
+ * defines and the engine only ever compares for equality. A Salesforce
+ * record id, a Jira issue key, and a customer number are all just strings
+ * here, and nothing in this file may parse, validate, or construct one.
+ */
+export interface EntityIdentity {
+  /** The entity/object type, when the platform exposes one, e.g. `Opportunity`. */
+  entityType?: string;
+  /** The platform's stable identity for this entity. Compared, never interpreted. */
+  id: string;
+}
+
 export interface PlatformResolverAdapter {
   id: string;
   /**
@@ -110,6 +125,15 @@ export interface PlatformResolverAdapter {
    * to the save attempt's edit surface. `undefined` declines to the
    * generic visible-alert check.
    */
+  /**
+   * Which entity the page is currently showing.
+   *
+   * `undefined` means the platform cannot tell — which is a refusal to
+   * guess, not an absence of one: a mutation gated on identity must block
+   * rather than proceed when this cannot be answered. Nothing here reads a
+   * NAME: two records may share one, and a name is not an identity.
+   */
+  observeEntityIdentity?(root: ParentNode, policy: ResolutionPolicy): EntityIdentity | undefined;
   assessValidation?(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment | undefined;
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /**

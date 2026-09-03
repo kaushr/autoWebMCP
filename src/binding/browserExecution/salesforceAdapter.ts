@@ -5,6 +5,7 @@ import {
   isVisible,
   normalizeLabel,
   waitForApplicationReaction,
+  type EntityIdentity,
   type FieldWriteOutcome,
   type OptionReadOutcome,
   type PlatformResolverAdapter,
@@ -24,6 +25,7 @@ import {
 } from "./composedTree";
 import { observeSurfaces, type SurfaceObservation } from "./surfaceObservation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
+import { identityFromPath, type EntityIdentityPolicy } from "./entityIdentity";
 import { canTypeDisplayDate, formatDisplayDate } from "./dateRepresentation";
 import {
   DEFAULT_PAGE_STATE_POLICY,
@@ -1332,10 +1334,30 @@ function resolveNativeControl(
 
 export function createSalesforceResolverAdapter(
   pageState: PageStatePolicy = DEFAULT_PAGE_STATE_POLICY,
-  verification: VerificationPolicy = DEFAULT_VERIFICATION_POLICY
+  verification: VerificationPolicy = DEFAULT_VERIFICATION_POLICY,
+  entityIdentity?: EntityIdentityPolicy
 ): PlatformResolverAdapter {
   return {
     id: "salesforce-lightning",
+
+    /**
+     * Which record this page is showing, read from the route.
+     *
+     * The route shape itself is pack knowledge, not written here: this
+     * method only supplies the path and hands the declared pattern the
+     * work. A pack that declares nothing makes identity unobservable,
+     * which makes a gated mutation refuse — the correct outcome, since
+     * the alternative is writing to whatever happens to be open.
+     *
+     * Never reads the record's NAME. Two Opportunities may share one, and
+     * that is exactly the confusion this whole mechanism exists to stop.
+     */
+    observeEntityIdentity(root: ParentNode): EntityIdentity | undefined {
+      if (!entityIdentity) return undefined;
+      const document = root instanceof Document ? root : (root as Element).ownerDocument;
+      const path = document?.location?.pathname;
+      return path ? identityFromPath(path, entityIdentity) : undefined;
+    },
 
     ensureEditable(root: ParentNode, policy: ResolutionPolicy, timeoutMs?: number): Promise<EditableTransition> {
       return ensureSalesforceEditable(root, policy, pageState, timeoutMs);
