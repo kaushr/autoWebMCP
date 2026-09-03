@@ -1217,9 +1217,20 @@ function renderEpistemicNeed(need: EpistemicNeed, needIndex: number, source: "gr
   // be answered at all. Grounding now asks these before confirmation, which
   // makes more than one of them entirely ordinary.
   const answerId = `clarification-answer-${source}-${needIndex}`;
+  // The answer that was missing entirely. A global search box is not a
+  // field on any record, and until now the only way past this question was
+  // to name an API field that does not exist — a false answer, given
+  // because it was the only one the form accepted.
+  const notAField = need.knownEvidence.inputName
+    ? `<button type="button" class="secondary not-a-record-field"
+         data-input-name="${escapeHtml(need.knownEvidence.inputName)}">
+         This is not a record field — it searches or navigates
+       </button>`
+    : "";
   const answerBox =
     need.blocking
       ? `<div class="need-answer">
+          ${notAField}
           <label>${suggestions ? "Or another field API name" : "Field API name"}
             <input id="${answerId}" class="clarification-answer" value="${escapeHtml(clarificationDraft[answerId] ?? "")}"
               placeholder="e.g. Implementation_Region__c"
@@ -2299,6 +2310,22 @@ function bindHarnessEvents(): void {
     // the focus out of the control mid-entry.
     control.addEventListener("change", commit);
     control.addEventListener("input", commit);
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button.not-a-record-field")) {
+    button.addEventListener("click", () => {
+      const name = button.dataset.inputName;
+      if (!candidate || !name) return;
+      // Reclassified, not answered: the input keeps its name and stops
+      // being something grounding looks for a record field behind.
+      candidate = {
+        ...candidate,
+        inputs: candidate.inputs.map((input) => (input.name === name ? { ...input, role: "query" as const } : input))
+      };
+      runSemanticGrounding();
+      semanticizerStatus = `"${name}" is now treated as a search term rather than a field on the record.`;
+      render();
+    });
   }
 
   document.querySelector<HTMLSelectElement>("#harness-tool")?.addEventListener("change", (event) => {

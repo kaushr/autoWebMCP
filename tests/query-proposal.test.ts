@@ -192,3 +192,56 @@ describe("what it refuses to propose, and why", () => {
     expect(proposal.warnings.join(" ")).toMatch(/does not declare how it identifies entities/i);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * The answer that was missing.
+ *
+ * A live attempt to teach a search was asked "What is the API name for
+ * the field labelled 'Search...' on Opportunity?" — a question with no
+ * true answer, since a global search box is not a field on any record.
+ * The only way past it was to name a field that does not exist.
+ * ------------------------------------------------------------------ */
+
+describe("a control that is not a record field can say so", () => {
+  const searchCapability = (role?: "query"): SemanticCapability => ({
+    id: "search_sales_records",
+    name: "Search sales records",
+    description: "Search and open a record.",
+    inputs: [{ name: "search", description: "The term", type: "string", required: true, ...(role ? { role } : {}) }],
+    outputs: [],
+    provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true, sourceApplication: SALESFORCE },
+    safety: { readOnly: true, requiresConfirmation: false }
+  });
+
+  it("asks for an API name while the input reads as a record field", async () => {
+    const { groundCapability } = await import("../src/training/semanticGrounding");
+    const { applicationIntelligenceForPlatform } = await import("../src/binding/browserExecution/adapters");
+    const { emptyTenantIntelligence } = await import("../src/applicationIntelligence/tenant");
+    const intelligence = applicationIntelligenceForPlatform(PLATFORM, emptyTenantIntelligence());
+
+    const grounded = groundCapability(searchCapability(), searchTrace(), intelligence);
+    // The live dead end: a question whose only permitted answer is false.
+    expect(grounded.needs.some((need) => need.kind === "field-api-name")).toBe(true);
+  });
+
+  it("stops asking once the input is classified as a query control", async () => {
+    const { groundCapability } = await import("../src/training/semanticGrounding");
+    const { applicationIntelligenceForPlatform } = await import("../src/binding/browserExecution/adapters");
+    const { emptyTenantIntelligence } = await import("../src/applicationIntelligence/tenant");
+    const intelligence = applicationIntelligenceForPlatform(PLATFORM, emptyTenantIntelligence());
+
+    const grounded = groundCapability(searchCapability("query"), searchTrace(), intelligence);
+    expect(grounded.needs).toEqual([]);
+    // And it is not reported as a field that failed to ground, because it
+    // is not a field.
+    expect(grounded.unresolved).not.toContain("search");
+    expect(grounded.noncanonical).not.toContain("search");
+    // The name is kept; classifying is not answering.
+    expect(grounded.capability.inputs[0]).toMatchObject({ name: "search", role: "query" });
+  });
+
+  it("carries the classified input into the query binding", () => {
+    const binding = proposeQueryBinding(searchCapability("query"), searchTrace(), IDENTITY).binding!;
+    expect(binding.query.inputName).toBe("search");
+  });
+});

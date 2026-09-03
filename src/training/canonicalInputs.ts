@@ -97,6 +97,10 @@ export function canonicalizeCapabilityInputs(
   const taken = new Set(capability.inputs.map((input) => input.name));
 
   const inputs = capability.inputs.map((input) => {
+    // Only demonstrated business fields have a vendor name to move onto.
+    // A targeting parameter or a search term is not a field on the record,
+    // so it is neither renamed nor reported as failing to ground.
+    if ((input.role ?? "business") !== "business") return input;
     const field = mapping.fields[input.name];
     if (!field) {
       tenantDerived.push(input.name);
