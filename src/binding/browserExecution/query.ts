@@ -119,15 +119,21 @@ export interface ExecuteQueryOptions {
 const RESULT_SELECTOR = "a[href]";
 
 /**
- * Structure that marks a link as the SUBJECT of its row or card.
+ * Structure that marks a link as the SUBJECT of its row, card or list.
  *
  * Standard semantics, not a platform quirk: a row header identifies its
- * row, and a heading titles its card. A live Salesforce results page put
- * the matched record's link in `th.slds-cell-edit` and `h2.recordTitle`,
- * while the account and owner of that same record sat in `td[gridcell]`
- * and card list items — fields OF the result, not results.
+ * row, a heading titles its card, and an option IS the thing it offers to
+ * select. A live Salesforce results page put the matched record's link in
+ * `th.slds-cell-edit` and `h2.recordTitle`, while the account and owner of
+ * that same record sat in `td[gridcell]` and card list items — fields OF
+ * the result, not results.
+ *
+ * Options matter because an application need not navigate to answer. The
+ * same search that would not submit synthetically showed its results in a
+ * type-ahead listbox, which is the answer arriving without a page change.
  */
-const SUBJECT_SELECTOR = 'th, [role="rowheader"], h1, h2, h3, h4, h5, h6, [role="heading"]';
+const SUBJECT_SELECTOR =
+  'th, [role="rowheader"], h1, h2, h3, h4, h5, h6, [role="heading"], [role="option"], [role="treeitem"]';
 
 /** Whether a link is the thing its row or card is about. */
 function isSubjectLink(link: Element): boolean {

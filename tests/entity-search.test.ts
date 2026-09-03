@@ -530,6 +530,26 @@ describe("searching twice for the same thing answers twice", () => {
   });
 });
 
+describe("an application can answer without navigating", () => {
+  it("reads results offered in a type-ahead listbox", async () => {
+    // A live Salesforce search would not submit synthetically, and did not
+    // need to: typing surfaced its matches in a listbox. An option IS the
+    // thing it offers to select, exactly as a row header identifies its
+    // row.
+    document.body.innerHTML = `
+      <label for="q">Search</label><input id="q" />
+      <ul role="listbox">
+        <li role="option"><a href="/lightning/r/${ACME_A}/view">PS Project Test - updated</a></li>
+        <li role="option"><a href="/lightning/r/${ACCOUNT}/view">A &amp; H Steel Ltd.</a></li>
+      </ul>
+      <h3><a href="/lightning/r/${ACME_B}/view">Something else on the page</a></h3>
+    `;
+    const candidates = candidatesOnPage(document.body, undefined, IDENTITY, adapter());
+    expect(candidates.map((c) => c.name)).toContain("PS Project Test - updated");
+    expect(candidates.map((c) => c.entityType)).toContain("Account");
+  });
+});
+
 /* ============ the handoff into a mutation ============ */
 
 describe("what search returns is what update requires", () => {
