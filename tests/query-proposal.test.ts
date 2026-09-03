@@ -245,3 +245,61 @@ describe("a control that is not a record field can say so", () => {
     expect(binding.query.inputName).toBe("search");
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * A search is publishable on its own terms.
+ *
+ * It has nothing to commit and no record to verify, so it can never
+ * satisfy a mutation route's proof. Refusing to publish it on that basis
+ * would be demanding evidence of a change it does not perform.
+ * ------------------------------------------------------------------ */
+
+describe("an accepted search unblocks publication by itself", () => {
+  const confirmed = (): SemanticCapability => ({
+    id: "search_opportunities",
+    name: "Search opportunities",
+    description: "Find opportunities by name.",
+    inputs: [{ name: "name", description: "The term", type: "string", required: true, role: "query" }],
+    outputs: [],
+    provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true, sourceApplication: SALESFORCE },
+    safety: { readOnly: true, requiresConfirmation: false }
+  });
+
+  it("stays blocked while nothing has been accepted", async () => {
+    const { deriveStudioLifecycle } = await import("../src/training/studioLifecycle");
+    const view = deriveStudioLifecycle({
+      capability: confirmed(),
+      advertisedBound: false,
+      bindingCandidate: undefined,
+      validation: undefined,
+      published: false
+    });
+    expect(view.publication.canPublish).toBe(false);
+  });
+
+  it("becomes publishable once the search is accepted", async () => {
+    const { deriveStudioLifecycle } = await import("../src/training/studioLifecycle");
+    const view = deriveStudioLifecycle({
+      capability: confirmed(),
+      advertisedBound: false,
+      bindingCandidate: undefined,
+      validation: undefined,
+      queryAccepted: true,
+      published: false
+    });
+    expect(view.publication.canPublish).toBe(true);
+  });
+
+  it("still requires human confirmation first", async () => {
+    const { deriveStudioLifecycle } = await import("../src/training/studioLifecycle");
+    const view = deriveStudioLifecycle({
+      capability: { ...confirmed(), provenance: { ...confirmed().provenance, confirmedByHuman: false } },
+      advertisedBound: false,
+      bindingCandidate: undefined,
+      validation: undefined,
+      queryAccepted: true,
+      published: false
+    });
+    expect(view.publication.canPublish).toBe(false);
+  });
+});

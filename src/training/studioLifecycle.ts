@@ -142,6 +142,16 @@ export interface StudioLifecycleInput {
   /** The second execution strategy's candidate, independent of `bindingCandidate` above. */
   browserBindingCandidate?: BrowserBindingCandidateRecord;
   browserBindingValidation?: BrowserBindingValidationRecord;
+  /**
+   * Whether an entity search has been accepted for this capability.
+   *
+   * A third independent route to being publishable, alongside an
+   * advertised binding and the two execution strategies. A read-only
+   * search has nothing to commit and no record to verify, so it can never
+   * satisfy those — and refusing to publish it on that basis would be
+   * demanding proof of a mutation it does not perform.
+   */
+  queryAccepted?: boolean;
   /** Whether this exact capability id is already in the control plane's publications. */
   published: boolean;
 }
@@ -368,7 +378,10 @@ export function deriveStudioLifecycle(input: StudioLifecycleInput): StudioLifecy
   // semantic browser execution binding tested and accepted through the
   // application's own UI. Neither weakens the other's requirements.
   const bound =
-    advertisedBound || Boolean(acceptedBinding(validation)) || Boolean(acceptedBrowserBinding(browserBindingValidation));
+    advertisedBound ||
+    Boolean(acceptedBinding(validation)) ||
+    Boolean(acceptedBrowserBinding(browserBindingValidation)) ||
+    Boolean(input.queryAccepted);
 
   return {
     capability: {

@@ -2032,6 +2032,7 @@ function renderTrainingStudio(): string {
           validation,
           browserBindingCandidate,
           browserBindingValidation,
+          queryAccepted,
           published
         });
 
@@ -2593,7 +2594,12 @@ function render(): void {
     // The same judgement accepting a mutation binding is: a human saw it
     // return real candidates from the real application.
     queryAccepted = true;
-    queryStatus = "Search accepted.";
+    // Publication reads the capability's own binding, so accepting a
+    // search records one — the same step accepting an execution binding
+    // takes, for the same reason.
+    const source = candidate?.provenance.sourceApplication;
+    if (candidate && source) candidate = { ...candidate, binding: { application: source.id, action: candidate.id } };
+    queryStatus = "Search accepted. Publication is now unblocked.";
     render();
   });
 
