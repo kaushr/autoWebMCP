@@ -32,7 +32,21 @@ export type ProvenanceSource = "observed" | "configured" | "inferred" | "confirm
  * always require it, and a human confirming the contract has to be able to
  * see that it is a targeting parameter rather than something they taught.
  */
-export type CapabilityInputRole = "business" | "target-identity";
+export type CapabilityInputRole =
+  | "business"
+  /** Selects WHICH entity the operation acts on. Contributed by the system. */
+  | "target-identity"
+  /**
+   * A search term or filter typed into the application's own query UI.
+   *
+   * Not a field on any record. A live attempt to teach a search asked
+   * "which Opportunity field is this?" of a global search box, and the only
+   * answer the model allowed was an API name — so the honest answer was
+   * unavailable and a false one was the only way forward. A query control
+   * belongs to the application's navigation, and grounding must not look
+   * for a record field behind it.
+   */
+  | "query";
 
 export interface CapabilityInput {
   name: string;

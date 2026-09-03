@@ -5,6 +5,7 @@ import {
   invokeSemanticAction,
   isVisible,
   policyFor,
+  pressKey,
   resolveSemanticTarget,
   setFieldValue,
   waitForApplicationReaction,
@@ -77,8 +78,18 @@ export interface BrowserQueryBinding {
   query: { inputName: string; semanticTarget: SemanticTarget };
   /** Additional narrowing controls, when the application offers them. */
   filters?: QueryFilter[];
-  /** The control that runs the search, when typing alone does not. */
+  /** The control that reveals the search field, when it is not already on screen. */
+  open?: SemanticTarget;
+  /** The control that runs the search, when there is one to click. */
   submit?: SemanticTarget;
+  /**
+   * The key that runs the search, when no control does.
+   *
+   * A live Salesforce trace showed typing followed straight by navigation,
+   * with nothing clicked in between — the search was submitted with Enter,
+   * and a binding that can only click could not reproduce it.
+   */
+  submitKey?: string;
   safety: BrowserBindingSafety;
   evidence: string[];
 }
@@ -205,6 +216,25 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
     if (value) controls.push({ target: filter.semanticTarget, value, kind: filter.valueKind, name: filter.inputName });
   }
 
+  // Reveal the search field first, when the demonstration showed it being
+  // opened. A control that is not on screen cannot be resolved, and the
+  // failure would read as "the search box is missing" rather than "it has
+  // not been opened yet".
+  if (binding.open) {
+    const opened = await invokeSemanticAction(root, binding.open, adapter);
+    if (!opened.ok) {
+      return {
+        status: "blocked",
+        candidates: [],
+        evidence,
+        warnings: [`The search could not be opened: ${opened.detail}`],
+        executedAt: now()
+      };
+    }
+    evidence.push(opened.detail);
+    await waitForApplicationReaction({ root, ...options.reaction });
+  }
+
   for (const control of controls) {
     const resolution = resolveSemanticTarget(root, control.target, adapter);
     if (!resolution.ok) {
@@ -229,19 +259,23 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
     evidence.push(`Set "${control.name}" to ${JSON.stringify(control.value)}.`);
   }
 
-  if (binding.submit) {
-    const submitted = await invokeSemanticAction(root, binding.submit, adapter);
-    if (!submitted.ok) {
-      return {
-        status: "blocked",
-        candidates: [],
-        evidence,
-        warnings: [`The search could not be run: ${submitted.detail}`],
-        executedAt: now()
-      };
-    }
-    evidence.push(submitted.detail);
+  // Run it: a control if the application has one, otherwise the key the
+  // demonstration showed. Typing alone leaves many search boxes idle.
+  const ran = binding.submit
+    ? await invokeSemanticAction(root, binding.submit, adapter)
+    : binding.submitKey
+      ? await pressKey(root, binding.query.semanticTarget, binding.submitKey, adapter, options.reaction)
+      : undefined;
+  if (ran && !ran.ok) {
+    return {
+      status: "blocked",
+      candidates: [],
+      evidence,
+      warnings: [`The search could not be run: ${ran.detail}`],
+      executedAt: now()
+    };
   }
+  if (ran) evidence.push(ran.detail);
 
   const settled = await waitForApplicationReaction({ root, ...options.reaction });
   evidence.push(

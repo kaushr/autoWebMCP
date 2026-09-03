@@ -588,6 +588,44 @@ export async function readSemanticOptions(
 /* -------------------------------- actions -------------------------------- */
 
 /** Resolves and activates a semantic action (e.g. the Save button) via a real click event. */
+/**
+ * Presses a key on a resolved control.
+ *
+ * Needed because some workflows have no clickable commit at all. A live
+ * Salesforce search trace showed nine keystrokes into the search box and
+ * then a navigation, with no button click anywhere between — the rep
+ * pressed Enter, and an engine that can only click had no way to reproduce
+ * that.
+ *
+ * A key is a semantic act in the same sense a labelled click is: "Enter on
+ * the search field" describes an intention, not a coordinate or a
+ * recorded event sequence.
+ */
+export async function pressKey(
+  root: ParentNode,
+  target: SemanticTarget,
+  key: string,
+  adapter?: PlatformResolverAdapter,
+  reaction?: { timeoutMs?: number; quietMs?: number }
+): Promise<{ ok: boolean; detail: string }> {
+  const resolution = resolveSemanticTarget(root, target, adapter);
+  if (!resolution.ok) {
+    return { ok: false, detail: `Could not find "${target.label}" to press ${key} on: ${resolution.reason}` };
+  }
+
+  const element = resolution.target.element;
+  if (element instanceof HTMLElement) element.focus();
+  // The full sequence an application listens for. Dispatching only one of
+  // the three is the usual reason a synthetic key does nothing.
+  for (const type of ["keydown", "keypress", "keyup"] as const) {
+    element.dispatchEvent(
+      new KeyboardEvent(type, { key, code: key, bubbles: true, cancelable: true, composed: true })
+    );
+  }
+  await waitForApplicationReaction({ root, ...reaction });
+  return { ok: true, detail: `Pressed ${key} on "${target.label}".` };
+}
+
 export async function invokeSemanticAction(
   root: ParentNode,
   target: SemanticTarget,
