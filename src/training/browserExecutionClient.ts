@@ -1,4 +1,5 @@
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
+import type { BrowserQueryBinding, QueryOutcome } from "../binding/browserExecution/query";
 import type { AcquisitionFailureReason } from "../../extension/src/protocol";
 import type { DomainInspection } from "../binding/browserExecution/execute";
 import type { ExecutionResult } from "../binding/browserExecution/result";
@@ -37,6 +38,14 @@ export interface BrowserExecutionClient {
    * the user, and a single thrown timeout told them apart from nothing.
    */
   acquireDomains(binding: BrowserExecutionBinding): Promise<DomainAcquisition>;
+  /**
+   * Runs a taught entity search and returns the candidates it found.
+   *
+   * Carries no confirmation, unlike `execute`: a search types into the
+   * application's own query UI and reads links. Nothing is written, so
+   * there is no mutation for a human to have approved.
+   */
+  query(binding: BrowserQueryBinding, inputs: Record<string, string>): Promise<QueryOutcome>;
 }
 
 export type DomainAcquisition =
@@ -199,6 +208,15 @@ export const extensionBridgeExecutionClient: BrowserExecutionClient = {
         ]
       };
       }
+    );
+  },
+
+  query(binding, inputs) {
+    return bridgeRequest<QueryOutcome>(
+      { kind: "query", queryBinding: binding, inputs },
+      "query",
+      RESPONSE_TIMEOUT_MS,
+      (data) => data.outcome as QueryOutcome | undefined
     );
   },
 

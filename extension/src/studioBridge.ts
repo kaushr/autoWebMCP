@@ -6,7 +6,8 @@ import {
   type StudioBridgeExecuteRequest,
   type StudioBridgeExecuteResponse,
   type StudioBridgeHelloResponse,
-  type StudioBridgeInspectRequest
+  type StudioBridgeInspectRequest,
+  type StudioBridgeQueryRequest
 } from "./protocol";
 
 /**
@@ -37,7 +38,10 @@ document.documentElement.setAttribute(STUDIO_BRIDGE_MARKER, String(STUDIO_BRIDGE
 /** Shorter than the Studio's own patience, so the bridge reports first. */
 const BACKGROUND_ANSWER_TIMEOUT_MS = 20_000;
 
-type AnyRequest = Omit<Partial<StudioBridgeExecuteRequest & StudioBridgeInspectRequest>, "kind"> & { kind?: string };
+type AnyRequest = Omit<
+  Partial<StudioBridgeExecuteRequest & StudioBridgeInspectRequest & StudioBridgeQueryRequest>,
+  "kind"
+> & { kind?: string };
 
 function post(message: Record<string, unknown>): void {
   window.postMessage({ source: STUDIO_BRIDGE_SOURCE, direction: "response", ...message }, window.location.origin);
@@ -149,6 +153,23 @@ window.addEventListener("message", (event) => {
           error: error instanceof Error ? error.message : String(error)
         });
       });
+    return;
+  }
+
+  if (data.kind === "query" && data.queryBinding) {
+    callBackground({
+      type: "browser-binding:query",
+      request: { binding: data.queryBinding, inputs: data.inputs ?? {} }
+    })
+      .then((response) => {
+        const answer = response as { ok?: boolean; outcome?: unknown; error?: string };
+        post(
+          answer?.ok
+            ? { requestId, ok: true, outcome: answer.outcome }
+            : { requestId, ok: false, error: answer?.error ?? "The search could not be run." }
+        );
+      })
+      .catch((error) => post({ requestId, ok: false, error: String(error) }));
     return;
   }
 

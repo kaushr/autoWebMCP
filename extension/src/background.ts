@@ -486,6 +486,26 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
       }
     }
 
+    case "browser-binding:query": {
+      await loadState();
+      const tabId = recordingTabId ?? (await lastKnownTabId());
+      if (tabId === undefined) {
+        return {
+          ok: false,
+          error: "No target tab is known. Start a Teach Mode session on the target application first, then try again."
+        };
+      }
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+        return await chrome.tabs.sendMessage(tabId, { type: "query:run", request: message.request });
+      } catch (error) {
+        return {
+          ok: false,
+          error: `The target tab could not be reached: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    }
+
     case "browser-binding:execute": {
       await loadState();
       const tabId = recordingTabId ?? (await lastKnownTabId());

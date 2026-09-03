@@ -253,7 +253,8 @@ async function publishCapability(request, response) {
   const record = {
     capability,
     publishedAt: new Date().toISOString(),
-    ...(body?.executionBinding ? { executionBinding: body.executionBinding } : {})
+    ...(body?.executionBinding ? { executionBinding: body.executionBinding } : {}),
+    ...(body?.queryBinding ? { queryBinding: body.queryBinding } : {})
   };
   publications.set(capability.id, record);
   console.log(`published capability ${capability.id}`);

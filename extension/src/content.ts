@@ -20,12 +20,16 @@ import type {
   BrowserBindingExecuteRequest,
   BrowserBindingInspectRequest,
   BrowserBindingInspectResponse,
+  BrowserBindingQueryRequest,
+  BrowserBindingQueryResponse,
   BrowserBindingExecuteResponse,
   CaptureFlush,
   CaptureSettings,
   ToContentMessage
 } from "./protocol";
 import { executeConfirmed, inspectValueDomains } from "../../src/binding/browserExecution/execute";
+import { executeQuery } from "../../src/binding/browserExecution/query";
+import { entityIdentityPolicyForPlatform } from "../../src/binding/browserExecution/adapters";
 import {
   resolutionProvenanceForPlatform,
   resolverAdapterForPlatform
@@ -562,6 +566,36 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
   }
 }
 
+/**
+ * Runs a taught entity search against this page.
+ *
+ * No confirmation gate, unlike execution: this types into the
+ * application's own search UI and reads links. Nothing is written and
+ * nothing is saved, so there is no mutation for a human to have approved.
+ */
+async function runQueryRequest(request: BrowserBindingQueryRequest): Promise<BrowserBindingQueryResponse> {
+  console.debug("[AutoWebMCP] content: running entity search on", window.location.href);
+  const identity = entityIdentityPolicyForPlatform(request.binding.platform);
+  if (!identity) {
+    return {
+      ok: false,
+      error: `This platform (${request.binding.platform}) does not declare how it identifies entities, so a search cannot return usable identities.`
+    };
+  }
+  try {
+    const outcome = await executeQuery({
+      root: document,
+      binding: request.binding,
+      inputs: request.inputs,
+      adapter: resolverAdapterForPlatform(request.binding.platform),
+      identity
+    });
+    return { ok: true, outcome, protocol: STUDIO_BRIDGE_PROTOCOL };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Exactly one LIVE listener per document.
  *
@@ -615,6 +649,10 @@ function contentMessageListener(...[message, _sender, sendResponse]: Parameters<
   }
   if (request.type === "inspect:domains") {
     void runInspectRequest(request.request).then(sendResponse);
+    return true;
+  }
+  if (request.type === "query:run") {
+    void runQueryRequest(request.request).then(sendResponse);
     return true;
   }
   return undefined;

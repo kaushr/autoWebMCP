@@ -1,5 +1,6 @@
 import { assertSemanticCapability, type SemanticCapability } from "../semantic/model";
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
+import type { BrowserQueryBinding } from "../binding/browserExecution/query";
 
 /**
  * One capability a human confirmed and then published to the control plane.
@@ -16,6 +17,15 @@ export interface PublicationRecord {
   capability: SemanticCapability;
   publishedAt: string;
   executionBinding?: BrowserExecutionBinding;
+  /**
+   * How a read-only search is performed, when the capability is one.
+   *
+   * Its own field rather than a variant of `executionBinding`, because the
+   * two are different shapes with different rules — a mutation binding has
+   * a commit and verification checks a query has no use for, and a query
+   * returns results a mutation never produces.
+   */
+  queryBinding?: BrowserQueryBinding;
 }
 
 /**
@@ -79,7 +89,8 @@ export function parsePublicationRecord(value: unknown): PublicationRecord {
   return {
     capability: assertPublishable(record.capability),
     publishedAt: record.publishedAt,
-    ...(record.executionBinding ? { executionBinding: record.executionBinding } : {})
+    ...(record.executionBinding ? { executionBinding: record.executionBinding } : {}),
+    ...(record.queryBinding ? { queryBinding: record.queryBinding } : {})
   };
 }
 
@@ -91,14 +102,19 @@ export function parsePublicationList(value: unknown): PublicationRecord[] {
 
 export async function publishCapability(
   capability: SemanticCapability,
-  executionBinding?: BrowserExecutionBinding
+  executionBinding?: BrowserExecutionBinding,
+  queryBinding?: BrowserQueryBinding
 ): Promise<PublicationRecord> {
   assertPublishable(capability);
 
   const response = await fetch("/api/capabilities", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ capability, ...(executionBinding ? { executionBinding } : {}) })
+    body: JSON.stringify({
+      capability,
+      ...(executionBinding ? { executionBinding } : {}),
+      ...(queryBinding ? { queryBinding } : {})
+    })
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };

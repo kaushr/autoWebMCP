@@ -2,6 +2,7 @@ import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/
 import type { ObservationTrace, RecordingMetadata } from "../../src/capture/normalize";
 import type { BrowserExecutionBinding } from "../../src/binding/browserExecution/model";
 import type { DomainInspection } from "../../src/binding/browserExecution/execute";
+import type { BrowserQueryBinding, QueryOutcome } from "../../src/binding/browserExecution/query";
 import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 
 /**
@@ -154,19 +155,35 @@ export type ToBackgroundMessage =
   | { type: "capture:context"; sessionId: string; application: CaptureApplicationContext }
   | { type: "capture:events"; sessionId: string; events: CaptureEvent[]; rrwebEvents: number }
   | { type: "browser-binding:execute"; request: BrowserBindingExecuteRequest }
-  | { type: "browser-binding:inspect"; request: BrowserBindingInspectRequest };
+  | { type: "browser-binding:inspect"; request: BrowserBindingInspectRequest }
+  | { type: "browser-binding:query"; request: BrowserBindingQueryRequest };
 
 /** Service worker → content script. */
 export type ToContentMessage =
   | { type: "capture:begin"; sessionId: string; startedAt: number; settings: CaptureSettings }
   | { type: "capture:end" }
   | { type: "execute:run"; request: BrowserBindingExecuteRequest }
-  | { type: "inspect:domains"; request: BrowserBindingInspectRequest };
+  | { type: "inspect:domains"; request: BrowserBindingInspectRequest }
+  | { type: "query:run"; request: BrowserBindingQueryRequest };
 
 export interface CaptureFlush {
   events: CaptureEvent[];
   rrwebEvents: number;
 }
+
+/**
+ * A read-only entity search. Deliberately carries no `confirmed`: it types
+ * into the application's own search UI and reads links, writing nothing and
+ * saving nothing, so it needs no execution confirmation.
+ */
+export interface BrowserBindingQueryRequest {
+  binding: BrowserQueryBinding;
+  inputs: Record<string, string>;
+}
+
+export type BrowserBindingQueryResponse =
+  | { ok: true; outcome: QueryOutcome; protocol?: number }
+  | { ok: false; error: string };
 
 export type TraceResponse = { trace?: ObservationTrace };
 
@@ -236,6 +253,24 @@ export interface StudioBridgeExecuteRequest {
   confirmed: true;
   /** See `BrowserBindingExecuteRequest.requireTarget`. */
   requireTarget?: boolean;
+}
+
+export interface StudioBridgeQueryRequest {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "request";
+  requestId: string;
+  kind: "query";
+  queryBinding: BrowserQueryBinding;
+  inputs: Record<string, string>;
+}
+
+export interface StudioBridgeQueryResponse {
+  source: typeof STUDIO_BRIDGE_SOURCE;
+  direction: "response";
+  requestId: string;
+  ok: boolean;
+  outcome?: QueryOutcome;
+  error?: string;
 }
 
 export interface StudioBridgeExecuteResponse {

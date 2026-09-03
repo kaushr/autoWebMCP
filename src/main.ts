@@ -469,6 +469,16 @@ function describeOutcome(outcome: HarnessInvocationOutcome): string {
 /** A WebMCP tool's inputs arrive untyped; the engine writes strings to the DOM regardless of a field's declared type. */
 function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: CapabilityInputValues): Promise<unknown> {
   const record = publications.find((entry) => entry.capability.id === subject.id);
+
+  // A search is a different operation, not a mutation with its commit
+  // skipped: it writes nothing, needs no confirmation, and returns
+  // candidates rather than a verified record. Routed accordingly.
+  if (record?.queryBinding) {
+    const terms: Record<string, string> = {};
+    for (const [name, value] of Object.entries(inputs)) terms[name] = value === undefined ? "" : String(value);
+    return extensionBridgeExecutionClient.query(record.queryBinding, terms);
+  }
+
   const executionBinding = record?.executionBinding;
   if (!executionBinding) {
     throw new Error(`No accepted browser execution binding is published for "${subject.id}".`);
