@@ -1,4 +1,4 @@
-import { canonicalIdentityFromPath, sameEntity, type EntityIdentityPolicy } from "./entityIdentity";
+import { canonicalIdentityFromPath, type EntityIdentityPolicy } from "./entityIdentity";
 import {
   accessibleName,
   collectElements,
@@ -152,7 +152,15 @@ export function candidatesOnPage(
     // carried `/lightning/r/<id>/related/Products/view` — identifies that
     // record correctly and is not a result for it.
     const parsed = canonicalIdentityFromPath(path, identity);
-    if (!parsed || !sameEntity(parsed, { id: parsed.id, entityType })) continue;
+    if (!parsed) continue;
+
+    // Filtering by type requires KNOWING the type. `sameEntity` matches on
+    // id alone when either side is untyped, which is right for comparing
+    // two references to one record and wrong here: a live search returned
+    // six candidates of which four were not Opportunities at all — a
+    // custom object and two other prefixes the pack does not declare — and
+    // every one of them passed an Opportunity filter by being unknown.
+    if (parsed.entityType !== entityType) continue;
     if (found.has(parsed.id)) continue;
 
     // Whitespace collapsed, case preserved. `normalizeLabel` exists for

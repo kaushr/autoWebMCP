@@ -165,6 +165,33 @@ describe("the route shapes a live org actually emits", () => {
   });
 });
 
+describe("a type filter excludes what it cannot type", () => {
+  it("drops records whose prefix the platform does not declare", () => {
+    // Straight from a live run: searching for "PS Project" returned six
+    // candidates, four of which were not Opportunities — a custom object
+    // and two undeclared prefixes. Every one passed an Opportunity filter
+    // by having no known type, because matching on id alone is right for
+    // comparing two references to one record and wrong for filtering.
+    document.body.innerHTML = `
+      <a href="/lightning/r/0065w00002AZ0GeAAL/view">PS Project Test - updated</a>
+      <a href="/lightning/r/0005w00000A8bu1EAB/view">revVana Opportunity Revenue</a>
+      <a href="/lightning/r/0Fb5w0000002aIwCAI/view">revVanaInsights</a>
+      <a href="/lightning/r/a075w00000dzRAXAA2/view">PS Project Test</a>
+      <a href="/lightning/r/a0A5w00000yIci8EAC/view">Project Forecast</a>
+    `;
+    const candidates = candidatesOnPage(document.body, "Opportunity", IDENTITY, adapter());
+    expect(candidates.map((c) => c.id)).toEqual(["0065w00002AZ0GeAAL"]);
+  });
+
+  it("still finds every record of a type it does know", () => {
+    document.body.innerHTML = `
+      <a href="/lightning/r/${ACME_A}/view">One</a>
+      <a href="/lightning/r/${ACME_B}/view">Two</a>
+    `;
+    expect(candidatesOnPage(document.body, "Opportunity", IDENTITY, adapter())).toHaveLength(2);
+  });
+});
+
 /* ===================== ambiguity is preserved ===================== */
 
 describe("ambiguity is returned, never resolved", () => {
