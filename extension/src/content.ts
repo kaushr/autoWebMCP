@@ -6,7 +6,7 @@ import {
   safeValueChange,
   type FieldDescriptor
 } from "../../src/capture/policy";
-import { STUDIO_BRIDGE_PROTOCOL } from "./protocol";
+import { replaceMessageListener, STUDIO_BRIDGE_PROTOCOL } from "./protocol";
 import type {
   CaptureApplicationContext,
   CaptureEvent,
@@ -46,8 +46,12 @@ import {
 declare global {
   interface Window {
     __autoWebMcpCapture?: { stop: () => CaptureFlush };
-    /** Set once the message listener below is installed, so re-injection cannot add a second one. */
-    __autoWebMcpMessaging?: true;
+    /**
+     * The message listener this document currently has installed, kept so a
+     * re-injection can remove it before installing its own. A boolean
+     * "already installed" flag cannot do that job — see the install block.
+     */
+    __autoWebMcpListener?: ContentMessageListener;
     /** Set while a read-only inspection is running, so a second one cannot start on top of it. */
     __autoWebMcpInspecting?: true;
   }
@@ -538,26 +542,39 @@ async function runInspectRequest(request: BrowserBindingInspectRequest): Promise
 }
 
 /* ------------------------------------------------------------------ *
- * Installed exactly once per document.
+ * Exactly one LIVE listener per document.
+ *
+ * Two failures pull in opposite directions here, and only replacement
+ * satisfies both.
  *
  * The service worker injects this file before every operation, and each
  * injection used to register another listener. One `inspect:domains`
  * message then ran N inspections at once — observed live as five
  * completions 400ms apart from a single request — and since an inspection
- * enters edit mode, opens a control, dismisses it, and cancels the edit,
- * those N runs were competing over the same record: one dismissing the
- * modal another was still reading.
+ * enters edit mode, opens a control, dismisses it and cancels the edit,
+ * those N runs competed over the same record.
  *
- * The capture probe was already guarded this way. The listener was not,
- * which is what made re-injection look idempotent when it was not.
+ * Guarding that with a boolean then broke starting a recording, because
+ * the flag outlives the context that set it. Reloading the extension
+ * invalidates the old content script — its listener is dead — while the
+ * flag stays `true` on the page's isolated world, so the next injection
+ * skipped installing a listener and the document was left with none. A
+ * boolean cannot tell "a live listener exists" from "a dead one used to".
+ *
+ * So the listener itself is remembered and replaced. Re-injection into a
+ * live context removes the previous listener before adding its own, and
+ * re-injection after an extension reload installs a working one; the dead
+ * listener it cannot remove is inert anyway.
  * ------------------------------------------------------------------ */
-if (!window.__autoWebMcpMessaging) {
-  window.__autoWebMcpMessaging = true;
-  installMessageListener();
-}
+type ContentMessageListener = Parameters<typeof chrome.runtime.onMessage.addListener>[0];
 
-function installMessageListener(): void {
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+window.__autoWebMcpListener = replaceMessageListener(
+  chrome.runtime.onMessage,
+  window.__autoWebMcpListener,
+  contentMessageListener
+);
+
+function contentMessageListener(...[message, _sender, sendResponse]: Parameters<ContentMessageListener>) {
   const request = message as ToContentMessage;
   if (request.type === "capture:begin") {
     window.__autoWebMcpCapture?.stop();
@@ -580,5 +597,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   return undefined;
-});
 }

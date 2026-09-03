@@ -9,14 +9,15 @@ declare namespace chrome {
     const lastError: { message?: string } | undefined;
     function getURL(path: string): string;
     function sendMessage<TResponse = unknown>(message: unknown): Promise<TResponse>;
+    type MessageListener = (
+      message: unknown,
+      sender: { tab?: { id?: number; url?: string } },
+      sendResponse: (response?: unknown) => void
+    ) => boolean | undefined | void;
     const onMessage: {
-      addListener(
-        callback: (
-          message: unknown,
-          sender: { tab?: { id?: number; url?: string } },
-          sendResponse: (response?: unknown) => void
-        ) => boolean | undefined | void
-      ): void;
+      addListener(callback: MessageListener): void;
+      /** Needed by the content script, which replaces its own listener on re-injection. */
+      removeListener(callback: MessageListener): void;
     };
     const onInstalled: { addListener(callback: () => void): void };
     const onStartup: { addListener(callback: () => void): void };

@@ -200,3 +200,58 @@ export interface StudioBridgeExecuteResponse {
   result?: ExecutionResult;
   error?: string;
 }
+
+/* ------------------------------------------------------------------ *
+ * Keeping exactly one LIVE message listener on a document.
+ *
+ * The service worker injects the content script before every operation,
+ * so the same document can be asked to install a listener many times. Two
+ * opposite failures have both happened here for real:
+ *
+ *   Registering unconditionally left N listeners, and one message ran N
+ *   inspections concurrently against the same live record — each entering
+ *   edit mode, opening a control and dismissing it while the others were
+ *   still reading.
+ *
+ *   Guarding with a boolean then left a document with NO listener.
+ *   Reloading the extension invalidates the old content script, so its
+ *   listener is dead, while the flag it set survives on the page's
+ *   isolated world — the next injection saw the flag and installed
+ *   nothing. Starting a recording silently did nothing at all.
+ *
+ * A boolean cannot distinguish "a live listener exists" from "a dead one
+ * used to". Replacement can: remove whatever this document last installed,
+ * then install a working one. A listener from an invalidated context
+ * cannot be removed and does not need to be, because it can no longer
+ * fire.
+ * ------------------------------------------------------------------ */
+
+/** The part of `chrome.runtime.onMessage` this needs. */
+export interface MessageListenerHost<Listener> {
+  addListener(listener: Listener): void;
+  removeListener(listener: Listener): void;
+}
+
+/**
+ * Installs `next` as the document's only live listener, returning it so the
+ * caller can record what to replace next time.
+ *
+ * Removal failure is deliberately swallowed: it means the previous listener
+ * belonged to a context that no longer exists, which is precisely the case
+ * where installing a fresh one matters most.
+ */
+export function replaceMessageListener<Listener>(
+  host: MessageListenerHost<Listener>,
+  previous: Listener | undefined,
+  next: Listener
+): Listener {
+  if (previous) {
+    try {
+      host.removeListener(previous);
+    } catch {
+      // An invalidated context's listener is already inert.
+    }
+  }
+  host.addListener(next);
+  return next;
+}
