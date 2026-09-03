@@ -276,7 +276,19 @@ async function handoff(trace: ObservationTrace): Promise<HandoffResult> {
       body: JSON.stringify(trace)
     });
     if (!response.ok) {
-      return { ok: false, message: `The control plane at ${origin} rejected the trace (${response.status}).` };
+      // A 5xx is not a rejection. Reaching the Studio's own origin means
+      // going through its dev-server proxy, which answers 500 when the
+      // control plane behind it is not running — and "rejected the trace"
+      // sends someone to inspect a recording that was never the problem.
+      // Only a 4xx is the server having looked at this trace and refused it.
+      const upstream = response.status >= 500;
+      return {
+        ok: false,
+        message: upstream
+          ? `${origin} answered ${response.status}. That usually means the control plane behind it is not running — ` +
+            `start it with "npm run dev:semanticizer", then press Retry. The recording is kept here.`
+          : `The control plane at ${origin} rejected the trace (${response.status}).`
+      };
     }
     return {
       ok: true,
