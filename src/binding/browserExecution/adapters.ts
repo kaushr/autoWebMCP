@@ -116,6 +116,10 @@ export function entityIdentityPolicyForPlatform(
   if (!declared) return undefined;
   return {
     routePattern: declared.entityIdentity.routePattern,
+    canonicalRoutePattern: declared.entityIdentity.canonicalRoutePattern,
+    ...(declared.entityIdentity.identifierPrefixes
+      ? { identifierPrefixes: { ...declared.entityIdentity.identifierPrefixes } }
+      : {}),
     trustworthyForMutation: declared.entityIdentity.trustworthyForMutation,
     routeTemplate: declared.entityIdentity.routeTemplate
   };

@@ -273,6 +273,7 @@ describe("identity is read from declared platform knowledge, not from code", () 
     // rather than an engine change.
     const jira: EntityIdentityPolicy = {
       routePattern: "/browse/(?<id>(?<entity>[A-Z]+)-\\d+)",
+      canonicalRoutePattern: "^/browse/(?<id>(?<entity>[A-Z]+)-\\d+)$",
       trustworthyForMutation: true,
       routeTemplate: "/browse/{id}"
     };
@@ -281,6 +282,7 @@ describe("identity is read from declared platform knowledge, not from code", () 
     // A composite identity — repo plus number — carried as one opaque id.
     const github: EntityIdentityPolicy = {
       routePattern: "/(?<entity>[^/]+/[^/]+)/issues/(?<id>\\d+)",
+      canonicalRoutePattern: "^/(?<entity>[^/]+/[^/]+)/issues/(?<id>\\d+)$",
       trustworthyForMutation: true,
       routeTemplate: "/{entity}/issues/{id}"
     };

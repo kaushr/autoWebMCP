@@ -186,7 +186,18 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
         // Named groups, because the engine reads them by name rather than
         // by position: a platform whose route puts the id first needs a
         // different pattern here, not different code there.
-        routePattern: "/lightning/r/(?<entity>[A-Za-z0-9_]+)/(?<id>[A-Za-z0-9]{15,18})(?:/|$)",
+        // The object segment is OPTIONAL. A record page carries it; list
+        // and search result links do not, and a live list view linked
+        // `/lightning/r/0065w00002AZ0GeAAL/view` with no object at all.
+        // Requiring it made every result invisible to extraction.
+        routePattern:
+          "/lightning/r/(?:(?<entity>[A-Za-z][A-Za-z0-9_]*)/)?(?<id>[A-Za-z0-9]{15,18})(?:/|$)",
+        canonicalRoutePattern:
+          "^/lightning/r/(?:(?<entity>[A-Za-z][A-Za-z0-9_]*)/)?(?<id>[A-Za-z0-9]{15,18})/view/?$",
+        // Standard key prefixes, which Salesforce keeps stable across orgs.
+        // Only the objects this proving ground has actually handled; an
+        // unrecognized prefix leaves the type unknown rather than guessed.
+        identifierPrefixes: { "001": "Account", "003": "Contact", "005": "User", "006": "Opportunity" },
         trustworthyForMutation: true,
         routeTemplate: "/lightning/r/{entity}/{id}/view"
       },

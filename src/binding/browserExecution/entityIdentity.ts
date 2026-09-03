@@ -16,11 +16,47 @@ import type { EntityIdentity } from "./engine";
 
 /** How one platform exposes entity identity, compiled from its pack. */
 export interface EntityIdentityPolicy {
-  /** A regular expression over the page path with named groups `entity` and `id`. */
+  /** Matches a path referring to a record, including its sub-pages. Named group `id`, optional `entity`. */
   routePattern: string;
+  /** Matches a path that is the record's OWN page. Same groups. */
+  canonicalRoutePattern: string;
+  /**
+   * Entity type per identifier prefix, for routes that omit the object.
+   *
+   * A live list view linked `/lightning/r/0065w00002AZ0GeAAL/view` — no
+   * object segment anywhere in it. The type has to come from the
+   * identifier, or the link cannot be filtered by entity at all.
+   */
+  identifierPrefixes?: Record<string, string>;
   trustworthyForMutation: boolean;
-  /** Path template using `{entity}` and `{id}`, for explaining what navigation would be. */
   routeTemplate: string;
+}
+
+/** The entity type an identifier's own prefix implies, when the platform declares one. */
+function typeFromIdentifier(id: string, policy: EntityIdentityPolicy): string | undefined {
+  const prefixes = policy.identifierPrefixes;
+  if (!prefixes) return undefined;
+  for (const [prefix, entity] of Object.entries(prefixes)) {
+    if (id.startsWith(prefix)) return entity;
+  }
+  return undefined;
+}
+
+function matchRoute(path: string, pattern: string, policy: EntityIdentityPolicy): EntityIdentity | undefined {
+  let expression: RegExp;
+  try {
+    expression = new RegExp(pattern);
+  } catch {
+    return undefined;
+  }
+  const match = expression.exec(path);
+  const id = match?.groups?.["id"];
+  if (!id) return undefined;
+  // The route's own object segment when it has one; otherwise whatever the
+  // identifier's prefix implies. An unrecognized prefix leaves the type
+  // unknown rather than guessed — `sameEntity` then compares on id alone.
+  const entityType = match?.groups?.["entity"] ?? typeFromIdentifier(id, policy);
+  return { id, ...(entityType ? { entityType } : {}) };
 }
 
 /**
@@ -31,17 +67,22 @@ export interface EntityIdentityPolicy {
  * make mutation refuse — not crash an execution midway.
  */
 export function identityFromPath(path: string, policy: EntityIdentityPolicy): EntityIdentity | undefined {
-  let pattern: RegExp;
-  try {
-    pattern = new RegExp(policy.routePattern);
-  } catch {
-    return undefined;
-  }
-  const match = pattern.exec(path);
-  const id = match?.groups?.["id"];
-  if (!id) return undefined;
-  const entityType = match?.groups?.["entity"];
-  return { id, ...(entityType ? { entityType } : {}) };
+  return matchRoute(path, policy.routePattern, policy);
+}
+
+/**
+ * The identity a path points at, when that path is the record's OWN page.
+ *
+ * `undefined` for a sub-page. A live Lightning list carried
+ * `/lightning/r/<id>/related/Products/view`, which identifies a record
+ * perfectly well and is not a result for it — offering that as a candidate
+ * would name an Opportunity "Products(4)".
+ */
+export function canonicalIdentityFromPath(
+  path: string,
+  policy: EntityIdentityPolicy
+): EntityIdentity | undefined {
+  return matchRoute(path, policy.canonicalRoutePattern, policy);
 }
 
 /**
@@ -60,24 +101,6 @@ export function sameEntity(a: EntityIdentity, b: EntityIdentity): boolean {
   if (a.id !== b.id) return false;
   if (a.entityType && b.entityType) return a.entityType === b.entityType;
   return true;
-}
-
-/**
- * Whether a path is the entity's OWN page, rather than somewhere beneath it.
- *
- * A live Lightning page carries links like
- * `/lightning/r/Opportunity/<id>/related/Products/view` — the record's id,
- * on a link to one of its related lists. Reading identity from that is
- * correct for "which record am I on"; treating it as a search RESULT is
- * not, and would have handed an agent an Opportunity named "Products(4)".
- *
- * The canonical shape comes from the pack's own `routeTemplate`, so this
- * stays as declared as the pattern that found the id in the first place.
- */
-export function isCanonicalRoute(path: string, identity: EntityIdentity, policy: EntityIdentityPolicy): boolean {
-  const canonical = routeFor(identity, policy);
-  const trimmed = path.replace(/\/+$/, "");
-  return trimmed === canonical.replace(/\/+$/, "");
 }
 
 /** How a caller would reach this entity, for an explanation a human can act on. */

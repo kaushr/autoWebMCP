@@ -48,10 +48,10 @@ function mountResults(): HTMLElement {
     <input id="q" type="text" />
     <button id="go">Search</button>
     <div id="results">
-      <a href="/lightning/r/Opportunity/${ACME_A}/view">Acme Renewal</a>
+      <a href="/lightning/r/${ACME_A}/view">Acme Renewal</a>
       <a href="/lightning/r/Opportunity/${ACME_A}/view" aria-label="Preview Acme Renewal">Preview</a>
-      <a href="/lightning/r/Opportunity/${ACME_B}/view">Acme Renewal</a>
-      <a href="/lightning/r/Account/${ACCOUNT}/view">Acme Corporation</a>
+      <a href="/lightning/r/${ACME_B}/view">Acme Renewal</a>
+      <a href="/lightning/r/${ACCOUNT}/view">Acme Corporation</a>
       <a href="/lightning/o/Opportunity/list">All Opportunities</a>
       <a href="/lightning/r/Opportunity/${ACME_A}/related/OpportunityLineItems/view">Products(4)</a>
     </div>
@@ -120,6 +120,48 @@ describe("candidates carry the platform's own identity", () => {
     // which is what makes search_accounts the same mechanism.
     const candidates = candidatesOnPage(mountResults(), "Account", IDENTITY, adapter());
     expect(candidates).toEqual([{ id: ACCOUNT, name: "Acme Corporation", entityType: "Account" }]);
+  });
+});
+
+describe("the route shapes a live org actually emits", () => {
+  it("reads a link that omits the object segment entirely", () => {
+    // What a live Opportunity list view emitted:
+    //   /lightning/r/0065w00002AZ0GeAAL/view
+    // No object anywhere in it. Requiring one made every result invisible.
+    document.body.innerHTML = `<a href="/lightning/r/${ACME_A}/view">PS Project Test</a>`;
+    expect(candidatesOnPage(document.body, "Opportunity", IDENTITY, adapter())).toEqual([
+      { id: ACME_A, name: "PS Project Test", entityType: "Opportunity" }
+    ]);
+  });
+
+  it("types an objectless link from the identifier's own prefix", () => {
+    // 006 is an Opportunity, 001 an Account. Without that, an objectless
+    // link could not be filtered by entity at all.
+    document.body.innerHTML = `
+      <a href="/lightning/r/${ACME_A}/view">An Opportunity</a>
+      <a href="/lightning/r/${ACCOUNT}/view">An Account</a>
+    `;
+    expect(candidatesOnPage(document.body, "Opportunity", IDENTITY, adapter()).map((c) => c.name)).toEqual([
+      "An Opportunity"
+    ]);
+    expect(candidatesOnPage(document.body, "Account", IDENTITY, adapter()).map((c) => c.name)).toEqual([
+      "An Account"
+    ]);
+  });
+
+  it("reads both route shapes as the same record", async () => {
+    const { identityFromPath } = await import("../src/binding/browserExecution/entityIdentity");
+    // The record page carries the object; its own list link does not.
+    expect(identityFromPath(`/lightning/r/Opportunity/${ACME_A}/view`, IDENTITY)?.id).toBe(ACME_A);
+    expect(identityFromPath(`/lightning/r/${ACME_A}/view`, IDENTITY)?.id).toBe(ACME_A);
+  });
+
+  it("leaves the type unknown for an unrecognized prefix rather than guessing", async () => {
+    const { identityFromPath } = await import("../src/binding/browserExecution/entityIdentity");
+    // A custom object's prefix is assigned per org and is not declared.
+    expect(identityFromPath("/lightning/r/a0X5w00000ABCDEFGH/view", IDENTITY)).toEqual({
+      id: "a0X5w00000ABCDEFGH"
+    });
   });
 });
 

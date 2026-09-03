@@ -227,8 +227,29 @@ export interface ReferenceEntry extends KnowledgeEntryBase {
 export interface EntityIdentityEntry extends KnowledgeEntryBase {
   category: "entity-identity";
   entityIdentity: {
-    /** Must contain named groups `entity` and `id`. */
+    /**
+     * Identifies the record a path refers to, INCLUDING sub-pages of it.
+     * Must contain a named group `id` and may contain one named `entity`.
+     */
     routePattern: string;
+    /**
+     * Identifies a path that is the record's OWN page, and not something
+     * beneath it. A live page linked `/lightning/r/<id>/related/Products/view`,
+     * which is a valid identity for "which record am I on" and emphatically
+     * not a search result for it.
+     */
+    canonicalRoutePattern: string;
+    /**
+     * Entity type per identifier prefix, for routes that omit the object.
+     *
+     * Salesforce emits both `/lightning/r/Opportunity/<id>/view` and
+     * `/lightning/r/<id>/view`; list and search results use the second, so
+     * a link's type has to come from the identifier itself. Standard
+     * prefixes are vendor-stable, which is what makes this platform
+     * knowledge — a custom object's prefix is assigned per org and is not
+     * declared here.
+     */
+    identifierPrefixes?: Record<string, string>;
     /**
      * Whether an identity read from the route is stable enough to gate a
      * write on. False would mean "observable, but do not trust it alone".
