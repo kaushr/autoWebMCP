@@ -95,8 +95,14 @@
     </label>
 
     <div class="notice" id="notice" hidden></div>
+    <button id="resend" class="secondary" disabled hidden>Retry sending to the Studio</button>
     <details class="debug">
       <summary>Advanced / Debug</summary>
+      <label class="field">
+        <span>Control plane</span>
+        <input id="control-origin" type="text" placeholder="http://127.0.0.1:8787" />
+      </label>
+      <button id="save-origin" class="secondary">Use this control plane</button>
       <button id="copy" class="secondary" disabled>Copy recording JSON</button>
     </details>
 

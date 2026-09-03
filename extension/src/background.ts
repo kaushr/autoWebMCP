@@ -3,7 +3,8 @@ import { categorizeRequest, normalizeEndpoint, type ObservationTrace } from "../
 import type { CaptureApplicationContext, CaptureEvent } from "../../src/capture/types";
 import {
   DEFAULT_SETTINGS,
-  DEFAULT_STUDIO_ORIGIN,
+  DEFAULT_CONTROL_PLANE_ORIGIN,
+  isValidControlPlaneOrigin,
   type BrowserBindingExecuteResponse,
   type BrowserBindingInspectResponse,
   type CaptureSettings,
@@ -99,9 +100,32 @@ async function getSettings(): Promise<CaptureSettings> {
   return { ...DEFAULT_SETTINGS, ...((stored[SETTINGS_KEY] as Partial<CaptureSettings>) ?? {}) };
 }
 
-async function getStudioOrigin(): Promise<string> {
+async function getControlPlaneOrigin(): Promise<string> {
   const stored = await chrome.storage.local.get(STUDIO_KEY);
-  return (stored[STUDIO_KEY] as string | undefined) ?? DEFAULT_STUDIO_ORIGIN;
+  return (stored[STUDIO_KEY] as string | undefined) ?? DEFAULT_CONTROL_PLANE_ORIGIN;
+}
+
+/**
+ * Points the extension at a different control plane.
+ *
+ * This setting has been readable since the beginning and, until now,
+ * writable by nothing at all — no popup field, no options page, no message.
+ * A seam built for later that made the origin look configurable while it
+ * was effectively hardcoded.
+ *
+ * An empty value restores the default rather than storing "", so clearing
+ * the field is a way back rather than a way to break it.
+ */
+async function setControlPlaneOrigin(origin: string): Promise<void> {
+  const trimmed = origin.trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    await chrome.storage.local.remove(STUDIO_KEY);
+    return;
+  }
+  if (!isValidControlPlaneOrigin(trimmed)) {
+    throw new Error(`"${origin}" is not a valid origin. Use something like http://127.0.0.1:8787.`);
+  }
+  await chrome.storage.local.set({ [STUDIO_KEY]: trimmed });
 }
 
 async function rememberLastTab(tabId: number): Promise<void> {
@@ -244,7 +268,7 @@ async function startSession(recording?: { name?: string; description?: string })
 }
 
 async function handoff(trace: ObservationTrace): Promise<HandoffResult> {
-  const origin = await getStudioOrigin();
+  const origin = await getControlPlaneOrigin();
   try {
     const response = await fetch(`${origin}/api/traces`, {
       method: "POST",
@@ -252,7 +276,7 @@ async function handoff(trace: ObservationTrace): Promise<HandoffResult> {
       body: JSON.stringify(trace)
     });
     if (!response.ok) {
-      return { ok: false, message: `Training Studio rejected the trace (${response.status}).` };
+      return { ok: false, message: `The control plane at ${origin} rejected the trace (${response.status}).` };
     }
     return {
       ok: true,
@@ -263,9 +287,32 @@ async function handoff(trace: ObservationTrace): Promise<HandoffResult> {
   } catch {
     return {
       ok: false,
-      message: `Training Studio unreachable at ${origin}. The trace is kept here — copy it from this popup.`
+      // Names the control plane, not "the Training Studio": the Studio UI
+      // runs on a different port, and saying otherwise sent someone to
+      // check the wrong server while the right one was simply not running.
+      message:
+        `No control plane is answering at ${origin}. Start it with "npm run dev:semanticizer", then press ` +
+        `Retry — the recording is kept here and nothing has been lost.`
     };
   }
+}
+
+/**
+ * Re-sends the retained trace.
+ *
+ * A handoff fails for reasons that are usually over in seconds — the
+ * control plane was not running, or was pointed at the wrong port — and
+ * until now the only way back was copying JSON out of this popup and
+ * curling it in by hand. The trace was never lost; it was just unreachable
+ * from the UI holding it.
+ */
+async function resendTrace(): Promise<SessionStatus> {
+  const stored = await chrome.storage.local.get(TRACE_KEY);
+  const trace = stored[TRACE_KEY] as ObservationTrace | undefined;
+  if (!trace) return status();
+  const result = await handoff(trace);
+  await chrome.storage.local.set({ [HANDOFF_KEY]: result });
+  return status();
 }
 
 async function stopSession(): Promise<SessionStatus> {
@@ -309,6 +356,7 @@ async function status(): Promise<SessionStatus> {
     ...(recordingTabId !== undefined ? { tabId: recordingTabId } : {}),
     captureEvents: session?.count() ?? 0,
     settings: await getSettings(),
+    studioOrigin: await getControlPlaneOrigin(),
     ...(stored[HANDOFF_KEY] ? { lastHandoff: stored[HANDOFF_KEY] as HandoffResult } : {}),
     hasTrace: Boolean(stored[TRACE_KEY])
   };
@@ -332,6 +380,20 @@ async function handle(message: ToBackgroundMessage, senderTabId?: number): Promi
     case "session:trace": {
       const stored = await chrome.storage.local.get(TRACE_KEY);
       return { trace: stored[TRACE_KEY] as ObservationTrace | undefined };
+    }
+    case "session:resend":
+      return resendTrace();
+    case "session:origin": {
+      try {
+        await setControlPlaneOrigin(message.origin);
+      } catch (error) {
+        // Reported through the same channel as a failed handoff, so the
+        // popup has one place to show what went wrong.
+        await chrome.storage.local.set({
+          [HANDOFF_KEY]: { ok: false, message: error instanceof Error ? error.message : String(error) }
+        });
+      }
+      return status();
     }
     case "capture:context": {
       await loadState();

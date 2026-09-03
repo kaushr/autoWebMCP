@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { replaceMessageListener, type MessageListenerHost } from "../extension/src/protocol";
+import {
+  DEFAULT_CONTROL_PLANE_ORIGIN,
+  isValidControlPlaneOrigin,
+  replaceMessageListener,
+  type MessageListenerHost
+} from "../extension/src/protocol";
 
 /* ------------------------------------------------------------------ *
  * One live listener per document.
@@ -91,5 +96,55 @@ describe("replaceMessageListener", () => {
         expect(channel.live).toContain(listener);
       }
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Where a recording is sent.
+ *
+ * This setting was readable from the first commit and writable by nothing
+ * at all — no popup field, no options page, no message handler. It looked
+ * configurable while being effectively hardcoded, so a control plane on a
+ * different port meant a failed handoff and a copy-and-curl recovery.
+ *
+ * Now that it can be set, what may be set matters: this value decides
+ * where a recording of the user's own application is POSTed.
+ * ------------------------------------------------------------------ */
+
+describe("isValidControlPlaneOrigin", () => {
+  it("accepts a bare http or https origin", () => {
+    expect(isValidControlPlaneOrigin("http://127.0.0.1:8787")).toBe(true);
+    expect(isValidControlPlaneOrigin("http://localhost:9000")).toBe(true);
+    expect(isValidControlPlaneOrigin("https://studio.example.com")).toBe(true);
+  });
+
+  it("rejects anything carrying more than an origin", () => {
+    // A path, query, or fragment means the caller has something other than
+    // an origin in mind, and `${origin}/api/traces` would mangle it.
+    expect(isValidControlPlaneOrigin("http://127.0.0.1:8787/api")).toBe(false);
+    expect(isValidControlPlaneOrigin("http://127.0.0.1:8787/?x=1")).toBe(false);
+    expect(isValidControlPlaneOrigin("http://127.0.0.1:8787/#x")).toBe(false);
+  });
+
+  it("rejects a scheme that is not http or https", () => {
+    // Nothing should be able to point a recording at a script URL or a
+    // local file by typing it into a text box.
+    expect(isValidControlPlaneOrigin("javascript:alert(1)")).toBe(false);
+    expect(isValidControlPlaneOrigin("file:///etc/passwd")).toBe(false);
+    expect(isValidControlPlaneOrigin("chrome-extension://abc")).toBe(false);
+  });
+
+  it("rejects what is not a URL at all", () => {
+    expect(isValidControlPlaneOrigin("127.0.0.1:8787")).toBe(false);
+    expect(isValidControlPlaneOrigin("")).toBe(false);
+    expect(isValidControlPlaneOrigin("   ")).toBe(false);
+  });
+
+  it("keeps the default pointing at the control plane, not the Studio UI", () => {
+    // The Studio page runs on Vite and proxies /api here. Conflating the
+    // two is what made a failed handoff report "Training Studio
+    // unreachable at …:8787" — naming one thing and showing another's port.
+    expect(DEFAULT_CONTROL_PLANE_ORIGIN).toBe("http://127.0.0.1:8787");
+    expect(isValidControlPlaneOrigin(DEFAULT_CONTROL_PLANE_ORIGIN)).toBe(true);
   });
 });

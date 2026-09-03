@@ -19,6 +19,19 @@ function render(status: SessionStatus): void {
   ($("copy") as HTMLButtonElement).disabled = !status.hasTrace;
   ($("capture-values") as HTMLInputElement).checked = status.settings.captureValues;
 
+  // Offered only when there is something to resend AND the last attempt
+  // failed: a retry button beside a successful handoff invites a person to
+  // send the same recording twice for no reason.
+  const resend = $("resend") as HTMLButtonElement;
+  const retryable = status.hasTrace && status.lastHandoff?.ok === false;
+  resend.hidden = !retryable;
+  resend.disabled = !retryable;
+
+  // Left alone while focused, so re-rendering every second does not
+  // overwrite what someone is halfway through typing.
+  const origin = $("control-origin") as HTMLInputElement;
+  if (document.activeElement !== origin) origin.value = status.studioOrigin;
+
   const notice = $("notice");
   if (status.lastHandoff) {
     notice.hidden = false;
@@ -63,6 +76,12 @@ $("capture-values").addEventListener("change", (event) =>
     settings: { captureValues: (event.target as HTMLInputElement).checked }
   })
 );
+$("resend").addEventListener("click", () => void send({ type: "session:resend" }));
+
+$("save-origin").addEventListener("click", () =>
+  void send({ type: "session:origin", origin: ($("control-origin") as HTMLInputElement).value })
+);
+
 $("copy").addEventListener("click", async () => {
   const response = await chrome.runtime.sendMessage<TraceResponse>({ type: "session:trace" });
   if (!response.trace) return;

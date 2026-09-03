@@ -4,8 +4,36 @@ import type { BrowserExecutionBinding } from "../../src/binding/browserExecution
 import type { DomainInspection } from "../../src/binding/browserExecution/execute";
 import type { ExecutionResult } from "../../src/binding/browserExecution/result";
 
-/** Where the extension hands its normalized trace to the Training Studio. */
-export const DEFAULT_STUDIO_ORIGIN = "http://127.0.0.1:8787";
+/**
+ * Where the extension POSTs its normalized trace.
+ *
+ * This is the CONTROL PLANE's origin, not the Studio UI's — the Studio
+ * page runs on Vite (5173) and proxies `/api` here, while the extension
+ * posts to the API directly so a handoff works whether or not the UI is
+ * running. Naming it "studio" cost real debugging time once: a failed
+ * handoff said "Training Studio unreachable at …:8787", which names one
+ * thing and shows another's port, and sent someone to check the wrong
+ * server.
+ *
+ * Overridable at runtime — see `session:origin`.
+ */
+export const DEFAULT_CONTROL_PLANE_ORIGIN = "http://127.0.0.1:8787";
+
+/**
+ * Whether a string is usable as a control-plane origin.
+ *
+ * Deliberately strict: this value decides where a recording of the user's
+ * own application is sent, so it must be an origin and nothing more — no
+ * path, no query, and http/https only.
+ */
+export function isValidControlPlaneOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.pathname === "/" && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
 
 export interface CaptureSettings {
   /**
@@ -34,6 +62,8 @@ export interface SessionStatus {
   settings: CaptureSettings;
   lastHandoff?: HandoffResult;
   hasTrace: boolean;
+  /** Where traces are sent, so the popup can show and change it. */
+  studioOrigin: string;
 }
 
 /**
@@ -107,6 +137,10 @@ export type ToBackgroundMessage =
   | { type: "session:status" }
   | { type: "session:settings"; settings: Partial<CaptureSettings> }
   | { type: "session:trace" }
+  /** Re-send the retained trace, after a failed handoff or a corrected origin. */
+  | { type: "session:resend" }
+  /** Point the extension at a different control plane. `origin` empty restores the default. */
+  | { type: "session:origin"; origin: string }
   | { type: "capture:context"; sessionId: string; application: CaptureApplicationContext }
   | { type: "capture:events"; sessionId: string; events: CaptureEvent[]; rrwebEvents: number }
   | { type: "browser-binding:execute"; request: BrowserBindingExecuteRequest }
