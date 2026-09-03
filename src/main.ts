@@ -2312,22 +2312,6 @@ function bindHarnessEvents(): void {
     control.addEventListener("input", commit);
   }
 
-  for (const button of document.querySelectorAll<HTMLButtonElement>("button.not-a-record-field")) {
-    button.addEventListener("click", () => {
-      const name = button.dataset.inputName;
-      if (!candidate || !name) return;
-      // Reclassified, not answered: the input keeps its name and stops
-      // being something grounding looks for a record field behind.
-      candidate = {
-        ...candidate,
-        inputs: candidate.inputs.map((input) => (input.name === name ? { ...input, role: "query" as const } : input))
-      };
-      runSemanticGrounding();
-      semanticizerStatus = `"${name}" is now treated as a search term rather than a field on the record.`;
-      render();
-    });
-  }
-
   document.querySelector<HTMLSelectElement>("#harness-tool")?.addEventListener("change", (event) => {
     selectedToolName = (event.currentTarget as HTMLSelectElement).value;
     harnessValues = {};
@@ -2768,6 +2752,22 @@ function render(): void {
       clarificationDraft = { ...clarificationDraft, [input.id]: input.value };
     });
   }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button.not-a-record-field")) {
+    button.addEventListener("click", () => {
+      const name = button.dataset.inputName;
+      if (!candidate || !name) return;
+      // Reclassified, not answered: the input keeps its name and stops
+      // being something grounding looks for a record field behind.
+      candidate = {
+        ...candidate,
+        inputs: candidate.inputs.map((input) => (input.name === name ? { ...input, role: "query" as const } : input))
+      };
+      runSemanticGrounding();
+      semanticizerStatus = `"${name}" is now treated as a search term rather than a field on the record.`;
+      render();
+    });
+  }
+
   for (const button of document.querySelectorAll<HTMLButtonElement>("button.submit-clarification")) {
     button.addEventListener("click", () => {
       const input = document.querySelector<HTMLInputElement>(`#${CSS.escape(button.dataset.answerId ?? "")}`);
