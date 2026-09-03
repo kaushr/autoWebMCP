@@ -1527,12 +1527,19 @@ function renderQueryCandidates(): string {
       queryOutcome.warnings.join(" ") || "The search returned no candidates."
     )}</p>`;
   }
+  // Type is a column, not a footnote. A search returns whatever the
+  // application found, and which KIND of record a candidate is decides
+  // whether a given tool can act on it at all — an Account id handed to an
+  // Opportunity tool is refused at the mutation, and a caller should be
+  // able to see that coming.
   return `<div class="table-scroll"><table class="comparison">
-      <thead><tr><th>Name</th><th>Identity</th></tr></thead>
+      <thead><tr><th>Name</th><th>Type</th><th>Identity</th></tr></thead>
       <tbody>${queryOutcome.candidates
         .map(
           (candidate) =>
-            `<tr><td>${escapeHtml(candidate.name)}</td><td><code>${escapeHtml(candidate.id)}</code></td></tr>`
+            `<tr><td>${escapeHtml(candidate.name)}</td>
+             <td>${escapeHtml(candidate.entityType)}</td>
+             <td><code>${escapeHtml(candidate.id)}</code></td></tr>`
         )
         .join("")}</tbody>
     </table></div>
