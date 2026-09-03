@@ -8,6 +8,7 @@ import {
   pressKey,
   resolveSemanticTarget,
   setFieldValue,
+  typeText,
   waitForApplicationReaction,
   type PlatformResolverAdapter
 } from "./engine";
@@ -365,7 +366,13 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
         executedAt: now()
       };
     }
-    const write = await setFieldValue(resolution.target, control.value, control.kind, adapter);
+    // Typed rather than written. A search control belongs to a component
+    // that tracks its own state from key events, and a value set directly
+    // sits in the box while the component believes the field is empty.
+    const write =
+      control.kind === "text"
+        ? await typeText(root, control.target, control.value, adapter)
+        : await setFieldValue(resolution.target, control.value, control.kind, adapter);
     if (!write.ok) {
       return {
         status: "blocked",
@@ -375,7 +382,7 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
         executedAt: now()
       };
     }
-    evidence.push(`Set "${control.name}" to ${JSON.stringify(control.value)}.`);
+    evidence.push(write.detail);
   }
 
   // Run it: a control if the application has one, otherwise the key the

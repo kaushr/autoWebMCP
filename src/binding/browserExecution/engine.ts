@@ -619,6 +619,73 @@ export async function readSemanticOptions(
  * the search field" describes an intention, not a coordinate or a
  * recorded event sequence.
  */
+/**
+ * Types a value one character at a time, as a person would.
+ *
+ * Setting `.value` and dispatching `input` reaches the DOM and stops
+ * there. A component framework keeps its own state, updated from the key
+ * events it listens for — so a live Salesforce search showed the term
+ * sitting in the box while the component believed it was empty, and
+ * submitting searched for nothing.
+ *
+ * Deliberately separate from `setFieldValue` rather than replacing it:
+ * field writes through the mutation path are proven working, and a form
+ * that accepts a direct write has no need of this.
+ */
+export async function typeText(
+  root: ParentNode,
+  target: SemanticTarget,
+  value: string,
+  adapter?: PlatformResolverAdapter
+): Promise<{ ok: boolean; detail: string }> {
+  const resolution = resolveSemanticTarget(root, target, adapter);
+  if (!resolution.ok) {
+    return { ok: false, detail: `Could not find "${target.label}" to type into: ${resolution.reason}` };
+  }
+
+  const resolved = resolution.target.element;
+  const native = collectElements(resolved, "input, textarea", policyFor(adapter)).find(
+    (candidate) => candidate instanceof HTMLElement && isVisible(candidate)
+  );
+  const element = (native ?? resolved) as HTMLElement;
+  if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
+    return { ok: false, detail: `"${target.label}" is not a control text can be typed into.` };
+  }
+
+  element.focus();
+  // Cleared through the same events, so the component sees the field
+  // emptied rather than finding a value it never observed arriving.
+  setNativeValue(element, "");
+  element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+
+  for (const character of value) {
+    dispatchKey(element, "keydown", character);
+    dispatchKey(element, "keypress", character);
+    setNativeValue(element, element.value + character);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: character }));
+    dispatchKey(element, "keyup", character);
+  }
+  element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+
+  return { ok: true, detail: `Typed ${JSON.stringify(value)} into "${target.label}".` };
+}
+
+/** Writes through the prototype setter, which is what framework-patched inputs observe. */
+function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  if (setter) setter.call(element, value);
+  else element.value = value;
+}
+
+function dispatchKey(element: Element, type: string, key: string): void {
+  const event = new KeyboardEvent(type, { key, bubbles: true, cancelable: true, composed: true });
+  const legacy = KEY_CODES[key] ?? key.charCodeAt(0);
+  Object.defineProperty(event, "keyCode", { get: () => legacy });
+  Object.defineProperty(event, "which", { get: () => legacy });
+  element.dispatchEvent(event);
+}
+
 /** Legacy codes for the keys this engine sends. Only what is needed. */
 const KEY_CODES: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9 };
 

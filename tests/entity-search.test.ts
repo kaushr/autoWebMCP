@@ -356,7 +356,7 @@ describe("the search is performed through the application's own controls", () =>
     const outcome = await run({ name: "Acme Renewal" });
     expect((document.querySelector("#q") as HTMLInputElement).value).toBe("Acme Renewal");
     expect(document.querySelector("#results")?.getAttribute("data-searched")).toBe("true");
-    expect(outcome.evidence.join(" ")).toMatch(/Set "name" to "Acme Renewal"/);
+    expect(outcome.evidence.join(" ")).toMatch(/Typed "Acme Renewal"/);
   });
 
   it("refuses without a search term rather than listing the whole page", async () => {
@@ -606,5 +606,47 @@ describe("a synthetic key carries what the application reads", () => {
       quietMs: 10
     });
     expect(onInner).toBe(1);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Typing, as opposed to writing.
+ *
+ * A live search showed the term sitting in the box while the component
+ * believed the field was empty: the value had been set directly, and a
+ * framework that keeps its own state updates it from key events. Pressing
+ * Enter then searched for nothing.
+ * ------------------------------------------------------------------ */
+
+describe("a search term is typed the way a person types it", () => {
+  it("emits key events per character, so a component can follow along", async () => {
+    const { typeText } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Search</label><input id="q" />`;
+    const input = document.querySelector("#q") as HTMLInputElement;
+
+    // What a component listening for keys would see.
+    const observed: string[] = [];
+    input.addEventListener("input", () => observed.push(input.value));
+
+    const result = await typeText(document.body, { role: "field", label: "Search" }, "Acme", adapter());
+
+    expect(result.ok).toBe(true);
+    expect(input.value).toBe("Acme");
+    // Cleared first, then built up one character at a time.
+    expect(observed).toEqual(["", "A", "Ac", "Acm", "Acme"]);
+  });
+
+  it("types into the control inside a component host", async () => {
+    const { typeText } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<div role="textbox" aria-label="Search"><input id="inner" /></div>`;
+    await typeText(document.body, { role: "field", label: "Search" }, "PS", adapter());
+    expect((document.querySelector("#inner") as HTMLInputElement).value).toBe("PS");
+  });
+
+  it("refuses a control that text cannot be typed into", async () => {
+    const { typeText } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<div role="button" aria-label="Search">Search</div>`;
+    const result = await typeText(document.body, { role: "button", label: "Search" }, "PS", adapter());
+    expect(result.ok).toBe(false);
   });
 });
