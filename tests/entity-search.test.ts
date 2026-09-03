@@ -500,6 +500,36 @@ describe("a search that never ran returns nothing", () => {
   });
 });
 
+describe("searching twice for the same thing answers twice", () => {
+  it("returns records that were already linked, when the application navigated", async () => {
+    // The live failure: a second search from the results page returned
+    // nothing, because everything it found had been on screen when it
+    // started. Excluding pre-existing links is right only while the page
+    // has not changed — once the application answers by navigating, the
+    // page IS the answer.
+    document.body.innerHTML = `
+      <label for="q">Search</label><input id="q" /><button id="go">Search</button>
+      <h3><a href="/lightning/r/${ACME_A}/view">Already showing</a></h3>
+    `;
+    window.history.pushState({}, "", "/one/one.app#firstSearch");
+    document.querySelector("#go")!.addEventListener("click", () => {
+      window.history.pushState({}, "", "/one/one.app#secondSearch");
+    });
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: { ...BINDING, submit: { role: "button", label: "Search" }, submitKey: undefined },
+      inputs: { name: "PS" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 500
+    });
+
+    expect(outcome.candidates.map((c) => c.id)).toEqual([ACME_A]);
+  });
+});
+
 /* ============ the handoff into a mutation ============ */
 
 describe("what search returns is what update requires", () => {

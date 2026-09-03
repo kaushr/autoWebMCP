@@ -244,6 +244,8 @@ async function collectCandidates(
   identity: EntityIdentityPolicy,
   adapter: PlatformResolverAdapter | undefined,
   waitMs = RESULTS_WAIT_MS,
+  /** Whether the application has navigated since the search was submitted. */
+  navigated: () => boolean = () => false,
   /**
    * What the page was already linking to before the search ran.
    *
@@ -257,15 +259,19 @@ async function collectCandidates(
 ): Promise<EntityCandidate[]> {
   const deadline = Date.now() + waitMs;
   for (;;) {
-    // A record the page was already linking to is not something this
-    // search surfaced, whenever the reading happens. Filtering rather than
-    // merely waiting is what makes a search that never ran return nothing:
-    // waiting alone still handed back the previous page's links once the
-    // window closed, which is how a search run from an Opportunity record
-    // answered with that record's account and owner.
-    const found = candidatesOnPage(root, entityType, identity, adapter).filter(
-      (candidate) => !before.has(candidate.id)
-    );
+    const all = candidatesOnPage(root, entityType, identity, adapter);
+    // Whether what is on screen answers THIS search.
+    //
+    // If the application navigated in response, the page is its answer and
+    // everything on it counts — including records that were already
+    // linked, because searching twice for the same thing must not return
+    // less the second time.
+    //
+    // If it did not navigate, the page is the one we started on, and the
+    // links that were already there are not results. That distinction is
+    // what stops a search run from a record page reporting that record's
+    // own account and owner as matches.
+    const found = navigated() ? all : all.filter((candidate) => !before.has(candidate.id));
     if (found.length > 0 || Date.now() >= deadline) return found;
     await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
@@ -315,6 +321,14 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // merely because record links exist — they may be the ones that were
   // there before it ran.
   const before = new Set(candidatesOnPage(root, undefined, identity, adapter).map((candidate) => candidate.id));
+  // The whole address, hash included: a platform that carries the search
+  // term in its own URL fragment changes only that when asked something
+  // new, and it is still the application answering.
+  const locationOf = (): string | undefined => {
+    const document = root instanceof Document ? root : (root as Element).ownerDocument;
+    return document?.location?.href;
+  };
+  const addressBefore = locationOf();
 
   // Reveal the search field first, when the demonstration showed it being
   // opened. A control that is not on screen cannot be resolved, and the
@@ -399,7 +413,15 @@ export async function executeQuery(options: ExecuteQueryOptions): Promise<QueryO
   // that matches nothing must not spin for the full budget every time, but
   // it is the only case that pays it.
   // Everything identifiable, not only the type the recording ended on.
-  const candidates = await collectCandidates(root, undefined, identity, adapter, options.resultsWaitMs, before);
+  const candidates = await collectCandidates(
+    root,
+    undefined,
+    identity,
+    adapter,
+    options.resultsWaitMs,
+    () => locationOf() !== addressBefore,
+    before
+  );
   evidence.push(
     candidates.length === 0
       ? "No identifiable records were found on the page after searching."
