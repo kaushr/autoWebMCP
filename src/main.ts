@@ -1531,12 +1531,22 @@ function renderQueryStage(capability: SemanticCapability): string {
 }
 
 /** What the application offered, with the identity a later step would use. */
+/** Every step the search took, which is where a failure explains itself. */
+function renderQueryEvidence(): string {
+  const evidence = queryOutcome?.evidence ?? [];
+  if (evidence.length === 0) return "";
+  return `<details class="admin-raw"><summary>What the search did</summary>
+      <ul class="reasons">${evidence.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+    </details>`;
+}
+
 function renderQueryCandidates(): string {
   if (!queryOutcome) return "";
   if (queryOutcome.candidates.length === 0) {
     return `<p class="semanticizer-status">${escapeHtml(
       queryOutcome.warnings.join(" ") || "The search returned no candidates."
-    )}</p>`;
+    )}</p>
+    ${renderQueryEvidence()}`;
   }
   // Type is a column, not a footnote. A search returns whatever the
   // application found, and which KIND of record a candidate is decides
@@ -1558,7 +1568,8 @@ function renderQueryCandidates(): string {
       queryOutcome.warnings.length
         ? `<p class="ambiguity">${queryOutcome.warnings.map(escapeHtml).join(" ")}</p>`
         : ""
-    }`;
+    }
+    ${renderQueryEvidence()}`;
 }
 
 function renderPublicationStage(view: StudioLifecycleView): string {
