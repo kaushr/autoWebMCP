@@ -25,7 +25,7 @@ import {
 } from "./composedTree";
 import { observeSurfaces, type SurfaceObservation } from "./surfaceObservation";
 import type { ResolutionPolicy } from "./resolutionPolicy";
-import { identityFromPath, type EntityIdentityPolicy } from "./entityIdentity";
+import { identityFromPath, routeFor, type EntityIdentityPolicy } from "./entityIdentity";
 import { canTypeDisplayDate, formatDisplayDate } from "./dateRepresentation";
 import {
   DEFAULT_PAGE_STATE_POLICY,
@@ -857,6 +857,10 @@ async function setDateValue(
   };
 }
 
+/** Generous: an SPA route change plus a record view rendering. */
+const NAVIGATION_TIMEOUT_MS = 15_000;
+const NAVIGATION_POLL_MS = 200;
+
 const EDIT_WAIT_TIMEOUT_MS = 5_000;
 const EDIT_WAIT_POLL_MS = 100;
 
@@ -1391,6 +1395,54 @@ export function createSalesforceResolverAdapter(
       // once the component has settled.
       if (valueKind === "select") return setPicklistValue(resolved, value, policy);
       return undefined;
+    },
+
+    /**
+     * Navigates to a record by its identity, and waits until the page says
+     * it is there.
+     *
+     * The route comes from the pack's own template, so nothing here knows
+     * what a Salesforce URL looks like. Lightning routes client-side, which
+     * is what makes this safe to run inside an execution: a full page load
+     * would tear down the very script performing it.
+     *
+     * Arrival is PROVEN by re-reading the identity, never assumed from the
+     * navigation call returning. A route that silently redirects — a
+     * deleted record, a permission failure — must not read as having
+     * arrived.
+     */
+    async navigateToEntity(
+      identity: EntityIdentity,
+      root: ParentNode,
+      _policy: ResolutionPolicy,
+      timeoutMs = NAVIGATION_TIMEOUT_MS
+    ): Promise<{ ok: boolean; detail: string }> {
+      if (!entityIdentity) {
+        return { ok: false, detail: "This platform declares no navigable route for its records." };
+      }
+      const document = root instanceof Document ? root : (root as Element).ownerDocument;
+      const view = document?.defaultView;
+      if (!document || !view) return { ok: false, detail: "No browsing context is available to navigate." };
+
+      const path = routeFor(identity, entityIdentity);
+      view.location.assign(path);
+
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const observed = identityFromPath(document.location?.pathname ?? "", entityIdentity);
+        if (observed && observed.id === identity.id) {
+          // The route being right is not the view being ready.
+          await waitForApplicationReaction({ root, quietMs: 300, timeoutMs: 5_000 });
+          return { ok: true, detail: `Navigated to ${identity.entityType ?? "record"} ${identity.id}.` };
+        }
+        if (Date.now() >= deadline) {
+          return {
+            ok: false,
+            detail: `The page did not reach ${identity.id} within ${Math.round(timeoutMs / 1000)}s of navigating to ${path}.`
+          };
+        }
+        await sleep(NAVIGATION_POLL_MS);
+      }
     },
 
     assessValidation(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment {

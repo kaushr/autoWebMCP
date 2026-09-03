@@ -572,21 +572,52 @@ async function establishTarget(options: ExecuteOptions): Promise<{
     };
   }
 
-  if (!sameEntity(observed, { id: requestedId, ...(declared?.entityType ? { entityType: declared.entityType } : {}) })) {
+  const wanted = { id: requestedId, ...(declared?.entityType ? { entityType: declared.entityType } : {}) };
+  if (!sameEntity(observed, wanted)) {
+    // A capability that can only act on what is already open cannot be
+    // called by an agent: it has opened nothing and can open nothing.
+    // Establishing the precondition belongs to the execution, not to the
+    // caller — so the record is opened rather than demanded.
+    const navigated = await adapter?.navigateToEntity?.(wanted, root, policyFor(adapter));
+    const arrived = navigated?.ok ? adapter?.observeEntityIdentity?.(root, policyFor(adapter)) : undefined;
+
+    if (arrived && sameEntity(arrived, wanted)) {
+      const state: ExecutionTarget = {
+        requestedId,
+        beforeId: arrived.id,
+        ...(arrived.entityType ? { entityType: arrived.entityType } : {}),
+        status: "verified",
+        detail: `Opened ${requestedId}, which was not the record showing (${observed.id}).`
+      };
+      return {
+        state,
+        check: { name: "target_identity", status: "pass", detail: state.detail },
+        evidence: [navigated!.detail, `Target identity confirmed after navigating: ${arrived.id}.`]
+      };
+    }
+
+    // Navigation is not proof of arrival. A route that redirects — a
+    // deleted record, a permission failure — lands somewhere else, and
+    // writing there would be the exact failure this gate exists to stop.
+    const landed = arrived?.id ?? observed.id;
     const state: ExecutionTarget = {
       requestedId,
-      beforeId: observed.id,
+      beforeId: landed,
       ...(observed.entityType ? { entityType: observed.entityType } : {}),
       status: "mismatch",
-      detail: `Requested ${requestedId}, but ${observed.id} is open.`
+      detail: navigated
+        ? `Requested ${requestedId}; after navigating, ${landed} is open.`
+        : `Requested ${requestedId}, but ${landed} is open.`
     };
     return {
       state,
       check: { name: "target_identity", status: "fail", detail: state.detail },
-      evidence: [],
+      evidence: navigated ? [navigated.detail] : [],
       refuse:
-        `Execution stopped before touching anything — ${state.detail} Open the requested record first; AutoWebMCP ` +
-        "will not navigate during an execution, and will not write to a record that was not asked for."
+        `Execution stopped before touching anything — ${state.detail} ` +
+        (navigated
+          ? "AutoWebMCP will not write to a record it could not reach."
+          : "This platform offers no way to open a record, so it must be opened first.")
     };
   }
 

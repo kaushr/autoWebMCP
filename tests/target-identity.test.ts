@@ -83,16 +83,41 @@ function mountEditForm(): HTMLElement {
  * The real adapter, with only identity observation overridden so a test can
  * say which record is open — and change it mid-execution.
  */
-function adapterOnRecord(sequence: (string | undefined)[]): PlatformResolverAdapter {
+function adapterOnRecord(
+  sequence: (string | undefined)[],
+  /**
+   * What navigating does. Omitted means the platform cannot navigate at
+   * all, which is a real case — a platform with no declared route leaves
+   * the caller to open the record.
+   */
+  navigate?: { lands: string | undefined; ok?: boolean }
+): PlatformResolverAdapter {
   const base = resolverAdapterForPlatform("salesforce-lightning")!;
   let call = 0;
+  let current: string | undefined;
+  const next = (): string | undefined => {
+    const id = current ?? sequence[Math.min(call, sequence.length - 1)];
+    call += 1;
+    return id;
+  };
   return {
     ...base,
     observeEntityIdentity() {
-      const id = sequence[Math.min(call, sequence.length - 1)];
-      call += 1;
+      const id = next();
       return id ? { id, entityType: "Opportunity" } : undefined;
-    }
+    },
+    ...(navigate
+      ? {
+          navigateToEntity: async () => {
+            // Where the browser actually ended up, which is not necessarily
+            // where it was asked to go.
+            current = navigate.lands;
+            return navigate.ok === false
+              ? { ok: false, detail: "Navigation failed." }
+              : { ok: true, detail: `Navigated to ${navigate.lands}.` };
+          }
+        }
+      : { navigateToEntity: undefined })
   };
 }
 
@@ -153,7 +178,9 @@ describe("the target is established before anything is touched", () => {
     expect(stageValue()).toBe("Confirm");
   });
 
-  it("refuses without mutating anything when a different record is open", async () => {
+  it("refuses without mutating anything when it cannot open the requested record", async () => {
+    // No navigation available: the platform declares no route, so the
+    // record must already be open and this one is not.
     const result = await run(adapterOnRecord([RECORD_B]), { opportunity_id: RECORD_A, stage: "Confirm" });
 
     expect(result.status).toBe("blocked");
@@ -163,7 +190,7 @@ describe("the target is established before anything is touched", () => {
     expect(stageValue()).toBe("Engage");
     expect(result.transactions).toBeUndefined();
     expect(result.checks.some((check) => check.name === "editable_state")).toBe(false);
-    expect(result.warnings.join(" ")).toMatch(/will not write to a record that was not asked for/i);
+    expect(result.warnings.join(" ")).toMatch(/no way to open a record/i);
   });
 
   it("refuses when the platform cannot say which record is open", async () => {
@@ -178,6 +205,47 @@ describe("the target is established before anything is touched", () => {
     const result = await run(adapterOnRecord([RECORD_A]), { stage: "Confirm" });
     expect(result.status).toBe("blocked");
     expect(result.warnings.join(" ")).toMatch(/must say which record it means/i);
+    expect(stageValue()).toBe("Engage");
+  });
+});
+
+describe("the execution opens the record it was asked for", () => {
+  it("navigates when a different record is showing, then writes", async () => {
+    // The gap that made this unusable by an agent: it had opened nothing
+    // and could open nothing, so a capability that only acts on what is
+    // already showing could never be called.
+    const result = await run(adapterOnRecord([RECORD_B], { lands: RECORD_A }), {
+      opportunity_id: RECORD_A,
+      stage: "Confirm"
+    });
+
+    expect(result.target?.status).toBe("verified");
+    expect(result.checks.find((check) => check.name === "target_identity")?.status).toBe("pass");
+    expect(result.evidence.join(" ")).toMatch(/navigated to/i);
+    expect(stageValue()).toBe("Confirm");
+  });
+
+  it("refuses when navigation lands somewhere else", async () => {
+    // Navigating is not arriving. A route that redirects — a deleted
+    // record, a permission failure — lands elsewhere, and writing there is
+    // exactly the failure this gate exists to stop.
+    const result = await run(adapterOnRecord([RECORD_B], { lands: "006CCCCCCCCCCCCCCC" }), {
+      opportunity_id: RECORD_A,
+      stage: "Confirm"
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.target?.status).toBe("mismatch");
+    expect(stageValue()).toBe("Engage");
+    expect(result.warnings.join(" ")).toMatch(/could not reach/i);
+  });
+
+  it("refuses when navigation itself fails", async () => {
+    const result = await run(adapterOnRecord([RECORD_B], { lands: RECORD_B, ok: false }), {
+      opportunity_id: RECORD_A,
+      stage: "Confirm"
+    });
+    expect(result.status).toBe("blocked");
     expect(stageValue()).toBe("Engage");
   });
 });

@@ -134,6 +134,24 @@ export interface PlatformResolverAdapter {
    * NAME: two records may share one, and a name is not an identity.
    */
   observeEntityIdentity?(root: ParentNode, policy: ResolutionPolicy): EntityIdentity | undefined;
+  /**
+   * Brings the requested entity on screen, and proves it arrived.
+   *
+   * A capability that can only act on what is already open is unusable by
+   * an agent: it has opened nothing and can open nothing. Establishing the
+   * precondition is the execution's own job, not a requirement placed on
+   * the caller.
+   *
+   * `undefined` declines — a platform with no navigable route leaves the
+   * caller to open the record, and the identity gate then refuses rather
+   * than writing to whatever is showing.
+   */
+  navigateToEntity?(
+    identity: EntityIdentity,
+    root: ParentNode,
+    policy: ResolutionPolicy,
+    timeoutMs?: number
+  ): Promise<{ ok: boolean; detail: string }> | undefined;
   assessValidation?(root: ParentNode, policy: ResolutionPolicy): ValidationAssessment | undefined;
   isEditStateClosed?(root: ParentNode, policy: ResolutionPolicy): boolean | undefined;
   /**
