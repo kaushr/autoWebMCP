@@ -742,8 +742,21 @@ export async function pressKey(
     }
     element.dispatchEvent(event);
   }
+  // A search input has its own event. Browsers fire `search` when Enter is
+  // pressed in `input[type=search]`, and an application listening for that
+  // never hears the key sequence at all — which is how a synthetic Enter
+  // came to leave a list unfiltered while every keystroke arrived
+  // correctly.
+  const searchInput = element instanceof HTMLInputElement && element.type === "search";
+  if (searchInput && key === "Enter") {
+    element.dispatchEvent(new Event("search", { bubbles: true, composed: true }));
+  }
+
   await waitForApplicationReaction({ root, ...reaction });
-  return { ok: true, detail: `Pressed ${key} on "${target.label}".` };
+  return {
+    ok: true,
+    detail: `Pressed ${key} on "${target.label}"${searchInput && key === "Enter" ? ", and fired its search event" : ""}.`
+  };
 }
 
 export async function invokeSemanticAction(

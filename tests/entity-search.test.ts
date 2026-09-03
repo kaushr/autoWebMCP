@@ -737,3 +737,33 @@ describe("a search term is typed the way a person types it", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("a search input has an event of its own", () => {
+  it("fires `search` when Enter is pressed in input[type=search]", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    // Browsers fire this natively on Enter, and an application listening
+    // for it never hears the key sequence — which left a live list
+    // unfiltered while every keystroke arrived correctly.
+    document.body.innerHTML = `<label for="q">Search this list...</label><input id="q" type="search" />`;
+    let fired = 0;
+    document.querySelector("#q")!.addEventListener("search", () => (fired += 1));
+
+    await pressKey(document.body, { role: "field", label: "Search this list..." }, "Enter", adapter(), {
+      timeoutMs: 40,
+      quietMs: 10
+    });
+    expect(fired).toBe(1);
+  });
+
+  it("fires it only for a search input, and only for Enter", async () => {
+    const { pressKey } = await import("../src/binding/browserExecution/engine");
+    document.body.innerHTML = `<label for="q">Plain</label><input id="q" type="text" />`;
+    let fired = 0;
+    document.querySelector("#q")!.addEventListener("search", () => (fired += 1));
+    await pressKey(document.body, { role: "field", label: "Plain" }, "Enter", adapter(), {
+      timeoutMs: 40,
+      quietMs: 10
+    });
+    expect(fired).toBe(0);
+  });
+});
