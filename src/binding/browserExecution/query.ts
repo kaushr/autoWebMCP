@@ -257,10 +257,16 @@ async function collectCandidates(
 ): Promise<EntityCandidate[]> {
   const deadline = Date.now() + waitMs;
   for (;;) {
-    const found = candidatesOnPage(root, entityType, identity, adapter);
-    // Arrival is the page offering something it was not offering before.
-    const changed = found.some((candidate) => !before.has(candidate.id));
-    if ((found.length > 0 && changed) || Date.now() >= deadline) return found;
+    // A record the page was already linking to is not something this
+    // search surfaced, whenever the reading happens. Filtering rather than
+    // merely waiting is what makes a search that never ran return nothing:
+    // waiting alone still handed back the previous page's links once the
+    // window closed, which is how a search run from an Opportunity record
+    // answered with that record's account and owner.
+    const found = candidatesOnPage(root, entityType, identity, adapter).filter(
+      (candidate) => !before.has(candidate.id)
+    );
+    if (found.length > 0 || Date.now() >= deadline) return found;
     await new Promise((resolve) => setTimeout(resolve, RESULTS_POLL_MS));
   }
 }

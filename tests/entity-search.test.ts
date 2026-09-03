@@ -62,9 +62,25 @@ function mountResults(): HTMLElement {
   return document.body;
 }
 
+/**
+ * A page where the results ARRIVE when the search runs, which is what a
+ * real one does. A fixture that has them mounted from the start cannot
+ * distinguish a search that worked from one that never ran.
+ */
+function mountSearchable(): HTMLElement {
+  const root = mountResults();
+  const results = document.querySelector("#results")!;
+  const html = results.innerHTML;
+  results.innerHTML = "";
+  document.querySelector("#go")!.addEventListener("click", () => {
+    results.innerHTML = html;
+  });
+  return root;
+}
+
 const run = (inputs: Record<string, string>) =>
   executeQuery({
-    root: mountResults(),
+    root: mountSearchable(),
     binding: BINDING,
     inputs,
     adapter: adapter(),
@@ -453,6 +469,34 @@ describe("results the page was already showing are not results", () => {
     });
 
     expect(outcome.candidates.map((c) => c.name)).toEqual(["An actual result"]);
+  });
+});
+
+describe("a search that never ran returns nothing", () => {
+  it("does not hand back the links that were already on the page", async () => {
+    // The live failure this closes. Run from an Opportunity record, the
+    // search never reached a results page, and after the wait expired the
+    // record's own account and owner were returned as if they were
+    // matches. Waiting alone was not enough: on timeout it still answered
+    // with whatever happened to be there.
+    document.body.innerHTML = `
+      <label for="q">Search</label><input id="q" /><button id="go">Search</button>
+      <h3><a href="/lightning/r/${ACCOUNT}/view">The account on this record</a></h3>
+      <h3><a href="/lightning/r/0055w00000BtwefAAB/view">The owner of this record</a></h3>
+    `;
+
+    const outcome = await executeQuery({
+      root: document.body,
+      binding: { ...BINDING, submit: undefined, submitKey: undefined },
+      inputs: { name: "PS" },
+      adapter: adapter(),
+      identity: IDENTITY,
+      reaction: { timeoutMs: 40, quietMs: 10 },
+      resultsWaitMs: 100
+    });
+
+    expect(outcome.candidates).toEqual([]);
+    expect(outcome.status).toBe("no-results");
   });
 });
 
