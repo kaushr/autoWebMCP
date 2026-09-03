@@ -469,6 +469,8 @@ let selectedToolName = "";
 let harnessValues: Record<string, string> = {};
 let harnessErrors: string[] = [];
 let harnessOutcome: HarnessInvocationOutcome | undefined;
+/** How long the last WebMCP invocation took, wall clock, around the call itself. */
+let harnessElapsedMs: number | undefined;
 let harnessStatus = "";
 
 /**
@@ -543,11 +545,19 @@ async function invokeSelectedTool(): Promise<void> {
   }
 
   await runOperation("invoke-webmcp", `Invoking ${tool.name} through WebMCP…`, async () => {
+    // Timed here, around the WebMCP call itself.
+    //
+    // An agent's tolerance turned out to be a hard contract — one gave up
+    // at roughly 23 seconds — and answering "how long did that take" from
+    // a stopwatch is how several evenings of measurement went wrong. The
+    // number belongs beside the result that took it.
+    const startedAt = performance.now();
     // Both shapes are the browser's, established empirically: the
     // RegisteredTool object itself, and the arguments JSON-encoded.
     const result = await document.modelContext!.executeTool(tool, JSON.stringify(collected.args));
+    harnessElapsedMs = Math.round(performance.now() - startedAt);
     harnessOutcome = readToolResult(result, "webmcp");
-    return { message: describeOutcome(harnessOutcome) };
+    return { message: `${describeOutcome(harnessOutcome)} (${(harnessElapsedMs / 1000).toFixed(1)}s)` };
   });
 }
 
@@ -2624,6 +2634,12 @@ function renderHarnessResult(): string {
         : ""
     }
     ${execution || harnessOutcome.query ? `<p><strong>${escapeHtml(describeOutcome(harnessOutcome))}</strong></p>` : ""}
+    ${
+      harnessElapsedMs !== undefined
+        ? `<p class="semanticizer-status">Took <strong>${(harnessElapsedMs / 1000).toFixed(1)}s</strong> through
+             <code>document.modelContext.executeTool</code>.</p>`
+        : ""
+    }
     ${renderHarnessCandidates(harnessOutcome)}
     ${renderHarnessTransactions(harnessOutcome)}
     ${execution ? renderDispatch(execution) : ""}
