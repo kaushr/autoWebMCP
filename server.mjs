@@ -1,4 +1,4 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
@@ -126,10 +126,53 @@ const MAX_TRACES = 20;
  * Capabilities a human has confirmed and then deliberately published.
  *
  * This is the control plane the cooperative site reads on load: a site holds no
- * generated capability until one is published here, and everything is lost on
- * restart, which is exactly the reset the demo wants.
+ * generated capability until one is published here.
+ *
+ * Unlike traces, these DO survive a restart, and the difference is what each
+ * one contains. A trace is a recording of the user's real application and
+ * stays in memory only. A publication is the confirmed contract plus its
+ * declarative binding — roles, visible labels, and the capability a human
+ * approved. No page content, no observed values, nothing read off a record.
+ *
+ * Persisting it is not a convenience. Restarting this process was silently
+ * unregistering every WebMCP tool, so a published capability disappeared from
+ * the surface an agent reads, with no event anywhere to say why — and the
+ * only way back was to walk the whole confirm-and-publish flow again. Both
+ * halves of a demo can be destroyed by an unrelated `node server.mjs`.
  */
-const publications = new Map();
+const STATE_DIR = join(process.cwd(), ".autowebmcp");
+const PUBLICATIONS_FILE = join(STATE_DIR, "publications.json");
+const publications = new Map(loadPublications());
+
+function loadPublications() {
+  try {
+    const stored = JSON.parse(readFileSync(PUBLICATIONS_FILE, "utf8"));
+    if (!Array.isArray(stored?.publications)) return [];
+    // Held to the same gate a fresh publish faces. A file edited by hand, or
+    // written by an older build, must not put something on an agent's tool
+    // surface that the publish path itself would have refused.
+    const usable = stored.publications.filter((record) => !capabilityProblem(record?.capability));
+    const rejected = stored.publications.length - usable.length;
+    if (usable.length) console.log(`restored ${usable.length} published capabilities`);
+    if (rejected) console.log(`ignored ${rejected} stored publication(s) that no longer pass the publish gate`);
+    return usable.map((record) => [record.capability.id, record]);
+  } catch {
+    // No file yet, or an unreadable one. Starting empty is the correct
+    // fallback: publishing again rewrites it.
+    return [];
+  }
+}
+
+function savePublications() {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(PUBLICATIONS_FILE, JSON.stringify({ publications: [...publications.values()] }, null, 2));
+  } catch (error) {
+    // Never fail the request over this. The capability IS published in
+    // memory and works right now; only surviving a restart is lost.
+    console.warn(`could not persist publications: ${error.message}`);
+  }
+}
 
 function corsHeaders(request) {
   const origin = request.headers.origin ?? "";
@@ -257,6 +300,7 @@ async function publishCapability(request, response) {
     ...(body?.queryBinding ? { queryBinding: body.queryBinding } : {})
   };
   publications.set(capability.id, record);
+  savePublications();
   console.log(`published capability ${capability.id}`);
   send(response, 201, record, corsHeaders(request));
 }
@@ -401,14 +445,17 @@ async function inferBindingCandidate(request, response) {
 }
 
 /**
- * Development reset. Clears the ephemeral control plane and nothing else: no
- * source application data, no configuration, no code. Everything it drops was
- * already lost on restart.
+ * Development reset. Clears the control plane and nothing else: no source
+ * application data, no configuration, no code. Now that publications are
+ * persisted, this is the deliberate way to empty them — which is the point:
+ * a reset should be something someone asked for, not something a restart
+ * does silently.
  */
 function resetControlPlane(request, response) {
   const cleared = { traces: traces.size, publications: publications.size };
   traces.clear();
   publications.clear();
+  savePublications();
   console.log(`control plane reset: ${cleared.traces} traces, ${cleared.publications} publications`);
   send(response, 200, { cleared: true, ...cleared }, corsHeaders(request));
 }
@@ -449,6 +496,7 @@ createServer(async (request, response) => {
     if (request.method === "DELETE" && request.url === "/api/capabilities") {
       const removed = publications.size;
       publications.clear();
+      savePublications();
       console.log(`unpublished ${removed} capabilities`);
       send(response, 200, { removed }, corsHeaders(request));
       return;
