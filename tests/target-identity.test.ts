@@ -250,6 +250,28 @@ describe("identity is read from declared platform knowledge, not from code", () 
   });
 });
 
+/* ============ the real adapter reads the real location ============ */
+
+describe("the Salesforce adapter observes identity from the live page", () => {
+  it("reads the open record from the document's own path", () => {
+    // Closes the seam between "the pattern parses a path" and "the adapter
+    // actually asks the document for one" — every other test here stubs
+    // observation, so nothing else would catch this being unwired.
+    window.history.pushState({}, "", `/lightning/r/Opportunity/${RECORD_A}/view`);
+    const adapter = resolverAdapterForPlatform("salesforce-lightning")!;
+    expect(adapter.observeEntityIdentity?.(document, adapter.resolutionPolicy!)).toEqual({
+      entityType: "Opportunity",
+      id: RECORD_A
+    });
+  });
+
+  it("reports no identity on a page that is not a record", () => {
+    window.history.pushState({}, "", "/lightning/o/Opportunity/list");
+    const adapter = resolverAdapterForPlatform("salesforce-lightning")!;
+    expect(adapter.observeEntityIdentity?.(document, adapter.resolutionPolicy!)).toBeUndefined();
+  });
+});
+
 /* ================= the published contract requires it ================= */
 
 describe("the agent-facing contract carries the targeting parameter", () => {
