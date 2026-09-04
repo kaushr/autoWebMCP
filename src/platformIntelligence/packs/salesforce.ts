@@ -53,28 +53,24 @@ export const salesforceIntelligencePack: PlatformIntelligencePack = {
       id: "awmcp-application-intelligence",
       kind: "internal-architecture",
       title: "AutoWebMCP Application Intelligence architecture",
-      document: "docs/APPLICATION_INTELLIGENCE.md",
       reviewedAt: "2026-08-27"
     },
     {
       id: "awmcp-platform-intelligence",
       kind: "internal-architecture",
       title: "AutoWebMCP Platform Intelligence architecture",
-      document: "docs/PLATFORM_INTELLIGENCE.md",
       reviewedAt: "2026-08-26"
     },
     {
       id: "awmcp-binding-decisions",
       kind: "internal-architecture",
       title: "AutoWebMCP binding and validation ADRs",
-      document: "docs/DECISIONS.md",
       reviewedAt: "2026-08-26"
     },
     {
       id: "awmcp-salesforce-recording",
       kind: "internal-evidence",
       title: "AutoWebMCP first Salesforce recording findings",
-      document: "docs/RECORDING_FOUNDATION.md",
       reviewedAt: "2026-08-26"
     }
   ],

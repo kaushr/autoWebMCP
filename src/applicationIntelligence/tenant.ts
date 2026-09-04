@@ -7,7 +7,7 @@ import { foldIdentity } from "./model";
  * The whole of V0.1's tenant layer: a seam and two implementations. There
  * is deliberately no acquisition code here — no describe call, no crawler,
  * no cache, no store. Obtaining a snapshot safely is a separate problem
- * with its own prerequisites (see `docs/APPLICATION_INTELLIGENCE.md`), and
+ * with its own prerequisites, and
  * a resolver that works against an injected snapshot works unchanged
  * against one an admin captured centrally.
  *

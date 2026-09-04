@@ -10,7 +10,7 @@ import { CONTACT_FUNCTIONS, SENIORITIES } from "./data";
  * binding in `bindings.ts` expects to be handed.
  *
  * The site starts with no agent capability at all; publication is what creates
- * one. See docs/ARCHITECTURE.md.
+ * one.
  */
 export const referenceCapabilities: SemanticCapability[] = [
   {

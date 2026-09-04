@@ -109,7 +109,7 @@ export interface TenantFieldSchema {
    *
    * LONG TERM this is not a static property of the field: the legal set
    * can narrow by record type, by a controlling field's current value, and
-   * by the running user's permissions. See `docs/APPLICATION_INTELLIGENCE.md`.
+   * by the running user's permissions.
    * Absent means "not known", never "no restriction".
    */
   options?: string[];

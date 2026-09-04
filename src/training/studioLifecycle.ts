@@ -84,8 +84,7 @@ export interface ValidationStageView {
  * rather than calling a supported API. Kept as its own stage, never merged
  * into `ExecutionStageView` — a capability can have a candidate on one
  * strategy, a rejection on the other, and the two must stay legible
- * separately. See docs/BINDING_VALIDATION.md for why both are legitimate at
- * once.
+ * separately. Both are legitimate at once.
  */
 export type BrowserExecutionStageStatus =
   | "not-applicable"
