@@ -5,7 +5,12 @@ import { registerCapability } from "../../webmcp/compiler";
 import { describeWebMcpSurface, normalizeInputSchema, settledToolListing } from "../../webmcp/harness";
 import { listPublishedCapabilities, publishedCapabilityContract, unpublishCapability } from "../../webmcp/publication";
 import { describeReadiness, type AgentFacingTool, type AgentReadiness } from "./agentReadiness";
-import { loadTaughtCapability } from "./taughtCapability";
+import {
+  acceptedCapabilityIds,
+  forgetAcceptance,
+  loadTaughtCapability,
+  rememberAcceptance
+} from "./taughtCapability";
 import { companyHref, parseRoute, searchHref, type ContactFilters, type Route } from "./router";
 import { APP_NAME, renderRoute, renderShell } from "./views";
 
@@ -36,6 +41,18 @@ let removalArmed: string | undefined;
  * site starting with nothing is what the demonstration is about.
  */
 let offered: Awaited<ReturnType<typeof loadTaughtCapability>>;
+
+/**
+ * Capabilities registered here from the shipped export rather than from a
+ * control plane.
+ *
+ * Tracked because "published there, registered here" and "accepted here,
+ * no control plane anywhere" look identical to the staleness check, which
+ * compares what this document registered against what the control plane
+ * lists. Without the distinction an accepted capability was immediately
+ * announced as no longer published, seconds after a person published it.
+ */
+const acceptedHere = new Set<string>();
 /**
  * Whether the badge's panel is open, remembered across renders.
  *
@@ -82,6 +99,26 @@ async function agentFacingTools(): Promise<{ tools: AgentFacingTool[]; source: "
   };
 }
 
+/**
+ * Registering a capability that came from the export.
+ *
+ * Shared by the button and by the restore-on-load path so the two can
+ * never diverge: both compile the same contract through the same
+ * `registerCapability` the control plane's records go through, and both
+ * record that this document's copy came from the file rather than from a
+ * publication somewhere.
+ */
+function acceptTaughtCapability(record: NonNullable<Awaited<ReturnType<typeof loadTaughtCapability>>>): void {
+  if (!bindingActionFor(record.capability)) return;
+  if (registeredCapabilities.has(record.capability.id)) return;
+
+  const contract = publishedCapabilityContract(record);
+  if (registerCapability(contract, invokeProspectBinding, [contract]) !== "registered") return;
+
+  registeredCapabilities.set(record.capability.id, record.capability.name);
+  acceptedHere.add(record.capability.id);
+}
+
 async function syncPublishedCapabilities(): Promise<void> {
   let published: Awaited<ReturnType<typeof listPublishedCapabilities>> = [];
   try {
@@ -95,7 +132,18 @@ async function syncPublishedCapabilities(): Promise<void> {
     // happened. Only while nothing is registered: once something is, the
     // page has a tool surface and an offer beside it would misdescribe how
     // it got there.
-    if (!registeredCapabilities.size) offered = await loadTaughtCapability();
+    if (!registeredCapabilities.size) {
+      const taught = await loadTaughtCapability();
+      // Accepted in this browser before, so restore it rather than ask
+      // again. That is what the control plane does with its own state
+      // file, and a capability that vanished on refresh was the demo
+      // undoing itself.
+      if (taught && acceptedCapabilityIds().has(taught.capability.id)) {
+        acceptTaughtCapability(taught);
+      } else {
+        offered = taught;
+      }
+    }
   }
 
   // Composition hints may only mention tools this document can actually
@@ -124,7 +172,11 @@ async function syncPublishedCapabilities(): Promise<void> {
   // than corrected: the tool really is still callable on this document, and
   // a reload is the only thing that changes that.
   const stillPublished = new Set(published.map((record) => record.capability.id));
-  const staleNames = [...registeredCapabilities.keys()].filter((id) => !stillPublished.has(id));
+  // A capability accepted from the export was never published to a control
+  // plane, so its absence from that list is not evidence it was withdrawn.
+  const staleNames = [...registeredCapabilities.keys()].filter(
+    (id) => !stillPublished.has(id) && !acceptedHere.has(id)
+  );
 
   const surface = registeredCapabilities.size ? await agentFacingTools() : undefined;
   readiness = {
@@ -244,11 +296,10 @@ appRoot.addEventListener("click", (event) => {
   if (!accept || !offered) return;
   if (accept.dataset.registerCapability !== offered.capability.id) return;
 
-  const contract = publishedCapabilityContract(offered);
-  if (!bindingActionFor(offered.capability)) return;
-  if (registerCapability(contract, invokeProspectBinding, [contract]) === "registered") {
-    registeredCapabilities.set(offered.capability.id, offered.capability.name);
-  }
+  acceptTaughtCapability(offered);
+  // Only once it is actually registered, so a refusal does not leave the
+  // browser remembering a capability this document never exposed.
+  if (registeredCapabilities.has(offered.capability.id)) rememberAcceptance(offered.capability.id);
   offered = undefined;
   void syncPublishedCapabilities();
 });
@@ -265,6 +316,17 @@ appRoot.addEventListener("click", (event) => {
   }
 
   removalArmed = undefined;
+
+  // Accepted from the export, so there is no control plane holding it and
+  // nothing to call. Forgetting the acceptance and reloading is the whole
+  // of it, and it puts the site back to offering the capability — the same
+  // end state unpublishing reaches locally.
+  if (acceptedHere.has(id)) {
+    forgetAcceptance(id);
+    window.location.reload();
+    return;
+  }
+
   void unpublishCapability(id)
     .then(() => window.location.reload())
     .catch(() => {

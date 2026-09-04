@@ -44,3 +44,57 @@ export async function loadTaughtCapability(
     return undefined;
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Remembering that someone accepted it.
+ *
+ * The control plane persists a publication to disk and re-registers it
+ * when the page loads again, so a capability does not evaporate on
+ * refresh. A hosted copy has nowhere to write but this browser, and
+ * without it the demonstration lasted exactly one page view: register,
+ * reload, gone, with the badge back to claiming nothing was ever
+ * published.
+ *
+ * Per-browser rather than per-visitor by design. It records a local
+ * decision, not a publication -- nobody else's copy of this site changes
+ * because one person pressed a button here.
+ * ------------------------------------------------------------------ */
+
+const ACCEPTED_KEY = "autowebmcp.signalbase.accepted";
+
+/** Capability ids this browser has accepted. Empty whenever storage is unavailable. */
+export function acceptedCapabilityIds(): Set<string> {
+  try {
+    const stored = window.localStorage.getItem(ACCEPTED_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    // Private browsing, disabled storage, or corrupt contents. Remembering
+    // nothing is the safe answer: the offer simply appears again.
+    return new Set();
+  }
+}
+
+/** Records an acceptance, or does nothing at all if storage refuses. */
+export function rememberAcceptance(id: string): void {
+  try {
+    const ids = acceptedCapabilityIds();
+    ids.add(id);
+    window.localStorage.setItem(ACCEPTED_KEY, JSON.stringify([...ids]));
+  } catch {
+    // The tool is registered on this document either way; only surviving a
+    // reload is lost, which is the same tradeoff the control plane makes
+    // when it cannot write its own state file.
+  }
+}
+
+/** Forgets an acceptance, so a reload returns the site to offering it. */
+export function forgetAcceptance(id: string): void {
+  try {
+    const ids = acceptedCapabilityIds();
+    ids.delete(id);
+    window.localStorage.setItem(ACCEPTED_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Nothing to do. The reload that follows re-reads whatever survived.
+  }
+}

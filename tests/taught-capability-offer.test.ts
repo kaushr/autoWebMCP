@@ -5,6 +5,7 @@ import { loadTaughtCapability } from "../src/prospect/app/taughtCapability";
 import { assertPublishable, parsePublicationList } from "../src/webmcp/publication";
 import { bindingActionFor } from "../src/prospect/bindings";
 import { renderShell } from "../src/prospect/app/views";
+import { acceptedCapabilityIds, forgetAcceptance, rememberAcceptance } from "../src/prospect/app/taughtCapability";
 
 /* ------------------------------------------------------------------ *
  * The offer a hosted copy makes, and what it must not claim.
@@ -120,5 +121,79 @@ describe("the offer as rendered", () => {
 
     expect(html).not.toContain("data-register-capability");
     expect(html).toContain("Agent capabilities: Not published");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Surviving a refresh.
+ *
+ * The control plane persists a publication and re-registers it on load.
+ * A hosted copy has only this browser, and without the equivalent the
+ * demonstration lasted one page view: register, reload, and the badge
+ * claimed nothing had ever been published.
+ * ------------------------------------------------------------------ */
+
+function withStorage(run: () => void): void {
+  const store = new Map<string, string>();
+  const original = globalThis.window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v)
+      }
+    }
+  });
+  try {
+    run();
+  } finally {
+    if (original) Object.defineProperty(globalThis, "window", { configurable: true, value: original });
+    else delete (globalThis as { window?: unknown }).window;
+  }
+}
+
+describe("remembering an acceptance", () => {
+  it("remembers nothing before anyone accepts", () => {
+    withStorage(() => expect(acceptedCapabilityIds().size).toBe(0));
+  });
+
+  it("survives so a reload can restore rather than re-ask", () => {
+    withStorage(() => {
+      rememberAcceptance("find_decision_maker_contact");
+      expect(acceptedCapabilityIds().has("find_decision_maker_contact")).toBe(true);
+    });
+  });
+
+  it("forgets on unpublish, returning the site to offering it", () => {
+    withStorage(() => {
+      rememberAcceptance("find_decision_maker_contact");
+      forgetAcceptance("find_decision_maker_contact");
+      expect(acceptedCapabilityIds().has("find_decision_maker_contact")).toBe(false);
+    });
+  });
+
+  it("remembers nothing rather than throwing where storage is unavailable", () => {
+    const original = globalThis.window;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        localStorage: {
+          getItem: () => {
+            throw new Error("storage disabled");
+          },
+          setItem: () => {
+            throw new Error("storage disabled");
+          }
+        }
+      }
+    });
+    try {
+      expect(acceptedCapabilityIds().size).toBe(0);
+      expect(() => rememberAcceptance("x")).not.toThrow();
+    } finally {
+      if (original) Object.defineProperty(globalThis, "window", { configurable: true, value: original });
+      else delete (globalThis as { window?: unknown }).window;
+    }
   });
 });
