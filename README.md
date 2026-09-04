@@ -101,7 +101,12 @@ exposes `document.modelContext`; see [Testing WebMCP](#testing-webmcp) below.
 
 ### Hosted: look without installing anything
 
-**Live demo: _TBD_**
+**Live demo: <https://auto-web-mcp.vercel.app/>**
+
+To test WebMCP directly, go straight to the control page, which registers a real
+tool at page load with no backend:
+
+**<https://auto-web-mcp.vercel.app/?control=1>**
 
 The deployment is the static front end only, served with the same origin
 isolation and `Permissions-Policy: webmcp=(self)` headers the local dev server
@@ -577,7 +582,8 @@ Built for **The WebMCP Challenge on Devpost, 2026**.
 
 - Devpost submission: _TBD_
 - Demo video: _TBD_
-- Live deployment: _TBD_
+- Live deployment: <https://auto-web-mcp.vercel.app/>
+  (WebMCP check: <https://auto-web-mcp.vercel.app/?control=1>)
 
 ## Limitations
 

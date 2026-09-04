@@ -143,8 +143,27 @@ export async function controlPlaneIsCurrent(): Promise<{ ok: true } | { ok: fals
       "The control plane is running older code than this page, so newer actions will fail. Restart it: " +
       "npm start — traces are held in memory and will be cleared."
   };
+  /**
+   * Nothing is serving the API at this origin.
+   *
+   * Distinct from `stale`, and not a pedantic distinction: a running control
+   * plane answers `/api/meta` with 200 either from the route itself or, on a
+   * build predating it, from the static fallthrough. A 404 therefore means
+   * no control plane, not an old one — and telling someone to restart a
+   * process they never started, while warning that traces they do not have
+   * will be cleared, is worse than saying nothing. A hosted copy of this
+   * page reaches exactly this branch, because it is served as static files
+   * with no control plane behind it.
+   */
+  const absent = {
+    ok: false as const,
+    detail:
+      "No control plane is answering at this origin, so nothing on this page can load, publish, or run. " +
+      "Run it locally with npm start. A hosted copy of this page has none behind it by design."
+  };
   try {
     const response = await fetch("/api/meta");
+    if (response.status === 404) return absent;
     if (!response.ok) return stale;
     const body = (await response.json()) as { controlPlaneProtocol?: number };
     return (body.controlPlaneProtocol ?? 0) >= REQUIRED_CONTROL_PLANE_PROTOCOL ? { ok: true } : stale;
