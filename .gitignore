@@ -22,3 +22,54 @@ dist-extension/
 # Generated architecture write-ups kept local, not part of the repo's own docs
 docs/SYSTEM_OVERVIEW.md
 .autowebmcp/
+
+# Environment files of every shape. `.env.local` is named above and kept
+# there deliberately; these catch the variants a future contributor reaches
+# for by habit. `!.env.example` so a documented, value-free template can
+# still be committed.
+.env
+.env.*
+!.env.example
+
+# Credential and key material. Nothing in this repository should ever hold
+# one, so these exist to make an accidental `git add .` fail loudly rather
+# than quietly.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+secrets.json
+*.crt
+
+# Salesforce CLI auth artifacts beyond the .sf/.sfdx directories above.
+.sfdx-auth/
+sfdx-auth-url*
+*.sfdxauth
+
+# Captured evidence and anything derived from a real browser session. Traces,
+# recordings, cookies, HAR files, and debug bundles can all carry tenant data;
+# they are working artifacts, never repository content.
+*.har
+traces/
+recordings/
+captures/
+debug-bundle*.json
+autowebmcp-debug-*.json
+
+# Screenshots and screen recordings. Almost always taken against a real org.
+screenshots/
+*.mov
+*.mp4
+
+# Demo and submission material kept out of the public repository.
+AutoWebMCP_Demo_Script.pdf
+
+# macOS and editor noise.
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
