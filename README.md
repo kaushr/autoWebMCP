@@ -90,14 +90,41 @@ the pasteable agent instructions in [demo/PROMPT.md](demo/PROMPT.md).
 
 ## Try It
 
-Two paths. Path A needs no Salesforce access at all. Path B is for a judge who
-wants to reproduce the Salesforce half in their own org.
+Two local paths, plus a hosted page for a first look. Path A needs no Salesforce
+access at all. Path B is for a judge who wants to reproduce the Salesforce half
+in their own org.
 
-Prerequisites for both: **Node.js 22.12 or newer** (Vite 7 and the `openai`
-client set that floor; developed on Node 26) and **Google Chrome 120 or newer**.
-For
-WebMCP discovery and invocation you need a Chrome build that exposes
-`document.modelContext`; see [Testing WebMCP](#testing-webmcp) below.
+Prerequisites for both local paths: **Node.js 22.12 or newer** (Vite 7 and the
+`openai` client set that floor; developed on Node 26) and **Google Chrome 120 or
+newer**. For WebMCP discovery and invocation you need a Chrome build that
+exposes `document.modelContext`; see [Testing WebMCP](#testing-webmcp) below.
+
+### Hosted: look without installing anything
+
+**Live demo: _TBD_**
+
+The deployment is the static front end only, served with the same origin
+isolation and `Permissions-Policy: webmcp=(self)` headers the local dev server
+sends. What genuinely works there:
+
+- **SignalBase** renders with its synthetic dataset, and reports that it has no
+  published agent capabilities, which is the demo's starting state.
+- **The WebMCP control page** registers `hello_webmcp` at page load. In a
+  WebMCP-capable browser you can discover and invoke a real tool on the live
+  URL, with no backend involved.
+- **The Training Studio UI** loads and can be read.
+
+What does not, and cannot, work on a hosted URL:
+
+- **Teaching, semanticizing, and publishing.** These need the local control
+  plane, so the Studio shows its page-level banner saying it cannot reach one.
+- **Anything involving Salesforce.** The Teach Mode extension only bridges
+  `127.0.0.1:5173` and `127.0.0.1:8787` by design, so a hosted page has no
+  extension bridge and no target tab.
+
+The deployment exists so a judge can see the surfaces and confirm WebMCP
+registration in one click. **Reviewing the actual pipeline means running it
+locally**, via Path A below.
 
 ```bash
 git clone <this repository>
@@ -203,9 +230,11 @@ Then:
 9. **Verify.** Reload `http://127.0.0.1:5173/prospect/`. The header turns green
    and `await document.modelContext.getTools()` now reports the capability.
 
-The publication store is in memory. Restarting the control plane returns
-SignalBase to a plain website, and the Studio's **Unpublish all** does the same
-without a restart.
+Published capabilities are persisted to `.autowebmcp/publications.json` and
+reloaded when the control plane restarts, so a demo survives an accidental
+restart. Emptying them is therefore deliberate: use the Studio's **Unpublish
+all**, or the per-capability unpublish control, to return SignalBase to a plain
+website. The directory is gitignored.
 
 ### Path B: Bring Your Own Salesforce Org
 
@@ -570,8 +599,10 @@ Stated plainly, because several of them affect what a judge will see.
 - **Salesforce support is Opportunity search and Opportunity field updates.**
   Nothing else. No creation, no other objects, no non-English labels. See
   [Path B](#what-is-actually-supported-today).
-- **Publication state is in memory.** Restarting the control plane unpublishes
-  everything.
+- **Published capabilities persist locally, on disk.** They live in
+  `.autowebmcp/publications.json` beside the control plane, which is a local
+  file rather than a database, so nothing is shared between machines. Recorded
+  traces, by contrast, are held only in memory and are lost on restart.
 - **Manual tab registration is required for Salesforce.** Only a human can tell
   the extension which tab the tools act on, by starting and stopping training on
   it once.
