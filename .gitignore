@@ -22,9 +22,27 @@ dist-extension/
 # Generated architecture write-ups kept local, not part of the repo's own docs
 docs/SYSTEM_OVERVIEW.md
 
-# Internal positioning material. Names a specific competitor and carries
-# go-to-market guidance, neither of which belongs in a public repository.
+# Working notes kept local. Design rationale, spikes, roadmap and positioning
+# are how the thing got built, not what a judge or contributor needs to run it,
+# and a stale design doc is worse than no design doc. The code and its comments
+# are the version that stays true.
 docs/COMPETITIVE_CONTEXT.md
+docs/ARCHITECTURE.md
+docs/APPLICATION_INTELLIGENCE.md
+docs/PLATFORM_INTELLIGENCE.md
+docs/BINDING_VALIDATION.md
+docs/DECISIONS.md
+docs/SALESFORCE_SPIKE.md
+docs/RECORDING_FOUNDATION.md
+docs/DEMO_STORY.md
+docs/FORM_SELECTION.md
+docs/HACKATHON_BRIEF.md
+TASKS.md
+
+# Salesforce package scaffolding. The Visualforce compatibility page was a
+# spike; nothing in the running system deploys or needs it.
+force-app/
+sfdx-project.json
 .autowebmcp/
 
 # Environment files of every shape. `.env.local` is named above and kept

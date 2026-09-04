@@ -432,8 +432,7 @@ you need a Chrome build that exposes it. The environment this project was
 developed and demonstrated against was **Chrome 151 with
 `chrome://flags/#enable-webmcp-testing` enabled**, which is what proved
 `document.modelContext`, `registerTool()`, `getTools()`, and `executeTool()`
-work on a Salesforce Lightning page ([docs/DECISIONS.md](docs/DECISIONS.md),
-[docs/SALESFORCE_SPIKE.md](docs/SALESFORCE_SPIKE.md)). If that flag is absent
+work on a Salesforce Lightning page. If that flag is absent
 from your Chrome build, the pages still load and the Studio still works, but
 they will honestly report that WebMCP is unavailable rather than pretend
 otherwise.
@@ -522,11 +521,11 @@ Three intelligence layers feed the pipeline, at a high level:
   picklist values configured in *this* org, which is configuration rather than
   vendor knowledge and is therefore read rather than assumed.
 
-Longer form in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[docs/PLATFORM_INTELLIGENCE.md](docs/PLATFORM_INTELLIGENCE.md),
-[docs/APPLICATION_INTELLIGENCE.md](docs/APPLICATION_INTELLIGENCE.md),
-[docs/BINDING_VALIDATION.md](docs/BINDING_VALIDATION.md), and
-[docs/AGENT_LOOP.md](docs/AGENT_LOOP.md).
+Each layer lives in its own directory under `src/`, named after it, and the
+page-side agent loop is described in [docs/AGENT_LOOP.md](docs/AGENT_LOOP.md).
+The design documents behind these decisions are kept out of this repository:
+they are working notes about tradeoffs, not onboarding material, and the code
+plus its comments is the version that stays true.
 
 ## Safety and Verification
 
@@ -598,8 +597,7 @@ Tests: [tests/webmcp-harness.test.ts](tests/webmcp-harness.test.ts),
 - **Chrome Extension / Manifest V3** for Teach Mode
 - **rrweb** (`@rrweb/record`) as the capture sensor
 - **OpenAI API** (`openai`) for semanticizing, grounding, and the agent loop
-- **Salesforce** Lightning as the constrained-application case study, with a
-  minimal Visualforce compatibility page under `force-app/`
+- **Salesforce** Lightning as the constrained-application case study
 
 ## AI Tools Used
 
