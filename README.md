@@ -580,7 +580,7 @@ Tests: [tests/webmcp-harness.test.ts](tests/webmcp-harness.test.ts),
 
 Built for **The WebMCP Challenge on Devpost, 2026**.
 
-- Devpost submission: _TBD_
+- Devpost submission: <https://devpost.com/software/autowebmcp-teach-an-agent-to-fish>
 - Demo video: <https://youtu.be/H9Ppgautv4U>
 - Live deployment: <https://auto-web-mcp.vercel.app/>
   (WebMCP check: <https://auto-web-mcp.vercel.app/?control=1>)
