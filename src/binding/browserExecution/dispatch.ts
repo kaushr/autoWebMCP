@@ -218,6 +218,14 @@ export async function runOnce(
           `reported "${verdict.blocking.phase}".`
       ],
       warnings: [verdict.reason],
+      // The same fact the sentence above states, in a form a caller can
+      // act on. A refusal that cannot be resolved is a deadlock rather
+      // than a safety property, and the remedy needs this id.
+      blockedBy: {
+        invocationId: verdict.blocking.invocationId,
+        startedAt: verdict.blocking.startedAt,
+        phase: verdict.blocking.phase
+      },
       executedAt: new Date().toISOString()
     };
   }

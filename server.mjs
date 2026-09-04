@@ -13,7 +13,7 @@ import OpenAI from "openai";
  * tonight for exactly that reason. The page checks this on load and says
  * so plainly instead.
  */
-const CONTROL_PLANE_PROTOCOL = 2;
+const CONTROL_PLANE_PROTOCOL = 3;
 
 const port = Number(process.env.PORT ?? 8787);
 const staticRoot = join(process.cwd(), "dist");
@@ -95,6 +95,38 @@ const SEMANTICIZER_PROMPT_VERSION = "2026-09-03.1";
 
 /** Binding inference is a separate question, so it versions separately. */
 const BINDING_PROMPT_VERSION = "2026-08-27.1";
+
+/** Orchestration is a third question, and versions separately again. */
+const AGENT_PROMPT_VERSION = "2026-09-03.2";
+
+/**
+ * The only two answers the page-side agent loop accepts.
+ *
+ * Flat rather than a union because strict structured outputs require every
+ * declared property to be present and forbid `additionalProperties`, so
+ * "call a tool" and "finish" share one object and use the fields that
+ * apply: `tool` and `arguments_json` are empty when finishing, `summary`
+ * is empty when calling.
+ *
+ * `arguments_json` is a STRING for the same reason — a free-form argument
+ * object cannot be expressed under a strict schema. It is parsed and
+ * checked against the chosen tool's own published input schema before
+ * anything is invoked, and it is never evaluated. Note what the schema
+ * does NOT offer: there is no field for a selector, a script, a URL, or a
+ * sequence of steps, because the model's entire authority here is to name
+ * one published tool and supply its declared parameters.
+ */
+const agentActionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["action", "tool", "arguments_json", "summary"],
+  properties: {
+    action: { type: "string", enum: ["call_tool", "finish"] },
+    tool: { type: "string" },
+    arguments_json: { type: "string" },
+    summary: { type: "string" }
+  }
+};
 
 const bindingCandidateSchema = {
   type: "object",
@@ -308,7 +340,10 @@ async function publishCapability(request, response) {
     capability,
     publishedAt: new Date().toISOString(),
     ...(body?.executionBinding ? { executionBinding: body.executionBinding } : {}),
-    ...(body?.queryBinding ? { queryBinding: body.queryBinding } : {})
+    ...(body?.queryBinding ? { queryBinding: body.queryBinding } : {}),
+    // Where the publisher asked for it to be registered. Passthrough, like
+    // the bindings: this server does not decide which documents expose it.
+    ...(body?.orchestration === true ? { orchestration: true } : {})
   };
   publications.set(capability.id, record);
   savePublications();
@@ -468,6 +503,114 @@ async function inferBindingCandidate(request, response) {
 }
 
 /**
+ * The model's structured answer, as ONE value.
+ *
+ * `output_text` is a convenience that CONCATENATES every output text part
+ * the response carries, and a live orchestration run produced the same
+ * action object twice in a row — one complete JSON document immediately
+ * followed by another, which no JSON parser will accept and which reached
+ * the page as "the model's answer was not the structured action".
+ *
+ * The first text part is the honest reading: it is a complete answer under
+ * a strict schema, and a duplicate of it adds nothing. Items carrying no
+ * text at all are skipped rather than treated as empty answers.
+ */
+function firstStructuredText(modelResponse) {
+  for (const item of modelResponse.output ?? []) {
+    for (const part of item.content ?? []) {
+      if (typeof part?.text === "string" && part.text.trim()) return part.text;
+    }
+  }
+  return modelResponse.output_text;
+}
+
+/**
+ * One step of the page-side agent loop.
+ *
+ * Stateless and deliberately dull. The page holds the run; this endpoint
+ * is asked "given this instruction, these live tools, and what has already
+ * happened, what is the single next action?" and answers with a structured
+ * object. There is no conversation, no thread, no memory, and no plan —
+ * a plan would be a commitment made before the first result came back.
+ *
+ * It reuses the same model integration as the semanticizer rather than
+ * introducing a second stack, and the same wire convention: the raw model
+ * output goes back unparsed so a bad answer and a bad parser stay
+ * distinguishable on the page.
+ */
+async function planAgentStep(request, response) {
+  if (!openai) {
+    send(response, 503, { error: "OPENAI_API_KEY is not configured on this server." }, corsHeaders(request));
+    return;
+  }
+
+  const input = await readJson(request, 200_000);
+  if (typeof input?.instruction !== "string" || !input.instruction.trim() || !Array.isArray(input?.tools)) {
+    send(response, 400, { error: "An instruction and the live tool list are required." }, corsHeaders(request));
+    return;
+  }
+  if (input.tools.length === 0) {
+    send(response, 400, { error: "No tools were offered, so there is no action to choose." }, corsHeaders(request));
+    return;
+  }
+
+  const instructions = [
+    "Choose the SINGLE next action that advances the user's instruction, using only the tools listed.",
+    "Each tool's description and input schema are the contract: they say what it does, what it requires,",
+    "and, where one tool supplies an identity another needs, which tool that is. Read them rather than guessing.",
+    "Return call_tool with a tool name copied exactly from the list, and arguments_json holding a JSON object",
+    "whose keys are that tool's declared parameters and whose values match their declared types and enums.",
+    "Never invent a tool name and never send a parameter a tool does not declare.",
+    "Never emit code, selectors, XPath, URLs, JavaScript, or browser instructions of any kind:",
+    "your entire authority is to name one published tool and supply its declared values.",
+    "A parameter that identifies a specific record needs an exact identity, never a display name;",
+    "if you do not have one, call the tool whose description says it returns candidate records for that entity.",
+    "Use what the history already established. Do not repeat a call whose result is already there.",
+    "If part of the task is possible with these tools and part is not, do the possible part first.",
+    "Return finish when the task is done, or when nothing further is possible with these tools, and say plainly",
+    "what was established and what was not. remaining_steps is a hard limit: at 1, this action is the last one.",
+    "Answer only with the structured action."
+  ];
+
+  const model = process.env.OPENAI_AGENT_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-5.4";
+  const modelInput = JSON.stringify({
+    instruction: input.instruction,
+    remaining_steps: input.remainingSteps ?? 1,
+    tools: input.tools,
+    history: Array.isArray(input.history) ? input.history : []
+  });
+
+  const requestedAt = Date.now();
+  const modelResponse = await openai.responses.create({
+    model,
+    store: false,
+    instructions: instructions.join(" "),
+    input: modelInput,
+    text: {
+      format: { type: "json_schema", name: "agent_action", strict: true, schema: agentActionSchema }
+    }
+  });
+
+  send(
+    response,
+    200,
+    {
+      raw: firstStructuredText(modelResponse),
+      diagnostics: {
+        runId: `step-${requestedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        requestedAt: new Date(requestedAt).toISOString(),
+        latencyMs: Date.now() - requestedAt,
+        model,
+        promptVersion: AGENT_PROMPT_VERSION,
+        parameters: { store: false, responseFormat: "json_schema", schemaName: "agent_action", strict: true },
+        ...(modelResponse.id ? { providerResponseId: modelResponse.id } : {})
+      }
+    },
+    corsHeaders(request)
+  );
+}
+
+/**
  * Development reset. Clears the control plane and nothing else: no source
  * application data, no configuration, no code. Now that publications are
  * persisted, this is the deliberate way to empty them — which is the point:
@@ -498,6 +641,10 @@ createServer(async (request, response) => {
     }
     if (request.method === "POST" && request.url === "/api/binding-candidate") {
       await inferBindingCandidate(request, response);
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/agent/step") {
+      await planAgentStep(request, response);
       return;
     }
     if (request.method === "POST" && request.url === "/api/debug/reset") {

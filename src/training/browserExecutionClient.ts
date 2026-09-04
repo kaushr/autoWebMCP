@@ -1,6 +1,10 @@
 import type { BrowserExecutionBinding } from "../binding/browserExecution/model";
 import type { BrowserQueryBinding, QueryOutcome } from "../binding/browserExecution/query";
-import { EXECUTION_TIMEOUTS, type AcquisitionFailureReason } from "../../extension/src/protocol";
+import {
+  EXECUTION_TIMEOUTS,
+  nothingWasDispatched,
+  type AcquisitionFailureReason
+} from "../../extension/src/protocol";
 import type { DomainInspection } from "../binding/browserExecution/execute";
 import type { ExecutionResult } from "../binding/browserExecution/result";
 
@@ -202,6 +206,28 @@ function bridgeRequest<T>(
  * generic MCP server, no parallel Salesforce-only runtime" seam this task
  * asked for: the extension already has live tab access; this only reaches it.
  */
+/**
+ * A search that never ran, in the shape a search answers in.
+ *
+ * `blocked` rather than `no-results`: nothing was searched, and an empty
+ * candidate list is a claim about the application's data that a page which
+ * never reached the application is in no position to make.
+ *
+ * The detail goes in `warnings` because that is where the agent loop reads
+ * a blocked search's reason from — see `observation.ts`. Putting it in
+ * `evidence` would preserve it for a human reading the trace and lose it
+ * for the caller that has to decide what to do next.
+ */
+function searchThatNeverRan(detail: string): QueryOutcome {
+  return {
+    status: "blocked",
+    candidates: [],
+    evidence: [],
+    warnings: [detail],
+    executedAt: new Date().toISOString()
+  };
+}
+
 export const extensionBridgeExecutionClient: BrowserExecutionClient = {
   async execute(binding, inputs, options) {
     // One id for this attempt, carried to the page and back. A redelivery
@@ -247,13 +273,29 @@ export const extensionBridgeExecutionClient: BrowserExecutionClient = {
     }
   },
 
-  query(binding, inputs) {
-    return bridgeRequest<QueryOutcome>(
-      { kind: "query", queryBinding: binding, inputs },
-      "query",
-      RESPONSE_TIMEOUT_MS,
-      (data) => data.outcome as QueryOutcome | undefined
-    );
+  async query(binding, inputs) {
+    // A search reaches the taught application over the same hops an
+    // execution does, so it fails the same ways: no extension, an
+    // outdated bridge, no registered target tab. `execute` reports each of
+    // those as a result a caller can read. This did not, and the cost was
+    // paid in a live run — a rejected promise leaving a WebMCP tool is
+    // replaced by the browser with "the invocation failed", which names
+    // neither the hop that failed nor what to do about it, and an evening
+    // went into guessing which of three unrelated causes it was.
+    const probe = await probeBridge();
+    if (!probe.ok) return searchThatNeverRan(probe.detail);
+
+    try {
+      return await bridgeRequest<QueryOutcome>(
+        { kind: "query", queryBinding: binding, inputs },
+        "query",
+        RESPONSE_TIMEOUT_MS,
+        (data) => data.outcome as QueryOutcome | undefined,
+        (data) => data.reason as AcquisitionFailureReason | undefined
+      );
+    } catch (error) {
+      return searchThatNeverRan(error instanceof Error ? error.message : String(error));
+    }
   },
 
   async acquireDomains(binding) {
@@ -297,8 +339,7 @@ function executionWithoutAnswer(invocationId: string, error: unknown): Execution
   const detail = error instanceof Error ? error.message : String(error);
   // These are refusals to dispatch, not lost answers: the request never
   // reached a page, so nothing can have been written.
-  const neverDispatched =
-    reason === "extension-unavailable" || reason === "studio-bridge-outdated" || reason === "target-tab-not-registered";
+  const neverDispatched = nothingWasDispatched(reason);
 
   if (neverDispatched) {
     return {

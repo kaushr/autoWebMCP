@@ -9,7 +9,7 @@ import {
 } from "../data";
 import { countContacts, featuredCompanies, findContacts, getCompany, getContact, searchCompanies } from "../service";
 import { companyHref, contactHref, hasActiveFilters, searchHref, type ContactFilters, type Route } from "./router";
-import type { ReadinessDescription } from "./agentReadiness";
+import type { AgentFacingTool, ReadinessDescription } from "./agentReadiness";
 
 /** One constant so the working name is trivial to change. */
 export const APP_NAME = "SignalBase";
@@ -258,6 +258,73 @@ export function renderRoute(route: Route): string {
   }
 }
 
+/**
+ * One tool exactly as an agent receives it.
+ *
+ * The whole contract, not just the name: an agent chooses a tool from its
+ * description and calls it from its schema, so a panel claiming to show
+ * "what an agent sees" that shows only a label would be showing the one
+ * part an agent uses least.
+ */
+function agentToolCard(tool: AgentFacingTool, removalArmed?: string): string {
+  const armed = removalArmed === tool.name;
+  // The action sits on the name, not below the schema: a schema is as long
+  // as the contract happens to be, and a control at the bottom of one is a
+  // control nobody scrolls to.
+  return `<article class="agent-tool">
+    <div class="agent-tool-head">
+      <p class="agent-tool-name"><code>${escapeHtml(tool.name)}</code></p>
+      <button type="button" class="agent-tool-remove${armed ? " is-armed" : ""}"
+        data-remove-capability="${escapeHtml(tool.name)}">${
+          armed ? "Unpublish and reload — confirm" : "Unpublish and reload"
+        }</button>
+    </div>
+    ${
+      armed
+        ? `<p class="agent-tool-description">This removes it from the control plane for every site. WebMCP has no
+            unregister, so this page reloads to clear it from the tool surface.</p>`
+        : ""
+    }
+    ${tool.description ? `<p class="agent-tool-description">${escapeHtml(tool.description)}</p>` : ""}
+    ${
+      tool.inputSchema
+        ? `<pre class="agent-tool-schema">${escapeHtml(JSON.stringify(tool.inputSchema, null, 2))}</pre>`
+        : `<p class="agent-tool-description">This browser published no input schema for it.</p>`
+    }
+  </article>`;
+}
+
+/**
+ * The readiness badge, expandable into the tool surface behind it.
+ *
+ * Collapsed by default because this is an ordinary business site and the
+ * badge is a footnote on it, not a feature. Expanded, it answers the
+ * question the badge raises — one published, published as WHAT? — with the
+ * contract itself rather than a summary of it.
+ *
+ * Falls back to a plain paragraph when there is nothing to expand, so a
+ * disclosure control never opens onto an empty panel.
+ */
+function agentStatus(readiness: ReadinessDescription): string {
+  const summary = `<span class="dot" aria-hidden="true"></span>
+    <span>${escapeHtml(readiness.label)}</span>
+    ${readiness.detail ? `<span class="agent-detail">${escapeHtml(readiness.detail)}</span>` : ""}`;
+
+  if (!readiness.tools?.length) {
+    return `<p class="agent-status" data-state="${readiness.state}" aria-live="polite">${summary}</p>`;
+  }
+
+  return `<details class="agent-status" data-state="${readiness.state}">
+    <summary aria-live="polite">${summary}</summary>
+    <div class="agent-tools">
+      <p class="agent-tools-title">What an agent sees</p>
+      ${readiness.sourceNote ? `<p class="agent-tools-source">${escapeHtml(readiness.sourceNote)}</p>` : ""}
+      ${readiness.staleNote ? `<p class="agent-tools-stale">${escapeHtml(readiness.staleNote)}</p>` : ""}
+      ${readiness.tools.map((tool) => agentToolCard(tool, readiness.removalArmed)).join("")}
+    </div>
+  </details>`;
+}
+
 export function renderShell(body: string, readiness: ReadinessDescription): string {
   return `
     <header class="topbar">
@@ -266,11 +333,7 @@ export function renderShell(body: string, readiness: ReadinessDescription): stri
         <span class="brand-name">${escapeHtml(APP_NAME)}</span>
       </a>
       <p class="tagline">${escapeHtml(APP_TAGLINE)}</p>
-      <p class="agent-status" data-state="${readiness.state}" aria-live="polite">
-        <span class="dot" aria-hidden="true"></span>
-        <span>${escapeHtml(readiness.label)}</span>
-        ${readiness.detail ? `<span class="agent-detail">${escapeHtml(readiness.detail)}</span>` : ""}
-      </p>
+      ${agentStatus(readiness)}
     </header>
     <main id="content">${body}</main>
     <footer class="sitefoot">

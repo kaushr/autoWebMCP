@@ -88,9 +88,27 @@ const STALE_BRIDGE_MESSAGE =
   "This tab's connection to the Teach Mode extension was reset — most likely by an extension reload or " +
   "update while this tab stayed open. Reload this tab (not just the extension) to reconnect.";
 
+/**
+ * The bridge declining to send, as a distinguishable fact.
+ *
+ * A plain Error here reached the Studio as an unnamed failure and was
+ * classified as "dispatched, outcome unknown" — which told someone to go
+ * and reconcile a Salesforce record against a request that had never left
+ * their own browser tab. Carrying the reason is what lets the caller tell
+ * "I did not send this" apart from "I sent it and heard nothing".
+ */
+class BridgeDisconnectedError extends Error {
+  readonly reason = "studio-bridge-disconnected" as const;
+
+  constructor() {
+    super(STALE_BRIDGE_MESSAGE);
+    this.name = "BridgeDisconnectedError";
+  }
+}
+
 /** `chrome.runtime.sendMessage`, but a torn-down context rejects instead of throwing synchronously. */
 function callBackground(message: Record<string, unknown>): Promise<unknown> {
-  if (bridgeConnectionLost()) return Promise.reject(new Error(STALE_BRIDGE_MESSAGE));
+  if (bridgeConnectionLost()) return Promise.reject(new BridgeDisconnectedError());
   try {
     return chrome.runtime.sendMessage(message);
   } catch (error) {
@@ -208,7 +226,13 @@ window.addEventListener("message", (event) => {
             : { ok: false, error: answer?.error ?? "The search could not be run." }
         );
       })
-      .catch((error) => settle({ ok: false, error: String(error) }));
+      .catch((error) =>
+        settle({
+          ok: false,
+          ...(error instanceof BridgeDisconnectedError ? { reason: error.reason } : {}),
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
     return;
   }
 
@@ -253,7 +277,16 @@ window.addEventListener("message", (event) => {
       }
     })
       .then((response: unknown) => respond(response as BrowserBindingExecuteResponse))
-      .catch((error: unknown) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      .catch((error: unknown) =>
+        respond({
+          ok: false,
+          // Named, so the caller can tell a request that was never sent
+          // from one whose answer was lost. Only the second may have
+          // changed anything.
+          ...(error instanceof BridgeDisconnectedError ? { reason: error.reason } : {}),
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
     return;
   }
 

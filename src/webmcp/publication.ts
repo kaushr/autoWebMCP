@@ -27,6 +27,30 @@ export interface PublicationRecord {
    * returns results a mutation never produces.
    */
   queryBinding?: BrowserQueryBinding;
+  /**
+   * Whether this capability should ALSO be registered on the Studio's
+   * orchestration surface, and not only on the site that was taught.
+   *
+   * A decision, made once when a human publishes, rather than a mode a
+   * page happens to be in. It exists because two answers are both correct
+   * and they are correct for different capabilities:
+   *
+   *   A capability the taught site can host belongs on that site. That
+   *   site registers it, that site performs it, and the demo's whole
+   *   claim is that an ordinary website gained an agent surface. A second
+   *   copy on the Studio would make the Studio look like it hosts other
+   *   sites' tools.
+   *
+   *   Composing tools from two independently taught applications needs
+   *   them on ONE document, because WebMCP is per-document and no page
+   *   can read another origin's tool surface. There is no way to do that
+   *   without a second copy, so the second copy is asked for explicitly.
+   *
+   * Meaningless for a capability the Studio is the only possible host for
+   * — a Salesforce org cannot expose `document.modelContext` for us — and
+   * deliberately not consulted there.
+   */
+  orchestration?: boolean;
 }
 
 /**
@@ -81,6 +105,47 @@ export function publishedCapabilityContract(record: PublicationRecord): Semantic
   if (target) capability = withDeclaredIdentityEntity(capability, target);
   if (record.queryBinding) capability = withEntityIdentityOutput(capability, record.queryBinding.entityType);
   return capability;
+}
+
+/**
+ * The published capabilities one document can actually perform.
+ *
+ * Three routes and no fourth. Two of them drive the taught application's
+ * own browser UI — a query binding for a search, an execution binding for
+ * a mutation — and the third is an application bundled into the same
+ * document, which already implements the capability in process;
+ * `inProcessAction` is how a document says which of those it has, and it
+ * returns undefined for everything else.
+ *
+ * The question is worth its own function because the answer decides two
+ * things at once, and they must not diverge: which tools get registered,
+ * and which capabilities may appear in another tool's composition hint. A
+ * hint naming a tool this document cannot offer is a promise an agent
+ * cannot act on, so the peer set and the registration set are derived
+ * from the same predicate.
+ *
+ * Nothing here claims the taught application hosts the tool. A capability
+ * learned from SignalBase and registered by the Studio is registered BY
+ * THE STUDIO — on the Studio's origin, on the Studio's document — and the
+ * only thing that comes from SignalBase is the binding that performs it.
+ */
+export function callableHere(
+  record: PublicationRecord,
+  inProcessAction: (capability: SemanticCapability) => string | undefined
+): boolean {
+  // Nothing else can host it, so there is nothing to decide.
+  if (record.executionBinding ?? record.queryBinding) return true;
+  // It has a host of its own. A copy here is a choice, and the publication
+  // is where that choice was made.
+  return Boolean(record.orchestration) && Boolean(inProcessAction(record.capability));
+}
+
+/** The subset of a control plane's publications this document can offer as tools. */
+export function registrableHere(
+  records: readonly PublicationRecord[],
+  inProcessAction: (capability: SemanticCapability) => string | undefined
+): PublicationRecord[] {
+  return records.filter((record) => callableHere(record, inProcessAction));
 }
 
 /**
@@ -151,7 +216,8 @@ export function parsePublicationRecord(value: unknown): PublicationRecord {
     capability,
     publishedAt: record.publishedAt,
     ...(record.executionBinding ? { executionBinding: record.executionBinding } : {}),
-    ...(record.queryBinding ? { queryBinding: record.queryBinding } : {})
+    ...(record.queryBinding ? { queryBinding: record.queryBinding } : {}),
+    ...(record.orchestration ? { orchestration: true } : {})
   };
 }
 
@@ -164,7 +230,8 @@ export function parsePublicationList(value: unknown): PublicationRecord[] {
 export async function publishCapability(
   capability: SemanticCapability,
   executionBinding?: BrowserExecutionBinding,
-  queryBinding?: BrowserQueryBinding
+  queryBinding?: BrowserQueryBinding,
+  orchestration = false
 ): Promise<PublicationRecord> {
   assertPublishable(capability);
   assertSafetyMatchesBindings(capability, executionBinding);
@@ -175,7 +242,8 @@ export async function publishCapability(
     body: JSON.stringify({
       capability,
       ...(executionBinding ? { executionBinding } : {}),
-      ...(queryBinding ? { queryBinding } : {})
+      ...(queryBinding ? { queryBinding } : {}),
+      ...(orchestration ? { orchestration: true } : {})
     })
   });
   if (!response.ok) {

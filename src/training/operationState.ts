@@ -32,7 +32,8 @@ export type OperationKind =
   | "reset-control-plane"
   | "save-trace-details"
   | "invoke-webmcp"
-  | "run-query";
+  | "run-query"
+  | "run-agent-task";
 
 export interface OperationState {
   id: string;

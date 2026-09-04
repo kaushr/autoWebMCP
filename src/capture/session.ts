@@ -42,6 +42,8 @@ export class CaptureSession {
   readonly application: CaptureApplicationContext;
 
   private readonly events: CaptureEvent[] = [];
+  /** Ids already recorded, so a retried batch cannot be counted twice. */
+  private readonly seen = new Set<string>();
   private readonly maxEvents: number;
   private status: CaptureSessionStatus = "recording";
   private endedAt?: number;
@@ -66,6 +68,7 @@ export class CaptureSession {
       maxEvents: snapshot.maxEvents
     });
     session.events.push(...snapshot.events);
+    for (const event of snapshot.events) session.seen.add(event.id);
     session.rrwebEvents = snapshot.rrwebEvents;
     session.dropped = snapshot.dropped;
     session.status = snapshot.status;
@@ -117,10 +120,19 @@ export class CaptureSession {
 
   add(event: CaptureEvent): void {
     if (this.status !== "recording") return;
+    // The same event arriving twice is one event seen twice, not two.
+    //
+    // The page holds unsent events and retries a batch the service worker
+    // did not acknowledge — a worker asleep at the wrong moment used to
+    // lose them outright — and a retry cannot distinguish "the send failed"
+    // from "the send arrived and the acknowledgement did not". Recognising
+    // the id makes the retry safe, which is what allows it to exist.
+    if (this.seen.has(event.id)) return;
     if (this.events.length >= this.maxEvents) {
       this.dropped += 1;
       return;
     }
+    this.seen.add(event.id);
     this.events.push(event);
   }
 

@@ -9,6 +9,7 @@ import {
 } from "../src/binding/browserExecution/dispatch";
 import type { ExecutionResult } from "../src/binding/browserExecution/result";
 import { extensionBridgeExecutionClient } from "../src/training/browserExecutionClient";
+import { nothingWasDispatched } from "../extension/src/protocol";
 import { sourceApplicationFor } from "../src/training/sourceApplication";
 import { EXECUTION_TIMEOUTS, STUDIO_BRIDGE_PROTOCOL } from "../extension/src/protocol";
 import type { BrowserExecutionBinding } from "../src/binding/browserExecution/model";
@@ -144,7 +145,11 @@ describe("a lost answer is not a failed write", () => {
     expect(result.dispatch?.mayHavePersisted).toBe(true);
     expect(result.warnings.join(" ")).toMatch(/not established/i);
     expect(result.warnings.join(" ")).toMatch(/read the record/i);
-  }, 60_000);
+    // Waits out the real STUDIO budget of 50s, so 60s left ten seconds of
+    // headroom and a busy machine took it — the test failed while asserting
+    // exactly the behaviour it was asserting correctly, at 50004ms. The
+    // budget being waited on is unchanged; only the harness's patience is.
+  }, 90_000);
 
   it("says so when the extension reported the loss itself, rather than waiting it out", async () => {
     // The hop that actually gave up gets to name itself; the caller does
@@ -264,6 +269,34 @@ describe("a write whose outcome is unknown is not simply run again", () => {
     expect(result.status).toBe("blocked");
     expect(result.warnings.join(" ")).toMatch(/may already have saved/i);
     expect(result.evidence.join(" ")).toMatch(/inv-lost/);
+
+    // The refusal names what is blocking it in a form a caller can act on,
+    // not only in a sentence. The Studio's acknowledgement control needs
+    // this id, and recovering it by parsing the prose meant that rewording
+    // the sentence would silently remove the only remedy for a refusal
+    // that exists to be resolvable.
+    expect(result.blockedBy).toEqual({
+      invocationId: "inv-lost",
+      startedAt: "2026-09-02T00:00:00.000Z",
+      phase: "saving"
+    });
+    // And it is about the OTHER invocation. `dispatch` still describes this
+    // attempt, which got nowhere.
+    expect(result.dispatch?.invocationId).toBe("inv-next");
+    expect(result.dispatch?.mayHavePersisted).toBe(false);
+  });
+
+  it("names nothing as blocking when nothing is", async () => {
+    // `blockedBy` must not become a field that is always set: a result that
+    // carried one when no earlier invocation was outstanding would offer an
+    // acknowledgement for a transaction that does not exist.
+    const journal = memoryJournal();
+    const result = await runOnce(
+      journal,
+      { invocationId: "inv-only", capabilityId: "update_opportunity", inputs: {} },
+      async () => verified
+    );
+    expect(result.blockedBy).toBeUndefined();
   });
 
   it("lets a fresh invocation through when the earlier one stopped before writing", async () => {
@@ -520,5 +553,43 @@ describe("an outstanding write can be acknowledged and stops blocking", () => {
     );
     expect(result.status).toBe("blocked");
     expect(result.evidence.join(" ")).toMatch(/inv-other/);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Which failures prove nothing happened.
+ *
+ * "Unknown outcome" is this system's most serious signal: it stops an
+ * agent loop, refuses a retry, and sends a person to reconcile a record by
+ * hand. It is only worth that much if it is reserved for cases that are
+ * genuinely unknown — a false alarm teaches people to ignore the real one.
+ *
+ * A live run produced exactly that false alarm. An extension reload left
+ * the Studio tab's bridge disconnected; the bridge declined to send, said
+ * so, and the unnamed error was classified as "dispatched, outcome
+ * unknown" — telling someone to go and reconcile a Salesforce record
+ * against a request that had never left their own browser tab.
+ * ------------------------------------------------------------------ */
+describe("a failure only means nothing happened when a hop says it refused", () => {
+  it("proves nothing was dispatched when a hop reports its own refusal", () => {
+    // Each of these is some hop saying "I did not pass this on", before
+    // anything downstream was asked.
+    expect(nothingWasDispatched("extension-unavailable")).toBe(true);
+    expect(nothingWasDispatched("studio-bridge-outdated")).toBe(true);
+    expect(nothingWasDispatched("studio-bridge-disconnected")).toBe(true);
+    expect(nothingWasDispatched("target-tab-not-registered")).toBe(true);
+  });
+
+  it("never assumes it about a silence, or about a reason that names nothing", () => {
+    // A tab that stopped answering may still be working; a send may already
+    // have landed when it was reported unreachable; and the catch-all names
+    // no hop at all. Reading any of these as "nothing happened" is how a
+    // write that succeeded gets performed twice.
+    expect(nothingWasDispatched("introspection-timeout")).toBe(false);
+    expect(nothingWasDispatched("target-tab-unreachable")).toBe(false);
+    expect(nothingWasDispatched("content-script-unavailable")).toBe(false);
+    expect(nothingWasDispatched("introspection-failed")).toBe(false);
+    expect(nothingWasDispatched("outcome-unknown")).toBe(false);
+    expect(nothingWasDispatched(undefined)).toBe(false);
   });
 });

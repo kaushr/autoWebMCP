@@ -114,6 +114,108 @@ a {
   color: var(--ink-faint);
 }
 
+/* The badge, expandable into the tool surface behind it. Positioned as an
+   overlay rather than in flow: this is a footnote on an ordinary business
+   site, and opening it must not reflow the page underneath. */
+details.agent-status {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+details.agent-status > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+details.agent-status > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.agent-status > summary::after {
+  content: "▾";
+  padding-left: 0.15rem;
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+
+details.agent-status[open] > summary::after {
+  content: "▴";
+}
+
+.agent-tools {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: 60vh;
+  overflow: auto;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  white-space: normal;
+  text-align: left;
+}
+
+.agent-tools-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.agent-tools-source {
+  margin: 0.3rem 0 0;
+  color: var(--ink-faint);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.agent-tool {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+.agent-tool-name code {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.agent-tool-name {
+  margin: 0;
+}
+
+.agent-tool-description {
+  margin: 0.3rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.agent-tool-schema {
+  margin: 0.45rem 0 0;
+  padding: 0.55rem 0.65rem;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  white-space: pre;
+}
+
 main {
   max-width: 68rem;
   margin: 0 auto;
@@ -412,4 +514,48 @@ button[type="submit"] {
   .tagline {
     display: none;
   }
+}
+
+.agent-tools-stale {
+  margin: 0.5rem 0 0;
+  padding: 0.45rem 0.6rem;
+  border-left: 2px solid var(--line-strong);
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  line-height: 1.55;
+}
+
+/* Removal lives inside the disclosure, never on the page itself. SignalBase
+   reads as an ordinary business site until someone opens the badge, and an
+   admin control in its chrome would undercut the one thing the demo is
+   trying to show. */
+.agent-tool-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.agent-tool-remove {
+  flex: none;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.agent-tool-remove:hover,
+.agent-tool-remove:focus-visible {
+  border-color: #b3574a;
+  color: #b3574a;
+}
+
+.agent-tool-remove.is-armed {
+  border-color: #b3574a;
+  color: #b3574a;
 }

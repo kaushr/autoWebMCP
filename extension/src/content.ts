@@ -88,6 +88,12 @@ declare global {
 const INSPECTION_STALE_MS = 20_000;
 
 const FLUSH_INTERVAL_MS = 800;
+/**
+ * How many unsent capture events to hold when the service worker is not
+ * answering. Generous, because the alternative to holding them is losing
+ * them, and a recording is a few hundred events at most.
+ */
+const MAX_QUEUED_EVENTS = 5_000;
 const REACTION_WINDOW_MS = 1_200;
 const NAVIGATION_POLL_MS = 400;
 const MAX_LABEL_LENGTH = 80;
@@ -519,7 +525,29 @@ function start(sessionId: string, startedAt: number, settings: CaptureSettings):
     try {
       await chrome.runtime.sendMessage({ type: "capture:events", sessionId, events, rrwebEvents });
     } catch {
-      // The service worker went away; stop losing cycles on this batch.
+      /* ------------------------------------------------------------------ *
+       * The batch is put BACK, not thrown away.
+       *
+       * A Manifest V3 service worker is terminated after about thirty
+       * seconds of inactivity, so a send landing in that window rejects.
+       * That is routine and recoverable — the next message wakes the worker
+       * — but the queue had already been spliced, so the batch was silently
+       * deleted instead.
+       *
+       * What that cost, in one real recording: a Salesforce Opportunity was
+       * edited and saved, the save's own network call was observed, and the
+       * click on Save was in the one batch that did not make it. The
+       * proposal then reported, correctly and unhelpfully, that no commit
+       * action had been observed — a recording that had captured everything
+       * except the single event the capability was being taught from.
+       *
+       * Restored oldest-first so the trace keeps its order, and bounded so a
+       * worker that never comes back cannot grow this without limit. When it
+       * must discard, it discards the OLDEST: the newest events are the ones
+       * a person just performed and is waiting to see recorded.
+       * ------------------------------------------------------------------ */
+      queue.unshift(...events);
+      if (queue.length > MAX_QUEUED_EVENTS) queue.splice(0, queue.length - MAX_QUEUED_EVENTS);
     }
   }
 

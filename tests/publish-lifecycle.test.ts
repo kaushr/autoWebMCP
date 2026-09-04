@@ -4,7 +4,12 @@ import { sourceApplicationFor } from "../src/training/sourceApplication";
 import { findRelevantContactsProposal, referenceCapabilities } from "../src/prospect/capabilities";
 import { bindingActionFor, invokeProspectBinding, prospectBindings } from "../src/prospect/bindings";
 import { confirmCandidate } from "../src/training/semanticizer";
-import { assertPublishable, parsePublicationList } from "../src/webmcp/publication";
+import {
+  assertPublishable,
+  parsePublicationList,
+  parsePublicationRecord,
+  type PublicationRecord
+} from "../src/webmcp/publication";
 import { compileCapability, registerCapability } from "../src/webmcp/compiler";
 import type { WebMcpTool } from "../src/webmcp/types";
 import { describeReadiness } from "../src/prospect/app/agentReadiness";
@@ -185,6 +190,37 @@ describe("Registration into WebMCP", () => {
     } finally {
       (globalThis as { document?: unknown }).document = previous;
     }
+  });
+});
+
+describe("where a published capability gets registered is a published decision", () => {
+  const record = (extra: Partial<PublicationRecord>): PublicationRecord => ({
+    capability: {
+      id: "find_decision_maker_contacts",
+      name: "Find decision-maker contacts",
+      description: "Locate stakeholders.",
+      inputs: [],
+      outputs: [],
+      binding: { application: "prospect-intelligence", action: "find_relevant_contacts" },
+      provenance: { source: "confirmed", observationIds: [], confirmedByHuman: true },
+      safety: { readOnly: true, requiresConfirmation: false }
+    },
+    publishedAt: "2026-09-03T00:00:00.000Z",
+    ...extra
+  });
+
+  it("survives the round trip through the control plane", () => {
+    // The decision is only useful if it comes back. A flag dropped on
+    // parse would silently revert to "taught site only" on every reload.
+    expect(parsePublicationRecord(JSON.parse(JSON.stringify(record({ orchestration: true }))))).toMatchObject({
+      orchestration: true
+    });
+  });
+
+  it("is absent rather than false when it was never asked for", () => {
+    // Every capability published before this decision existed is one of
+    // these, and none of them asked to be copied anywhere.
+    expect(parsePublicationRecord(JSON.parse(JSON.stringify(record({}))))).not.toHaveProperty("orchestration");
   });
 });
 

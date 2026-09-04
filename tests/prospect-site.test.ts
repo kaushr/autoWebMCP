@@ -125,4 +125,122 @@ describe("SignalBase views", () => {
     expect(published).toContain("Agent capabilities: 1 published");
     expect(published).toContain("Find Relevant Contacts");
   });
+
+  /* ---------------------------------------------------------------- *
+   * The badge expands into the contract behind it.
+   *
+   * An agent chooses a tool from its description and calls it from its
+   * schema, so a panel headed "what an agent sees" has to show both. And
+   * it has to say where the list came from: `getTools()` is the browser's
+   * answer about what an agent can discover, while this document's own
+   * registry is only evidence that registration was attempted.
+   * ---------------------------------------------------------------- */
+  it("expands the badge into the tool exactly as an agent receives it", () => {
+    const html = renderShell(
+      "<p></p>",
+      describeReadiness({
+        webmcpAvailable: true,
+        publishedNames: ["Find decision-maker contacts"],
+        toolSource: "discovered",
+        tools: [
+          {
+            name: "find_decision_maker_contacts",
+            description: "Locate likely stakeholders at a target company.",
+            inputSchema: {
+              type: "object",
+              properties: { company: { type: "string", description: "The company." } },
+              required: ["company"],
+              additionalProperties: false
+            }
+          }
+        ]
+      })
+    );
+
+    expect(html).toContain("<details");
+    expect(html).toContain("What an agent sees");
+    expect(html).toContain("find_decision_maker_contacts");
+    expect(html).toContain("Locate likely stakeholders at a target company.");
+    expect(html).toContain("&quot;company&quot;");
+    expect(html).toContain("getTools()");
+  });
+
+  it("says a listing is registration evidence when the browser cannot be asked", () => {
+    const html = renderShell(
+      "<p></p>",
+      describeReadiness({
+        webmcpAvailable: true,
+        publishedNames: ["Find decision-maker contacts"],
+        toolSource: "registered",
+        tools: [{ name: "find_decision_maker_contacts", description: "" }]
+      })
+    );
+    expect(html).toContain("not of agent-side discovery");
+    expect(html).toContain("This browser published no input schema for it.");
+  });
+
+  it("says an unpublished tool is still callable here until the page reloads", () => {
+    // WebMCP has no unregister. Quietly dropping it from the count would
+    // describe a tool surface that does not exist — and a demo that starts
+    // from "SignalBase exposes nothing" needs to know a reload is the fix.
+    const html = renderShell(
+      "<p></p>",
+      describeReadiness({
+        webmcpAvailable: true,
+        publishedNames: ["Find decision-maker contacts"],
+        toolSource: "discovered",
+        tools: [{ name: "find_decision_maker_contacts", description: "Locate stakeholders." }],
+        staleNames: ["find_decision_maker_contacts"]
+      })
+    );
+    expect(html).toContain("no longer published");
+    expect(html).toContain("until the page is reloaded");
+    // Still counted, because it is still there.
+    expect(html).toContain("Agent capabilities: 1 published");
+  });
+
+  it("offers removal inside the panel, and asks twice", () => {
+    // The control lives in the disclosure, never in the site's own chrome:
+    // SignalBase has to read as an ordinary business site until someone
+    // opens the badge.
+    const readiness = {
+      webmcpAvailable: true,
+      publishedNames: ["Find decision-maker contacts"],
+      toolSource: "discovered" as const,
+      tools: [{ name: "find_decision_maker_contacts", description: "Locate stakeholders." }]
+    };
+
+    const idle = renderShell("<p></p>", describeReadiness(readiness));
+    expect(idle).toContain('data-remove-capability="find_decision_maker_contacts"');
+    expect(idle).toContain("Unpublish and reload");
+    expect(idle).not.toContain("confirm");
+
+    const armed = renderShell(
+      "<p></p>",
+      describeReadiness({ ...readiness, removalArmed: "find_decision_maker_contacts" })
+    );
+    expect(armed).toContain("Unpublish and reload — confirm");
+    // Says what it actually does: the control plane is shared, and the
+    // reload is the removal rather than tidying up after it.
+    expect(armed).toContain("removes it from the control plane for every site");
+    expect(armed.replace(/\s+/g, " ")).toContain("WebMCP has no unregister, so this page reloads");
+  });
+
+  it("stays a plain badge when there is nothing to expand", () => {
+    // A disclosure control that opens onto an empty panel is worse than none.
+    const unpublished = renderShell("<p></p>", describeReadiness({ webmcpAvailable: true, publishedNames: [] }));
+    expect(unpublished).not.toContain("<details");
+
+    // And a browser with no WebMCP has nothing an agent could receive,
+    // whatever this document tried to register.
+    const unsupported = renderShell(
+      "<p></p>",
+      describeReadiness({
+        webmcpAvailable: false,
+        publishedNames: ["Find decision-maker contacts"],
+        tools: [{ name: "find_decision_maker_contacts", description: "" }]
+      })
+    );
+    expect(unsupported).not.toContain("<details");
+  });
 });

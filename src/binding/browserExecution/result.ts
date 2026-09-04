@@ -87,6 +87,29 @@ export interface ExecutionResult {
    * read as success.
    */
   target?: ExecutionTarget;
+  /**
+   * The EARLIER invocation this one was refused because of.
+   *
+   * A different invocation from the one `dispatch` describes, which is why
+   * it is its own field: `dispatch` says how far THIS attempt got, and this
+   * says which outstanding transaction is standing in its way.
+   *
+   * Structured rather than left to `warnings` prose, because the remedy
+   * depends on reading the id back out. The Studio's acknowledgement
+   * control was recovering it with a regex over the evidence sentence — so
+   * rewording that sentence would have made the button silently disappear,
+   * leaving someone deadlocked by the very refusal that exists to be
+   * resolvable.
+   */
+  blockedBy?: BlockingInvocation;
+}
+
+/** An outstanding invocation that must be accounted for before this capability runs again. */
+export interface BlockingInvocation {
+  invocationId: string;
+  startedAt: string;
+  /** How far it was last seen to get. Absent when nobody observed it. */
+  phase?: ExecutionPhase;
 }
 
 /**

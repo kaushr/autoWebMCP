@@ -140,6 +140,19 @@ export interface BrowserBindingInspectResponse {
 export type AcquisitionFailureReason =
   | "extension-unavailable"
   | "studio-bridge-outdated"
+  /**
+   * This page's bridge refused to send, because its connection to the
+   * extension is gone — typically an extension reload while the tab stayed
+   * open.
+   *
+   * Distinct from `extension-unavailable`, which means no bridge answered
+   * at all. Here one did, and what it reported is that it never sent the
+   * request. That makes it one of the reasons that provably means the work
+   * did not happen, which is the only thing that matters for a write: the
+   * alternative was reporting an unknown outcome and sending someone to
+   * read a Salesforce record that could not possibly have changed.
+   */
+  | "studio-bridge-disconnected"
   | "target-tab-not-registered"
   | "target-tab-unreachable"
   | "content-script-unavailable"
@@ -154,6 +167,33 @@ export type AcquisitionFailureReason =
    * failure is what sent an agent to retry a save that had succeeded.
    */
   | "outcome-unknown";
+
+/**
+ * Whether a failure PROVES the work never started.
+ *
+ * The union above says as much in prose — every reason before
+ * `outcome-unknown` means the work did not happen — and prose is not something
+ * a write can be decided against. This is the same claim in a form the
+ * execution client checks, and the list is deliberately narrow: each entry
+ * is a hop reporting that IT refused, before anything downstream was
+ * asked.
+ *
+ * Excluded on purpose: `introspection-timeout`, because a tab that stopped
+ * answering may still be working; `target-tab-unreachable` and
+ * `content-script-unavailable`, because they are raised around a send that
+ * may already have landed; and `introspection-failed`, which is the
+ * catch-all fallback and therefore names nothing at all. Guessing "nothing
+ * happened" about any of those is how a write that succeeded gets
+ * performed a second time.
+ */
+export function nothingWasDispatched(reason: AcquisitionFailureReason | undefined): boolean {
+  return (
+    reason === "extension-unavailable" ||
+    reason === "studio-bridge-outdated" ||
+    reason === "studio-bridge-disconnected" ||
+    reason === "target-tab-not-registered"
+  );
+}
 
 export interface BrowserBindingExecuteResponse {
   ok: boolean;

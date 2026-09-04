@@ -95,3 +95,56 @@ describe("CaptureSession persistence", () => {
     });
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * A retried batch is one batch, not two.
+ *
+ * The page holds unsent events and re-sends a batch the service worker did
+ * not acknowledge, because an MV3 worker is terminated after about thirty
+ * seconds idle and a send landing in that window rejects. Discarding those
+ * events silently deleted the click on Save out of a real Salesforce
+ * recording — the save's own network call was captured, the click was not,
+ * and the proposal then reported, correctly, that no commit action had been
+ * observed.
+ *
+ * Retrying is only safe if the receiving side recognises what it already
+ * holds, because a rejected send cannot be distinguished from an
+ * acknowledgement that was lost on the way back.
+ * ------------------------------------------------------------------ */
+describe("a redelivered capture batch", () => {
+  it("is recorded once, however many times it arrives", () => {
+    const session = new CaptureSession("session-retry", 1_000, application);
+    const batch = [event("a", 10), event("b", 20), event("c", 30)];
+
+    session.addMany(batch);
+    session.addMany(batch);
+
+    session.stop(2_000);
+    expect(session.count()).toBe(3);
+    expect((session.toTrace().captureEvents ?? []).map((entry) => entry.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("still accepts events the session has genuinely not seen", () => {
+    const session = new CaptureSession("session-retry-2", 1_000, application);
+    session.addMany([event("a", 10), event("b", 20)]);
+    // The batch that failed, re-sent with what followed it.
+    session.addMany([event("a", 10), event("b", 20), event("save", 30)]);
+
+    session.stop(2_000);
+    expect((session.toTrace().captureEvents ?? []).map((entry) => entry.id)).toEqual(["a", "b", "save"]);
+  });
+
+  it("recognises what a resumed worker already holds", () => {
+    // The worker is terminated and restarted mid-recording, rebuilding the
+    // session from its snapshot. Without the ids coming back with it, the
+    // very next retry would double every event it had already stored.
+    const original = new CaptureSession("session-resume", 1_000, application);
+    original.addMany([event("a", 10), event("b", 20)]);
+
+    const resumed = CaptureSession.fromSnapshot(original.toSnapshot());
+    resumed.addMany([event("a", 10), event("b", 20), event("save", 30)]);
+
+    resumed.stop(2_000);
+    expect((resumed.toTrace().captureEvents ?? []).map((entry) => entry.id)).toEqual(["a", "b", "save"]);
+  });
+});

@@ -41,9 +41,11 @@ import {
 import type { ObservationTrace } from "./capture/normalize";
 import type { CaptureEvent, CapturePlatform } from "./capture/types";
 import {
+  callableHere,
   listPublishedCapabilities,
   publishCapability,
   publishedCapabilityContract,
+  registrableHere,
   unpublishAll,
   unpublishCapability,
   withResolvedValueDomains,
@@ -56,6 +58,7 @@ import {
   harnessFieldsFor,
   normalizeInputSchema,
   readToolResult,
+  settledToolListing,
   verdictFor,
   type HarnessField,
   type HarnessInvocationOutcome
@@ -340,7 +343,7 @@ function describeNeeds(needs: readonly { label: string }[]): string {
  *
  * Every action here crosses page → extension → target tab → application,
  * and several take tens of seconds. Before this, a click was
- * indistinguishable from a no-op: "Propose capability from trace" sat
+ * indistinguishable from a no-op: the semanticizer button sat
  * inert for up to a minute, and the only feedback was a status line
  * elsewhere on the page that a person watching the button never looked at.
  *
@@ -426,6 +429,12 @@ import {
 } from "./binding/browserExecution/model";
 import { extensionBridgeExecutionClient } from "./training/browserExecutionClient";
 import { compileCapability, registerCapability } from "./webmcp/compiler";
+import { bindingActionFor, invokeProspectBinding } from "./prospect/bindings";
+import { DEFAULT_MAX_STEPS, runAgentTask, type AgentResumption } from "./agent/loop";
+import { webMcpAgentPorts } from "./agent/webmcp";
+import { loopControlFor } from "./agent/observation";
+import { planNextAction } from "./agent/planner";
+import type { AgentRun, AgentStep, ToolObservation } from "./agent/model";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root not found.");
@@ -433,6 +442,7 @@ const appRoot: HTMLDivElement = app;
 
 const controlMode = new URLSearchParams(window.location.search).get("control") === "1";
 const captureMode = new URLSearchParams(window.location.search).get("capture") === "1";
+
 /**
  * The Studio publishes capabilities to the control plane; it never hosts them
  * as a taught application would. `?control=1` is its own local proof surface
@@ -444,7 +454,7 @@ const captureMode = new URLSearchParams(window.location.search).get("capture") =
  * application's own origin to host `document.modelContext` itself.
  */
 const registration = controlMode ? registerHelloControl() : document.modelContext ? "available" : "unavailable";
-const browserExecutionRegistered = new Set<string>();
+const registeredTools = new Set<string>();
 
 /* --------------------- judge-facing WebMCP harness --------------------- *
  * What this browser actually permits a page to do, established by asking
@@ -453,14 +463,6 @@ const browserExecutionRegistered = new Set<string>();
  * withhold, and the panel is only allowed to claim what is present.
  * ---------------------------------------------------------------------- */
 const webMcpSurface = describeWebMcpSurface(document.modelContext);
-/**
- * How long to keep asking the browser about a tool just registered.
- *
- * `registerTool` is fire-and-forget: it returns before `getTools()` will
- * admit the tool exists, and nothing in the API says when that changes.
- */
-const REGISTRATION_SETTLE_MS = 2_000;
-const REGISTRATION_POLL_MS = 100;
 
 /** Tools as the browser reports them. Empty until `getTools()` answers. */
 let discoveredTools: RegisteredTool[] = [];
@@ -472,6 +474,45 @@ let harnessOutcome: HarnessInvocationOutcome | undefined;
 /** How long the last WebMCP invocation took, wall clock, around the call itself. */
 let harnessElapsedMs: number | undefined;
 let harnessStatus = "";
+
+/* ----------------------- page-side agent harness ----------------------- *
+ * One natural-language instruction, executed by composing whatever tools
+ * `getTools()` currently reports. The loop itself lives in `src/agent`;
+ * everything here is state and rendering.
+ * ---------------------------------------------------------------------- */
+/**
+ * Which panel of the control page is showing.
+ *
+ * Three panels stacked vertically made a page nobody could see the end of,
+ * and the one worth watching — the agent run — was below two screens of
+ * reference material. They are peers, not a sequence, so they are tabs.
+ *
+ * Defaults to the agent task because that is what this page is for; the
+ * tool surface and the applications behind it are what you consult when
+ * you want to know why a run did what it did.
+ */
+type ControlTab = "agent" | "tools" | "applications";
+let controlTab: ControlTab = "agent";
+
+/** What the person typed. Held without re-rendering, so a render never eats a keystroke. */
+let agentInstruction = "";
+let agentRun: AgentRun | undefined;
+/** Set by Stop, read by the loop between steps. A dispatched call is never interrupted. */
+let agentStopRequested = false;
+/**
+ * Re-renders once a second while a call is in flight.
+ *
+ * Only for the counter: a Salesforce write can run for forty seconds, and
+ * a number that does not move reads as a frozen page rather than a slow
+ * application. Started when a run begins and cleared when it ends, so
+ * nothing ticks while nothing is happening.
+ */
+let agentTicker: number | undefined;
+
+function stopAgentTicker(): void {
+  if (agentTicker !== undefined) window.clearInterval(agentTicker);
+  agentTicker = undefined;
+}
 
 /**
  * Asks the browser which tools an agent would see on this document.
@@ -491,16 +532,7 @@ async function refreshDiscoveredTools(expected: readonly string[] = []): Promise
     // and so the only one that had settled — while the same call from a
     // console seconds later listed all three. The panel then said nothing
     // was registered about a document an agent was successfully calling.
-    //
-    // Bounded and evidence-led: it stops the moment the browser reports
-    // what was just registered, and gives up quickly rather than insisting.
-    const deadline = Date.now() + REGISTRATION_SETTLE_MS;
-    for (;;) {
-      discoveredTools = await document.modelContext.getTools();
-      const missing = expected.filter((name) => !discoveredTools.some((tool) => tool.name === name));
-      if (missing.length === 0 || Date.now() >= deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, REGISTRATION_POLL_MS));
-    }
+    discoveredTools = await settledToolListing(document.modelContext, expected);
     discoveryError = "";
     if (!discoveredTools.some((tool) => tool.name === selectedToolName)) {
       selectedToolName = discoveredTools.find((tool) => tool.name !== "hello_webmcp")?.name ?? "";
@@ -592,7 +624,22 @@ function describeOutcome(outcome: HarnessInvocationOutcome): string {
   }
 }
 
-/** A WebMCP tool's inputs arrive untyped; the engine writes strings to the DOM regardless of a field's declared type. */
+/**
+ * Performs a published capability, whichever way it is performed.
+ *
+ * Three routes, and which one applies is a property of the publication
+ * record rather than a choice made here: a query binding drives the taught
+ * application's own search UI, an execution binding drives its edit
+ * surface, and a capability with neither is one an application in this
+ * bundle already implements in-process. SignalBase is the third case —
+ * `invokeProspectBinding` is the SAME function its own document calls, not
+ * a copy of it — which is what lets one document offer tools from two
+ * independently taught applications without any execution logic existing
+ * twice.
+ *
+ * A WebMCP tool's inputs arrive untyped; the engine writes strings to the
+ * DOM regardless of a field's declared type.
+ */
 function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: CapabilityInputValues): Promise<unknown> {
   const record = publications.find((entry) => entry.capability.id === subject.id);
 
@@ -607,15 +654,32 @@ function invokeBrowserExecutionBinding(subject: SemanticCapability, inputs: Capa
 
   const executionBinding = record?.executionBinding;
   if (!executionBinding) {
+    // Nothing to drive a browser with, but possibly an application right
+    // here that can perform it.
+    if (bindingActionFor(subject)) return Promise.resolve(invokeProspectBinding(subject, inputs));
     throw new Error(`No accepted browser execution binding is published for "${subject.id}".`);
   }
   const stringInputs: Record<string, string> = {};
   for (const [name, value] of Object.entries(inputs)) stringInputs[name] = value === undefined ? "" : String(value);
+  // An acknowledgement a person gave, spent once.
+  //
+  // It travels as page-side state rather than as a tool argument, and that
+  // is the whole point: acknowledging an outstanding write is a claim about
+  // a record that only a human who read it can make. There is deliberately
+  // no path by which a model could supply this — the WebMCP schema has no
+  // field for it, and this value is only ever set by someone pressing a
+  // button.
+  const acknowledges = acknowledgedInvocation;
+  acknowledgedInvocation = undefined;
+
   // The agent path, and the reason the flag exists. An agent has opened
   // nothing and chosen nothing, so an execution it starts must name the
   // record it means. The Studio's own manual test deliberately does not set
   // this: there, a human chose the record by opening it.
-  return extensionBridgeExecutionClient.execute(executionBinding, stringInputs, { requireTarget: true });
+  return extensionBridgeExecutionClient.execute(executionBinding, stringInputs, {
+    requireTarget: true,
+    ...(acknowledges ? { acknowledgesInvocationId: acknowledges } : {})
+  });
 }
 
 /**
@@ -662,26 +726,32 @@ function valueDomainsFor(binding: BrowserExecutionBinding): Record<string, strin
   return { ...demonstratedValueDomains(binding), ...liveValueDomains };
 }
 
-/** Registers any published capability this control-mode document has not already exposed. */
-function syncBrowserExecutionRegistrations(): void {
+/**
+ * Registers any published capability this control-mode document has not
+ * already exposed.
+ *
+ * This is the smallest truthful way the page-side agent loop gets to see
+ * tools from two independently taught applications at once. Nothing is
+ * duplicated and nothing is re-implemented: SignalBase's capability is
+ * performed by SignalBase's own binding module, and Salesforce's by the
+ * same extension bridge the Studio's test panel uses. What changes is only
+ * WHERE the tool is registered — this document — and the UI says so rather
+ * than implying either application hosts it.
+ */
+function syncToolRegistrations(): void {
   if (!controlMode) return;
   // What else an agent will be able to call. A composition hint says "if
   // you lack this identity, that tool hands out candidates", which is only
   // true of a tool that is actually on the surface — so the peer set is
-  // the published capabilities, read at registration time rather than
+  // what is registrable HERE, read at registration time rather than
   // assumed when the contract was confirmed.
-  const peers = publications.map(publishedCapabilityContract);
+  const peers = registrableHere(publications, bindingActionFor).map(publishedCapabilityContract);
   for (const record of publications) {
-    // Either binding makes a capability callable. A search has a query
-    // binding and no execution binding — requiring the latter published it
-    // to the control plane and then never registered it, so it existed
-    // everywhere except the surface an agent reads.
-    const callable = record.executionBinding ?? record.queryBinding;
-    if (!callable || browserExecutionRegistered.has(record.capability.id)) continue;
+    if (!callableHere(record, bindingActionFor) || registeredTools.has(record.capability.id)) continue;
     if (
       registerCapability(publishedCapabilityContract(record), invokeBrowserExecutionBinding, peers) === "registered"
     ) {
-      browserExecutionRegistered.add(record.capability.id);
+      registeredTools.add(record.capability.id);
     }
   }
 }
@@ -743,6 +813,17 @@ let browserValidationStatus = "";
 let acknowledgedInvocation: string | undefined;
 let publications: PublicationRecord[] = [];
 let publishStatus = "Nothing has been published yet.";
+/**
+ * Whether the next publish should ALSO put the capability on this Studio's
+ * own orchestration surface.
+ *
+ * Off by default, because a capability the taught site can host belongs on
+ * that site. Ticking it asks for the one thing that genuinely needs a
+ * second copy: composing tools from two independently taught applications
+ * on one document, which WebMCP's per-document tool surface allows no
+ * other way.
+ */
+let publishToOrchestration = false;
 /**
  * Set only while the control plane appears unreachable. Distinct from any
  * single panel's status caption: a dead connection fails every panel at once,
@@ -1024,10 +1105,20 @@ function renderExtensionTraces(): string {
     ? extensionTraces.map(renderTraceCard).join("")
     : "<li class=empty>No extension traces have been handed off yet.</li>";
 
+  // Open while the recording is the thing being looked at; closed once a
+  // candidate exists, because from then on the question is what the
+  // capture MEANS, and twenty-nine observations of it sit between the
+  // reader and that answer. The evidence is never removed — it is the
+  // reason to believe the candidate — only folded away once it has been
+  // read.
   const detail = selectedTrace
-    ? `<ol class="event-trace">${selectedTrace.observations
-        .map((observation) => `<li><span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`)
-        .join("")}</ol>
+    ? `<details class="trace-observations" ${candidate ? "" : "open"}>
+         <summary>${selectedTrace.observations.length} observations
+           <span>— what the extension recorded, step by step</span></summary>
+         <ol class="event-trace">${selectedTrace.observations
+           .map((observation) => `<li><span>${escapeHtml(observation.action)}</span> ${describeObservation(observation)}</li>`)
+           .join("")}</ol>
+       </details>
        <p class="semanticizer-status">${selectedTrace.stats.captureEvents} raw capture events
          → ${selectedTrace.observations.length} normalized observations
          → ${(selectedTrace.executionEvidence ?? []).length} execution evidence groups.
@@ -1042,8 +1133,13 @@ function renderExtensionTraces(): string {
     ${detail}
     <div class="studio-actions">
       ${actionButton({ id: "refresh-traces", kind: "refresh-traces", label: "Refresh traces", busyLabel: "Refreshing…", className: "secondary" })}
-      ${actionButton({ id: "semanticize-extension-trace", kind: "propose-capability", label: "Propose capability from trace", busyLabel: "Reading the capture…", disabled: !selectedTrace })}
       ${actionButton({ id: "clear-traces", kind: "clear-traces", label: clearTracesArmed ? "Clear all traces — confirm" : "Clear all traces", busyLabel: "Clearing…", disabled: extensionTraces.length === 0, className: "secondary" })}
+      ${/* Last, because it is the step forward. The two before it are
+            housekeeping on the recordings; this one leaves the recording
+            behind and asks what it meant — the UNDERSTAND stage of
+            TEACH → UNDERSTAND → CONFIRM → BIND → PUBLISH → USE, named
+            for the stage rather than for the artefact it produces. */ ""}
+      ${actionButton({ id: "semanticize-extension-trace", kind: "propose-capability", label: "Understand this recording", busyLabel: "Reading the capture…", disabled: !selectedTrace })}
       <p class="semanticizer-status">${escapeHtml(traceStatus)}</p>
     </div>
   </section>`;
@@ -1123,7 +1219,7 @@ function renderPublications(): string {
             <span><code>${escapeHtml(record.capability.id)}</code> · ${record.capability.inputs.length} inputs · published ${escapeHtml(
               record.publishedAt.slice(11, 19)
             )}</span></div>
-            <button type="button" class="trace-delete" data-unpublish="${escapeHtml(record.capability.id)}"
+            <button type="button" class="trace-delete publication-unpublish" data-unpublish="${escapeHtml(record.capability.id)}"
               title="Unpublish this capability" aria-label="Unpublish ${escapeHtml(record.capability.name)}">${
                 unpublishArmed === record.capability.id ? "Unpublish — confirm" : "Unpublish"
               }</button></li>`
@@ -1832,9 +1928,13 @@ function renderTransactions(result: ExecutionResult): string {
  * with no remedy is a deadlock, not a safety property.
  */
 function renderAcknowledgement(result: ExecutionResult): string {
-  const blocked = /Outstanding invocation (\S+) started/.exec(result.evidence.join(" "));
-  if (result.status !== "blocked" || !blocked) return "";
-  const id = blocked[1];
+  if (result.status !== "blocked") return "";
+  // The structured field first. The sentence is parsed only as a fallback,
+  // for a result produced by a content script that predates the field —
+  // an older build still live in a tab nobody has reloaded, which is
+  // exactly the case where losing the remedy would hurt most.
+  const id = result.blockedBy?.invocationId ?? /Outstanding invocation (\S+) started/.exec(result.evidence.join(" "))?.[1];
+  if (!id) return "";
   if (acknowledgedInvocation === id) {
     return `<p class="semanticizer-status">Acknowledged ${escapeHtml(id)}. Run the test again.</p>`;
   }
@@ -1996,6 +2096,42 @@ function renderQueryCandidates(): string {
     ${renderQueryEvidence()}`;
 }
 
+/**
+ * Where the capability about to be published will be registered.
+ *
+ * Beside the Publish button because that is where the decision is actually
+ * made, and because the flow is otherwise invisible: a capability appears
+ * on a tool surface and nothing on screen said which document would host
+ * it or why.
+ *
+ * Two shapes, because there are two genuinely different situations. When
+ * the taught application is one this bundle serves, it hosts its own tool
+ * and a copy on the Studio is a choice with a cost — so it is a choice.
+ * When the taught application cannot expose `document.modelContext` at all,
+ * the Studio is the only possible host and there is nothing to decide; the
+ * panel states the fact rather than offering a checkbox that does nothing.
+ */
+function renderRegistrationTarget(capability: SemanticCapability): string {
+  const taughtSiteHostsIt = Boolean(bindingActionFor(capability));
+  const application = capability.provenance.sourceApplication?.label ?? "the taught application";
+
+  if (!taughtSiteHostsIt) {
+    return `<p class="semanticizer-status"><strong>Registered on:</strong> the WebMCP control page.
+      ${escapeHtml(application)} cannot expose <code>document.modelContext</code> for us, so this document is the
+      only place the tool can exist. Nothing to choose.</p>`;
+  }
+
+  return `<p class="semanticizer-status"><strong>Registered on:</strong> ${escapeHtml(application)} — the taught
+      site's own document, which is where a capability it can host belongs.</p>
+    <label class="checkbox">
+      <input type="checkbox" id="publish-orchestration" ${publishToOrchestration ? "checked" : ""} />
+      Also register on the orchestration surface (the WebMCP control page)
+    </label>
+    <p class="semanticizer-status">Only for the cross-application agent loop. WebMCP is per-document — no page can
+      read another origin's tool surface — so composing tools taught from two applications needs a second copy of
+      this one here. Leave it off and the Studio hosts nothing of ${escapeHtml(application)}'s.</p>`;
+}
+
 function renderPublicationStage(view: StudioLifecycleView): string {
   return `<div class="lifecycle-section">
     <p class="eyebrow">Publication</p>
@@ -2004,6 +2140,7 @@ function renderPublicationStage(view: StudioLifecycleView): string {
         ? `<p class="semanticizer-status">${escapeHtml(view.publication.reason)}</p>`
         : ""
     }
+    ${candidate ? renderRegistrationTarget(candidate) : ""}
     <div class="studio-actions">
       <button type="button" id="publish-capability" class="${view.publication.canPublish ? "" : "secondary"}" ${
     view.publication.canPublish ? "" : "disabled"
@@ -2492,6 +2629,15 @@ function renderTrainingStudio(): string {
         return `<form id="candidate-editor" class="candidate-editor">
         <div class="panel-heading"><div><p class="eyebrow">Candidate capability</p><h2>Review before publication</h2></div><span>Human confirmation required</span></div>
         ${renderLifecycleStages(view)}
+        ${/* Open while the contract is the thing being decided; folded once a
+              human has confirmed it. Everything inside stays in the DOM and
+              stays editable — reopening it is one click — but after
+              confirmation the question has moved on to how the capability
+              executes, and the contract was pushing those stages a screen
+              down. The stage chips above stay visible either way, because
+              they are what says where you are. */ ""}
+        <details class="candidate-contract" ${confirmed ? "" : "open"}>
+        <summary>The contract <span>— name, description and parameters a human confirms</span></summary>
         <label>Capability name<input name="name" value="${escapeHtml(capability.name)}" /></label>
         <label>Description<textarea name="description">${escapeHtml(capability.description)}</textarea></label>
         ${renderExecutionSemantics()}
@@ -2511,8 +2657,9 @@ function renderTrainingStudio(): string {
         <div class="studio-actions">
           <button type="submit">Save changes</button>
           ${confirmed ? "" : `<button type="button" id="confirm-capability">Confirm capability</button>`}
-          <p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p>
         </div>
+        </details>
+        <p class="semanticizer-status">${escapeHtml(semanticizerStatus)}</p>
         ${renderExecutionStage(capability, view)}
         ${renderValidationStage(view)}
         ${renderBrowserExecutionStage(view)}
@@ -2673,6 +2820,29 @@ function renderHarnessResult(): string {
  * found. Where the browser cannot answer, the panel says so instead of
  * substituting something that looks equivalent.
  */
+/**
+ * Who taught a tool, and who is registering it — which are different
+ * questions with different answers.
+ *
+ * The registration belongs to THIS document, always: the Studio publishes
+ * capabilities and hosts the tool surface, and neither SignalBase nor a
+ * Salesforce org hosts anything here. Saying "SignalBase's tool" would be
+ * a claim about an origin that is not exposing it. What the taught
+ * application does own is the binding — the search UI, the edit surface,
+ * or the in-process implementation — so that is what is named.
+ */
+function toolProvenance(name: string): string {
+  const record = publications.find((entry) => entry.capability.id === name);
+  if (!record) return "registered by this document";
+  const application = record.capability.provenance.sourceApplication?.label ?? record.capability.binding?.application;
+  const how = record.queryBinding
+    ? "runs that application's own search UI through the Teach Mode extension"
+    : record.executionBinding
+      ? "drives that application's own edit surface through the Teach Mode extension"
+      : "performed in process by the bundled application's own binding";
+  return `taught from ${application ?? "an unnamed application"}; registered by this document; ${how}`;
+}
+
 function renderWebMcpHarness(): string {
   if (!webMcpSurface.available) {
     return `<div class="lifecycle-section">
@@ -2698,14 +2868,16 @@ function renderWebMcpHarness(): string {
       ? `<ul class="reasons">${tools
           .map(
             (entry) =>
-              `<li><code>${escapeHtml(entry.name)}</code>${entry.description ? ` — ${escapeHtml(entry.description)}` : ""}</li>`
+              `<li><code>${escapeHtml(entry.name)}</code> — ${escapeHtml(toolProvenance(entry.name))}${
+                entry.description ? `<br><small class="domain-unknown">${escapeHtml(entry.description)}</small>` : ""
+              }</li>`
           )
           .join("")}</ul>`
       : `<p class="semanticizer-status">No published capability is registered on this document yet.
            Publish one in the Studio, then reload this page.</p>`
     : `<ul class="reasons">${
-        browserExecutionRegistered.size
-          ? [...browserExecutionRegistered].map((id) => `<li><code>${escapeHtml(id)}</code></li>`).join("")
+        registeredTools.size
+          ? [...registeredTools].map((id) => `<li><code>${escapeHtml(id)}</code></li>`).join("")
           : `<li>Nothing registered yet.</li>`
       }</ul>`;
 
@@ -2798,6 +2970,779 @@ function renderWebMcpHarness(): string {
   </div>`;
 }
 
+/* ----------------------- page-side agent harness ----------------------- */
+
+/**
+ * Runs one instruction by composing the tools the browser currently reports.
+ *
+ * Everything the loop can reach is supplied here, and there is deliberately
+ * nothing else in the set: discovery and invocation come from
+ * `webMcpAgentPorts`, which touches `document.modelContext` and nothing
+ * else, and planning goes to the control plane's existing model
+ * integration. The loop has no access to an execution engine, a binding,
+ * or a capability's own callback — so the tools it composes are, and can
+ * only be, the ones an agent would see.
+ */
+async function runAgentInstruction(): Promise<void> {
+  const modelContext = document.modelContext;
+  if (!modelContext || !webMcpSurface.canDiscover || !webMcpSurface.canInvoke) return;
+
+  const instruction = agentInstruction.trim();
+  if (!instruction) {
+    agentRun = undefined;
+    render();
+    return;
+  }
+
+  agentStopRequested = false;
+  agentRun = undefined;
+  const ports = webMcpAgentPorts(modelContext);
+  stopAgentTicker();
+  // Only the counter needs this; it re-renders while a call is waiting.
+  agentTicker = window.setInterval(() => {
+    if (agentRun?.inFlight) render();
+  }, 1_000);
+
+  await runOperation("run-agent-task", "Planning the first step…", async () => {
+    const run = await runAgentTask(instruction, {
+      discoverTools: ports.discoverTools,
+      invoke: ports.invoke,
+      plan: planNextAction,
+      // Rendered as it happens rather than at the end: a step that takes
+      // twenty seconds against a live application should be visible while
+      // it takes them.
+      onProgress: (snapshot) => {
+        agentRun = snapshot;
+        render();
+      },
+      shouldStop: () => agentStopRequested
+    });
+    agentRun = run;
+    stopAgentTicker();
+    return { message: describeAgentRun(run), warning: agentRunNeedsAttention(run) };
+  });
+}
+
+/**
+ * Carries a stopped run forward once a person has said which record they
+ * meant.
+ *
+ * Deliberately the same entry point as a fresh run, with the steps already
+ * taken handed back in: nothing is re-executed, the search is not run
+ * again, and the only thing that has changed is that the ambiguity now has
+ * an answer a human gave.
+ */
+async function resumeAgentRun(answer: { candidateId: string } | { acknowledge: true }): Promise<void> {
+  const modelContext = document.modelContext;
+  const stopped = agentRun;
+  if (!modelContext) return;
+
+  let resume: AgentResumption;
+  if ("candidateId" in answer) {
+    if (!stopped?.clarification) return;
+    resume = { steps: stopped.steps, choice: { step: stopped.clarification.step, candidateId: answer.candidateId } };
+  } else {
+    if (!stopped?.acknowledgement) return;
+    // Held for the next execution to spend. Set here, by a person pressing
+    // a button, and nowhere else.
+    acknowledgedInvocation = stopped.acknowledgement.invocationId;
+    resume = { steps: stopped.steps, acknowledged: { step: stopped.acknowledgement.step } };
+  }
+
+  const ports = webMcpAgentPorts(modelContext);
+  agentStopRequested = false;
+  stopAgentTicker();
+  agentTicker = window.setInterval(() => {
+    if (agentRun?.inFlight) render();
+  }, 1_000);
+
+  await runOperation("run-agent-task", "Continuing with the record you chose…", async () => {
+    const run = await runAgentTask(stopped.instruction, {
+      discoverTools: ports.discoverTools,
+      invoke: ports.invoke,
+      plan: planNextAction,
+      onProgress: (snapshot) => {
+        agentRun = snapshot;
+        render();
+      },
+      shouldStop: () => agentStopRequested
+    }, resume);
+    agentRun = run;
+    stopAgentTicker();
+    return { message: describeAgentRun(run), warning: agentRunNeedsAttention(run) };
+  });
+}
+
+/** Whether a run ended in a state a person has to do something about. */
+function agentRunNeedsAttention(run: AgentRun): boolean {
+  return run.stopReason !== "finished";
+}
+
+/**
+ * What the last write actually achieved, when the run ended on one.
+ *
+ * A run that verified a Salesforce record and then ran out of budget was
+ * headed "the step budget was reached" — true about the loop, and silent
+ * about the only thing the person cared about, which was whether their
+ * record had changed. The stop reason explains the loop; this explains the
+ * application.
+ */
+function lastWriteVerdict(run: AgentRun): string | undefined {
+  const write = [...run.steps].reverse().find((step) => step.observation.kind === "write");
+  if (!write || write.observation.kind !== "write") return undefined;
+  const observation = write.observation;
+  const verified = observation.values.filter((value) => value.verified === "yes").length;
+  const targeted = observation.target?.status === "verified";
+
+  switch (observation.status) {
+    case "succeeded":
+      return `${write.tool} saved and every check passed.`;
+    case "partially_verified":
+      return (
+        `${write.tool} saved${targeted ? " to the record it was asked to" : ""}, and ${verified} of ` +
+        `${observation.values.length} value${observation.values.length === 1 ? "" : "s"} read back as requested. ` +
+        "Some checks could not be answered."
+      );
+    default:
+      return undefined;
+  }
+}
+
+function describeAgentRun(run: AgentRun): string {
+  const calls = `${run.steps.length} tool call${run.steps.length === 1 ? "" : "s"}`;
+  // Led with, whatever ended the run: a verified write is the outcome, and
+  // the stop reason is the footnote.
+  const wrote = lastWriteVerdict(run);
+  if (run.stopReason !== "finished" && wrote) {
+    return `${wrote} The run then stopped — ${describeAgentStop(run, calls)}`;
+  }
+  const stopped = describeAgentStop(run, calls);
+  return stopped.charAt(0).toUpperCase() + stopped.slice(1);
+}
+
+function describeAgentStop(run: AgentRun, calls: string): string {
+  switch (run.stopReason) {
+    case "finished":
+      return `finished after ${calls}.`;
+    case "needs_clarification":
+      return `after ${calls}, a choice is needed before anything else is changed.`;
+    case "unknown_outcome":
+      return `after ${calls}, a write outcome is not established.`;
+    case "step_budget_exhausted":
+      return `the step budget was reached after ${calls}.`;
+    case "stopped":
+      return `stopped after ${calls} at your request.`;
+    case "needs_acknowledgement":
+      return `after ${calls}, an earlier write of this capability is unaccounted for.`;
+    case "invalid_action":
+      return `after ${calls}, the model's next action was refused.`;
+    case "planner_failed":
+      return `after ${calls}, the control plane could not plan a step.`;
+    case "no_tools":
+      return "no tool is registered on this document.";
+    default:
+      return `stopped after ${calls}.`;
+  }
+}
+
+/**
+ * The arguments, on one wrapping line.
+ *
+ * A stacked definition list gave each of three short values its own two
+ * rows, so a single tool call filled a screen and the result it produced
+ * was below the fold. What a reader needs here is what was passed, at a
+ * glance, next to the tool that was passed it.
+ */
+function renderAgentArguments(args: AgentStep["arguments"]): string {
+  const entries = Object.entries(args);
+  if (entries.length === 0) return `<p class="agent-args-empty">no arguments</p>`;
+  return `<ul class="agent-args">${entries
+    .map(
+      ([name, value]) =>
+        `<li><span>${escapeHtml(name)}</span><code>${escapeHtml(String(value))}</code></li>`
+    )
+    .join("")}</ul>`;
+}
+
+/**
+ * What the tool answered, in the runtime's own terms.
+ *
+ * Rendered from the structured outcome rather than from prose, so the
+ * facts a person needs to judge a write — which record, what was asked
+ * for, what was proven afterwards — are the ones on screen.
+ */
+function renderAgentObservation(observation: ToolObservation): string {
+  switch (observation.kind) {
+    case "search": {
+      const found = observation.candidateCount;
+      const list = observation.candidates.length
+        ? `<ul class="reasons">${observation.candidates
+            .map((candidate) => {
+              const context = candidate.context
+                ? Object.entries(candidate.context)
+                    .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(value)}`)
+                    .join(" · ")
+                : "";
+              return `<li><strong>${escapeHtml(candidate.name)}</strong> — <code>${escapeHtml(candidate.id)}</code>${
+                context ? `<br><small class="domain-unknown">${context}</small>` : ""
+              }</li>`;
+            })
+            .join("")}</ul>`
+        : observation.status === "blocked"
+          ? `<p class="semanticizer-status">The search did not run.</p>`
+          : `<p class="semanticizer-status">Nothing matched.</p>`;
+      // Said plainly when a person narrowed it. The model was handed one
+      // candidate where the application had offered several, and the reason
+      // it was allowed to act on that one is that a human chose it — which
+      // a trace claiming "1 candidate" would quietly take the credit for.
+      const narrowed = observation.chosenByUser
+        ? `<p class="semanticizer-status">Narrowed to the record you chose. The search itself returned more than
+             one; nothing here picked between them.</p>`
+        : "";
+      // A block the loop carried on past is the application saying "open
+      // this first" — it wrote nothing and searched nothing. Rendered in a
+      // warning tone it read as a failure the run had somehow survived,
+      // which is the opposite of what happened.
+      const carriedOn = loopControlFor(observation).continue;
+      return `<p class="semanticizer-status">Search — ${escapeHtml(observation.status)} · ${found} candidate${
+        found === 1 ? "" : "s"
+      }</p>
+        ${narrowed}
+        ${list}
+        ${observation.warnings
+          .map((warning) => `<p class="${carriedOn ? "agent-note" : "ambiguity"}">${escapeHtml(warning)}</p>`)
+          .join("")}`;
+    }
+
+    case "write": {
+      const target = observation.target
+        ? `<div><dt>Target identity</dt><dd>${escapeHtml(observation.target.status)} — ${escapeHtml(
+            observation.target.detail
+          )}</dd></div>`
+        : "";
+      const values = observation.values
+        .map((value) => {
+          // Three answers, three appearances. "unreadable" must never look
+          // like a tick: it means nobody could check, which is a different
+          // thing from checked and wrong.
+          const verdict = value.verified === "yes" ? "pass" : value.verified === "no" ? "fail" : "unknown";
+          const glyph = verdict === "pass" ? "✓" : verdict === "fail" ? "✗" : "?";
+          return `<div><dt>${escapeHtml(value.name)}</dt><dd>requested <code>${escapeHtml(value.requested)}</code>
+            <span class="verdict verdict-${verdict}">${glyph} ${escapeHtml(value.verified)}</span>${
+              value.afterSave ? ` · record now <code>${escapeHtml(value.afterSave)}</code>` : ""
+            }</dd></div>`;
+        })
+        .join("");
+      const dispatch = observation.dispatch
+        ? `<div><dt>Dispatch</dt><dd>${escapeHtml(observation.dispatch.phase ?? "not observed")} · ${
+            observation.dispatch.mayHavePersisted ? "may have persisted" : "nothing persisted"
+          }${
+            observation.dispatch.openRecordAt
+              ? ` · opened ${escapeHtml(observation.dispatch.openRecordAt)}`
+              : ""
+          }</dd></div>`
+        : "";
+      const unestablished = observation.unestablished?.length
+        ? `<p class="semanticizer-status">Could not be answered: ${observation.unestablished
+            .map((name) => `<code>${escapeHtml(name)}</code>`)
+            .join(", ")}. Everything else below was checked.</p>`
+        : "";
+      const wroteNothingYet = loopControlFor(observation).continue && observation.status === "blocked";
+      // Why a run says `failed` while every row above it reads green. The
+      // deciding check names itself here rather than leaving the reader to
+      // reconcile a verified write with a failed one.
+      const failed = observation.failedChecks?.length
+        ? `<p class="ambiguity">Failed ${observation.failedChecks.length === 1 ? "check" : "checks"}: ${observation.failedChecks
+            .map((check) => `<code>${escapeHtml(check.name)}</code> — ${escapeHtml(check.detail)}`)
+            .join("; ")}</p>`
+        : "";
+      return `<p class="semanticizer-status">Write — ${escapeHtml(observation.status)}</p>
+        ${unestablished}
+        ${failed}
+        <dl class="diagnostics">${target}${values}${dispatch}</dl>
+        ${observation.warnings
+          .map((warning) => `<p class="${wroteNothingYet ? "agent-note" : "ambiguity"}">${escapeHtml(warning)}</p>`)
+          .join("")}`;
+    }
+
+    case "data":
+      return `<pre class="admin-json">${escapeHtml(JSON.stringify(observation.value, null, 2))}</pre>`;
+
+    case "error":
+      return `<p class="ambiguity">${escapeHtml(observation.message)}</p>`;
+
+    default:
+      return `${observation.problem ? `<p class="ambiguity">${escapeHtml(observation.problem)}</p>` : ""}
+        <pre class="admin-json">${escapeHtml(observation.text)}</pre>`;
+  }
+}
+
+/**
+ * The call that has been dispatched and has not answered.
+ *
+ * Rendered as its own row rather than as a step, and it says how long it
+ * has been waiting — the number moving is what separates "this application
+ * is slow" from "this page is broken".
+ */
+function renderAgentInFlight(run: AgentRun): string {
+  if (!run.inFlight) return "";
+  const waited = ((Date.now() - run.inFlight.startedAt) / 1000).toFixed(0);
+  return `<li class="agent-step is-running">
+    <div class="agent-step-head">
+      <span class="agent-step-index"><span class="spinner" aria-hidden="true"></span></span>
+      <code class="agent-step-tool">${escapeHtml(run.inFlight.tool)}</code>
+      ${
+        stepSystem(run.inFlight.tool)
+          ? `<span class="agent-step-system">${escapeHtml(stepSystem(run.inFlight.tool) as string)}</span>`
+          : ""
+      }
+      <span class="agent-step-time">${escapeHtml(waited)}s</span>
+    </div>
+    ${renderAgentArguments(run.inFlight.arguments)}
+    <div class="agent-step-result">
+      <p class="semanticizer-status">Running against the live application. Nothing is reported until it
+        answers — a write is never assumed from silence.</p>
+    </div>
+  </li>`;
+}
+
+/**
+ * Which application a step actually ran against.
+ *
+ * Read from the publication the tool was compiled from, not guessed from
+ * its name. A tool this document did not publish — the hello-world
+ * control, or anything registered by something else — gets no badge rather
+ * than an invented one.
+ */
+function stepSystem(tool: string): string | undefined {
+  const record = publications.find((entry) => entry.capability.id === tool);
+  return record?.capability.provenance.sourceApplication?.label ?? record?.capability.binding?.application;
+}
+
+/**
+ * How a step should read at a glance.
+ *
+ * Three states and no more, because a fourth would need explaining: it did
+ * the work, it needs something from you, or it went wrong. A redirect the
+ * runtime asked for and an ambiguity waiting on a choice are both the
+ * middle one — neither failed, and neither finished.
+ */
+function stepVerdict(observation: ToolObservation): "pass" | "warn" | "fail" {
+  if (observation.kind === "error") return "fail";
+  if (observation.kind === "write") {
+    if (observation.status === "unknown" || observation.status === "failed") return "fail";
+    return observation.status === "blocked" ? "warn" : "pass";
+  }
+  if (observation.kind === "search") {
+    if (observation.status === "blocked") return "warn";
+    return observation.candidateCount > 1 ? "warn" : "pass";
+  }
+  return "pass";
+}
+
+/**
+ * Keys a payload conventionally uses for the human-facing label of a thing.
+ *
+ * The one place this summary leans on convention rather than structure, and
+ * it earns it: shown a company and a contact, the useful line is their
+ * names, not the first primitive that happens to sort first. It is a
+ * preference, never a requirement — an object without one falls straight
+ * back to structure.
+ */
+const LABEL_KEYS = ["name", "title", "label"];
+
+/** How deep to look for something worth showing, and how much of it to show. */
+const SUMMARY_LEAVES = 3;
+const SUMMARY_VALUE_CHARS = 44;
+
+function summaryText(value: unknown): string {
+  const text = String(value);
+  return text.length > SUMMARY_VALUE_CHARS ? `${text.slice(0, SUMMARY_VALUE_CHARS)}…` : text;
+}
+
+/** One representative primitive from a branch, with the path it was found at. */
+function leafOf(value: unknown, path: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "object") return `${path || "value"}: ${summaryText(value)}`;
+  if (Array.isArray(value)) return value.length > 0 ? leafOf(value[0], `${path}[0]`) : undefined;
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  const labelled = entries.find(
+    ([key, entry]) => LABEL_KEYS.includes(key.toLowerCase()) && entry !== null && typeof entry !== "object"
+  );
+  if (labelled) return `${path ? `${path}.` : ""}${labelled[0]}: ${summaryText(labelled[1])}`;
+
+  for (const [key, entry] of entries) {
+    const leaf = leafOf(entry, path ? `${path}.${key}` : key);
+    if (leaf) return leaf;
+  }
+  return undefined;
+}
+
+/**
+ * A one-line answer to "what did that give us".
+ *
+ * Breadth first, one leaf per top-level branch. Depth-first spent the whole
+ * budget inside the first object it met — three fields of a company, while
+ * the contact whose name the next tool would be given never appeared.
+ *
+ * What it shows is always a real value at the real path it was found at, so
+ * it cannot misrepresent what the tool returned; the only judgement it makes
+ * is which branch to sample, and it samples every one it has room for.
+ */
+function summarizeJson(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const leaf = leafOf(value, "");
+    return leaf ? [leaf] : [];
+  }
+  const found: string[] = [];
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (found.length >= SUMMARY_LEAVES) break;
+    const leaf = leafOf(entry, key);
+    if (leaf) found.push(leaf);
+  }
+  return found;
+}
+
+/** The step's outcome in one line, so a trace can be scanned rather than read. */
+function summarizeObservation(observation: ToolObservation): string {
+  switch (observation.kind) {
+    case "search": {
+      if (observation.status === "blocked") return "did not run — the page had to be opened first";
+      const count = observation.candidateCount;
+      if (count === 0) return "nothing matched";
+      if (count === 1) return `${observation.candidates[0].name} · ${observation.candidates[0].id}`;
+      return `${count} candidates — a choice is needed`;
+    }
+    case "write": {
+      if (observation.status === "blocked") {
+        return observation.blockedBy
+          ? "refused — an earlier write is unaccounted for"
+          : "nothing written — the record had to be opened first";
+      }
+      if (observation.status === "unknown") return "dispatched, outcome not established";
+      if (observation.status === "failed") return "did not complete";
+      const verified = observation.values.filter((value) => value.verified === "yes").length;
+      return `saved · ${verified} of ${observation.values.length} values verified`;
+    }
+    case "error":
+      return observation.message;
+    case "data":
+      return summarizeJson(observation.value).join(" · ");
+    default:
+      return "";
+  }
+}
+
+function renderAgentStep(step: AgentStep): string {
+  // Three appearances, and they are the three things a reader is actually
+  // asking: did this do the work, did it hand back a verified result, or
+  // did it just tell us to open a page first.
+  const control = loopControlFor(step.observation);
+  const blocked = step.observation.kind !== "data" && step.observation.kind !== "text"
+    && "status" in step.observation && step.observation.status === "blocked";
+  const tone = blocked && control.continue ? " is-redirect" : !control.continue ? " is-halted" : "";
+
+  const verdict = stepVerdict(step.observation);
+  const glyph = verdict === "pass" ? "✓" : verdict === "warn" ? "▲" : "●";
+  const system = stepSystem(step.tool);
+  const summary = summarizeObservation(step.observation);
+
+  return `<li class="agent-step${tone}">
+    <div class="agent-step-head">
+      <span class="agent-step-index">${step.index}</span>
+      <span class="agent-step-verdict verdict-${verdict}" aria-hidden="true">${glyph}</span>
+      <code class="agent-step-tool">${escapeHtml(step.tool)}</code>
+      ${system ? `<span class="agent-step-system">${escapeHtml(system)}</span>` : ""}
+      <span class="agent-step-time">${(step.durationMs / 1000).toFixed(1)}s</span>
+    </div>
+    ${summary ? `<p class="agent-step-summary">${escapeHtml(summary)}</p>` : ""}
+    ${renderAgentArguments(step.arguments)}
+    <div class="agent-step-result">${renderAgentObservation(step.observation)}</div>
+  </li>`;
+}
+
+/** How the run ended, and what a person has to do about it. */
+function renderAgentOutcome(run: AgentRun): string {
+  if (run.status === "running") return "";
+
+  // Listing the candidates and leaving it there was a dead end: the run
+  // stopped to ask a question the page gave nobody a way to answer. Each
+  // one is now the answer itself — picking it resolves that step's
+  // ambiguity and carries the run on from where it stopped.
+  const clarification = run.clarification
+    ? `<p class="ambiguity"><strong>${escapeHtml(run.clarification.question)}</strong> Pick the record you meant.
+        Nothing is changed until you do — a name is not an identity.</p>
+       <ul class="agent-choices">${run.clarification.candidates
+         .map(
+           (candidate) => `<li>
+             <button type="button" data-agent-choice="${escapeHtml(candidate.id)}">
+               <strong>${escapeHtml(candidate.name)}</strong>
+               <code>${escapeHtml(candidate.id)}</code>
+             </button>
+           </li>`
+         )
+         .join("")}</ul>`
+    : "";
+
+  // A wall with a door in it. The runtime refused because an earlier write
+  // never reported, and the remedy is a person reading the record and
+  // saying what they found — so the trace offers exactly that, rather than
+  // sending someone to hunt for the manual test form to unblock an agent
+  // run.
+  const acknowledgement = run.acknowledgement
+    ? `<p class="ambiguity"><strong>An earlier invocation of this capability never reported its outcome.</strong>
+        ${escapeHtml(run.acknowledgement.invocationId)} started at ${escapeHtml(run.acknowledgement.startedAt)}${
+          run.acknowledgement.phase ? ` and last reached "${escapeHtml(run.acknowledgement.phase)}"` : ""
+        }. Open the record and establish what it did. Only then acknowledge it — nothing here can know for you.</p>
+       <div class="studio-actions">
+         <button type="button" class="secondary" id="agent-acknowledge">
+           I have read the record — acknowledge and continue
+         </button>
+       </div>`
+    : "";
+
+  // The one sentence that must never be softened. A dispatched write that
+  // never reported may have persisted, and the only safe next action is a
+  // person reading the record.
+  const unknown =
+    run.stopReason === "unknown_outcome"
+      ? `<p class="ambiguity"><strong>Execution outcome is unknown. The write may have persisted. Manual
+          reconciliation is required before retry.</strong></p>`
+      : "";
+
+  const rejections = run.rejections.length
+    ? `<div><p class="eyebrow">Refused</p>${run.rejections
+        .map(
+          (rejection) =>
+            `<p class="ambiguity">Step ${rejection.step}: ${escapeHtml(rejection.reason)}</p>
+             <pre class="admin-json">${escapeHtml(rejection.raw)}</pre>`
+        )
+        .join("")}</div>`
+    : "";
+
+  return `<div class="agent-outcome" data-outcome="${run.stopReason === "finished" ? "finished" : "attention"}">
+    <p class="eyebrow">Result</p>
+    <p><strong>${escapeHtml(describeAgentRun(run))}</strong></p>
+    ${run.summary ? `<p>${escapeHtml(run.summary)}</p>` : ""}
+    ${unknown}
+    ${run.detail && run.stopReason !== "unknown_outcome" ? `<p class="semanticizer-status">${escapeHtml(run.detail)}</p>` : ""}
+    ${clarification}
+    ${acknowledgement}
+    ${rejections}
+  </div>`;
+}
+
+/**
+ * Which applications are taking part, and where each of their tools lives.
+ *
+ * The honest scope of this section, stated in it: **nothing here discovers
+ * tools across origins.** WebMCP is per-document — `getTools()` only ever
+ * answers for the document it is called on, and there is no API by which
+ * this page could ask SignalBase's document, or a Salesforce tab, what it
+ * has registered. A list of "participating websites" that implied otherwise
+ * would be inventing a capability the platform does not have.
+ *
+ * What it actually reads is the control plane's publication list, which is
+ * a different and weaker fact: what has been published, which application
+ * each capability was taught from, how it is performed, and — for this
+ * document only — whether the browser reports it registered here.
+ */
+function renderParticipatingApplications(): string {
+  if (publications.length === 0) return "";
+
+  const groups = new Map<string, { label: string; records: PublicationRecord[] }>();
+  for (const record of publications) {
+    const source = record.capability.provenance.sourceApplication;
+    const id = source?.id ?? record.capability.binding?.application ?? "unknown";
+    const group = groups.get(id) ?? { label: source?.label ?? id, records: [] };
+    group.records.push(record);
+    groups.set(id, group);
+  }
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Participating applications</p>
+    <p><strong>${groups.size} application${groups.size === 1 ? "" : "s"}, taught independently.</strong></p>
+    <p class="semanticizer-status">Read from the control plane's publication list. Nothing here discovers tools
+      across origins: WebMCP is per-document, and <code>getTools()</code> only ever answers for this one — so
+      "registered here" below is the browser's answer about <em>this</em> document, and everything else is what
+      the control plane recorded when the capability was published.</p>
+    <p class="semanticizer-status">A capability the taught site can host for itself is registered here only if it
+      was published with <em>Also register on the orchestration surface</em> ticked — a choice made once, beside
+      the Publish button, because a second copy is exactly what composing across two applications needs and
+      exactly what nothing else should have.</p>
+    ${[...groups.entries()]
+      .map(
+        ([id, group]) => `<div class="participant">
+          <p class="participant-name"><strong>${escapeHtml(group.label)}</strong> <code>${escapeHtml(id)}</code></p>
+          <ul class="reasons">${group.records
+            .map(
+              (record) => `<li><code>${escapeHtml(record.capability.id)}</code>
+                <br><small class="domain-unknown">${escapeHtml(performedBy(record))}</small>
+                <br><small class="domain-unknown">On this document: ${escapeHtml(
+                  registrationHere(record.capability.id)
+                )}</small>
+                <br><small class="domain-unknown">${escapeHtml(registrationElsewhere(record))}</small></li>`
+            )
+            .join("")}</ul>
+        </div>`
+      )
+      .join("")}
+  </div>`;
+}
+
+/** How the application performs this capability, from the binding it was published with. */
+function performedBy(record: PublicationRecord): string {
+  if (record.queryBinding) return "Runs the application's own search UI through the Teach Mode extension.";
+  if (record.executionBinding) return "Drives the application's own edit surface through the Teach Mode extension.";
+  return "Performed in process by the bundled application's own binding.";
+}
+
+/**
+ * Whether this document is exposing the tool right now.
+ *
+ * The browser's answer where it will give one, and this document's own
+ * registry where it will not — labelled differently, because only the
+ * first is evidence that an agent could discover it.
+ */
+function registrationHere(id: string): string {
+  if (webMcpSurface.canDiscover) {
+    return discoveredTools.some((tool) => tool.name === id)
+      ? "registered — getTools() reports it"
+      : "not registered";
+  }
+  return registeredTools.has(id) ? "passed to registerTool() (discovery unsupported here)" : "not registered";
+}
+
+/**
+ * Where else the tool is registered.
+ *
+ * The asymmetry that justifies this page existing at all: an application
+ * bundled here serves its own document and registers its own copy, so this
+ * document hosting a second one is a choice. A Salesforce org cannot host
+ * `document.modelContext` for us at all, so what is registered here is not
+ * a second copy — it is the only one.
+ */
+function registrationElsewhere(record: PublicationRecord): string {
+  return bindingActionFor(record.capability)
+    ? "Also registered by the taught site's own document at /prospect/ — that is where it belongs."
+    : "That origin cannot host document.modelContext for us, so this document is the only place it is registered.";
+}
+
+/**
+ * The Agent Task panel.
+ *
+ * Says what it is, in the words that are actually true: a page-side agent
+ * harness that discovers and invokes the same WebMCP tools exposed to
+ * browser agents. It is not ChatGPT, not Codex, not an MCP server, and not
+ * a workflow engine — and the reason it is worth looking at is precisely
+ * that the model is operating over the real WebMCP surface.
+ */
+function renderAgentTask(): string {
+  if (!webMcpSurface.canDiscover || !webMcpSurface.canInvoke) {
+    return `<div class="lifecycle-section">
+      <p class="eyebrow">Agent task</p>
+      <p><strong>This browser does not let a page both enumerate and invoke WebMCP tools.</strong></p>
+      <p class="semanticizer-status">The loop needs
+        <code>document.modelContext.getTools()</code> and
+        <code>document.modelContext.executeTool()</code>, because those are the only route it has to a tool.
+        Nothing can be run here without them.</p>
+    </div>`;
+  }
+
+  const working = isWorking(operations, "run-agent-task");
+  const tools = discoveredTools.map((tool) => tool.name);
+
+  return `<div class="lifecycle-section">
+    <p class="eyebrow">Agent task</p>
+    <p><strong>Run one instruction against the live tool set.</strong></p>
+    <p class="semanticizer-status">A page-side agent harness: it reads what <code>getTools()</code> reports, asks
+      the control plane's model for one next action, checks that action against those same tools, and invokes it
+      through <code>executeTool()</code>. Not an MCP server, a workflow engine, or a hardcoded sequence — the
+      tool order comes from the published descriptions and schemas. Maximum ${DEFAULT_MAX_STEPS} steps, and a
+      retry the application asks for is not one of them.</p>
+    <p class="semanticizer-status">Currently visible to it: ${
+      tools.length ? tools.map((name) => `<code>${escapeHtml(name)}</code>`).join(", ") : "no tools"
+    }.</p>
+    <label>Instruction
+      <textarea id="agent-instruction" rows="4" ${working ? "disabled" : ""}
+        placeholder="Find the VP of Finance at Acme Industrial in SignalBase. Then find the open Salesforce Opportunity for Acme Industrial and move it to Collaborate with a close date of October 15, 2026.">${escapeHtml(
+          agentInstruction
+        )}</textarea>
+    </label>
+    <div class="studio-actions">
+      ${actionButton({
+        id: "run-agent-task",
+        kind: "run-agent-task",
+        label: "Run with WebMCP",
+        busyLabel: "Running…"
+      })}
+      ${
+        working
+          ? `<button type="button" id="stop-agent-task"${agentStopRequested ? " disabled" : ""}>${
+              agentStopRequested ? "Stopping after this step…" : "Stop"
+            }</button>`
+          : ""
+      }
+    </div>
+    ${renderOperationStatus("run-agent-task")}
+    ${
+      agentRun
+        ? `<ol class="agent-trace">${agentRun.steps.map(renderAgentStep).join("")}${renderAgentInFlight(agentRun)}</ol>
+           ${renderAgentOutcome(agentRun)}`
+        : ""
+    }
+  </div>`;
+}
+
+const CONTROL_TABS: ReadonlyArray<{ id: ControlTab; label: string }> = [
+  { id: "agent", label: "Agent task" },
+  { id: "tools", label: "Tool surface" },
+  { id: "applications", label: "Applications" }
+];
+
+function renderControlTabs(): string {
+  // Not offered when there is no WebMCP: every panel behind them would say
+  // the same thing, which is that nothing here can be shown honestly.
+  if (!webMcpSurface.available) return "";
+  return `<div class="control-tabs" role="tablist">${CONTROL_TABS.map(
+    (tab) => `<button type="button" role="tab" data-control-tab="${tab.id}"
+      aria-selected="${tab.id === controlTab}">${escapeHtml(tab.label)}</button>`
+  ).join("")}</div>`;
+}
+
+function renderControlPanel(): string {
+  if (!webMcpSurface.available) return renderWebMcpHarness();
+  switch (controlTab) {
+    case "tools":
+      return renderWebMcpHarness();
+    case "applications":
+      return renderParticipatingApplications();
+    default:
+      return renderAgentTask();
+  }
+}
+
+/**
+ * What this browser permits, on one line.
+ *
+ * Five stacked definition rows for five short facts is a screenful spent
+ * on something read once, at the bottom of a page that was already too
+ * long. They are still all here, and still gated on what was actually
+ * detected rather than assumed.
+ */
+function surfaceFacts(): string {
+  return [
+    `document.modelContext ${document.modelContext ? "available" : "unavailable"}`,
+    `discovery ${webMcpSurface.canDiscover ? "supported" : "unsupported"}`,
+    `invocation ${webMcpSurface.canInvoke ? "supported" : "unsupported"}`,
+    `crossOriginIsolated ${String(window.crossOriginIsolated)}`,
+    `hello_webmcp ${registration}`
+  ]
+    .map(escapeHtml)
+    .join(" · ");
+}
+
 /**
  * Control-mode event wiring.
  *
@@ -2834,6 +3779,44 @@ function bindHarnessEvents(): void {
   document.querySelector<HTMLButtonElement>("#invoke-webmcp")?.addEventListener("click", () => {
     void invokeSelectedTool();
   });
+
+  // Held without re-rendering, for the same reason the harness inputs are:
+  // render() rebuilds innerHTML and would take the caret out mid-sentence.
+  document.querySelector<HTMLTextAreaElement>("#agent-instruction")?.addEventListener("input", (event) => {
+    agentInstruction = (event.currentTarget as HTMLTextAreaElement).value;
+  });
+
+  document.querySelector<HTMLButtonElement>("#run-agent-task")?.addEventListener("click", () => {
+    void runAgentInstruction();
+  });
+
+  // Requests a stop; it never interrupts a call already dispatched. A write
+  // in flight has to be allowed to report, because a cancelled one would
+  // leave exactly the unknown outcome this system refuses to create.
+  document.querySelector<HTMLButtonElement>("#stop-agent-task")?.addEventListener("click", () => {
+    agentStopRequested = true;
+    render();
+  });
+
+  for (const tab of document.querySelectorAll<HTMLButtonElement>("[data-control-tab]")) {
+    tab.addEventListener("click", () => {
+      const next = tab.dataset.controlTab as ControlTab | undefined;
+      if (!next || next === controlTab) return;
+      controlTab = next;
+      render();
+    });
+  }
+
+  document.querySelector<HTMLButtonElement>("#agent-acknowledge")?.addEventListener("click", () => {
+    void resumeAgentRun({ acknowledge: true });
+  });
+
+  for (const choice of document.querySelectorAll<HTMLButtonElement>("[data-agent-choice]")) {
+    choice.addEventListener("click", () => {
+      const id = choice.dataset.agentChoice;
+      if (id) void resumeAgentRun({ candidateId: id });
+    });
+  }
 }
 
 function render(): void {
@@ -2845,16 +3828,10 @@ function render(): void {
         <p>Capabilities published in the Studio are registered on this document as real WebMCP tools.
           This page exercises them through the browser's own WebMCP API — the same surface an agent uses.</p>
         <p class="semanticizer-status">The tool runs against the application it was taught from, through the
-          Teach Mode extension. AutoWebMCP Studio publishes the capability; the target application does not host
-          it. Start the extension on that application's tab before invoking.</p>
-        ${renderWebMcpHarness()}
-        <dl class="diagnostics">
-          <div><dt>document.modelContext</dt><dd>${document.modelContext ? "available" : "unavailable"}</dd></div>
-          <div><dt>Page-side discovery</dt><dd>${webMcpSurface.canDiscover ? "supported" : "not supported"}</dd></div>
-          <div><dt>Page-side invocation</dt><dd>${webMcpSurface.canInvoke ? "supported" : "not supported"}</dd></div>
-          <div><dt>crossOriginIsolated</dt><dd>${String(window.crossOriginIsolated)}</dd></div>
-          <div><dt>Hello-world registration</dt><dd>${registration}</dd></div>
-        </dl>
+          Teach Mode extension. Start the extension on that application's tab before invoking.</p>
+        ${renderControlTabs()}
+        ${renderControlPanel()}
+        <p class="surface-facts">${surfaceFacts()}</p>
         <a href="/">Return to the Training Studio</a>
       </main>`;
     bindHarnessEvents();
@@ -2903,7 +3880,13 @@ function render(): void {
         // WebMCP has no unregister, so this document keeps offering the tool
         // until it is reloaded. Saying so beats letting someone discover it
         // by calling something that no longer exists.
-        publishStatus = `Unpublished ${id}. Reload this page to clear it from the registered tool surface.`;
+        // Only the control document registers anything. Saying "reload this
+        // page" on the Studio home described a tool surface that is not
+        // there — nothing was ever registered here to clear.
+        publishStatus = controlMode
+          ? `Unpublished ${id}. Reload this page to clear it from the registered tool surface.`
+          : `Unpublished ${id}. WebMCP has no unregister, so reload any page that had registered it — the taught ` +
+            `site, or the WebMCP control page — to clear it from that document's tool surface.`;
       } catch (error) {
         publishStatus = describeActionFailure("Unpublishing", error);
       }
@@ -3239,6 +4222,12 @@ function render(): void {
     render();
   });
 
+  // Held without re-rendering: a render rebuilds the whole form, and the
+  // tick would be lost between choosing it and pressing Publish.
+  document.querySelector<HTMLInputElement>("#publish-orchestration")?.addEventListener("change", (event) => {
+    publishToOrchestration = (event.currentTarget as HTMLInputElement).checked;
+  });
+
   document.querySelector<HTMLButtonElement>("#publish-capability")?.addEventListener("click", () =>
     void withBusy("publish-capability", async () => {
     if (!candidate) return;
@@ -3279,11 +4268,15 @@ function render(): void {
       const record = await publishCapability(
         withResolvedValueDomains(candidate, domains),
         accepted,
-        query ?? undefined
+        query ?? undefined,
+        publishToOrchestration
       );
       publications = await listPublishedCapabilities();
-      syncBrowserExecutionRegistrations();
-      publishStatus = `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
+      syncToolRegistrations();
+      publishStatus = record.orchestration
+        ? `Published ${record.capability.id} on the taught site and on the orchestration surface. Reload the ` +
+          "taught site, and the WebMCP control page, to see it registered."
+        : `Published ${record.capability.id}. Reload or return to the taught site to see it registered.`;
     } catch (error) {
       publishStatus = describeActionFailure("Publishing", error);
     }
@@ -3639,8 +4632,8 @@ function render(): void {
     try {
       publications = await listPublishedCapabilities();
       publishStatus = publications.length ? "Published capabilities loaded." : "Nothing has been published yet.";
-      syncBrowserExecutionRegistrations();
-      void refreshDiscoveredTools([...browserExecutionRegistered]).then(render);
+      syncToolRegistrations();
+      void refreshDiscoveredTools([...registeredTools]).then(render);
     } catch (error) {
       publishStatus = describeActionFailure("Refreshing publications", error);
     }
@@ -3703,9 +4696,9 @@ void listPublishedCapabilities()
   .then((records) => {
     publications = records;
     if (records.length) publishStatus = "Published capabilities loaded.";
-    syncBrowserExecutionRegistrations();
+    syncToolRegistrations();
     // Registration has been ASKED FOR; wait for the browser to agree.
-    void refreshDiscoveredTools([...browserExecutionRegistered]).then(render);
+    void refreshDiscoveredTools([...registeredTools]).then(render);
     render();
   })
   .catch((error) => {

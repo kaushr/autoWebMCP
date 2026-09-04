@@ -36,7 +36,7 @@ npm run start
 4. Press **Stop training**.
 5. The normalized trace is posted to `POST /api/traces`.
 6. In the Training Studio, open **Teach Mode captures**, refresh, select the
-   trace, and press **Propose capability from trace**.
+   trace, and press **Understand this recording**.
 7. Edit and confirm the candidate.
 
 If the Studio is unreachable, the trace is kept in the extension and

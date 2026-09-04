@@ -2,8 +2,9 @@ import "./styles.css";
 import { bindingActionFor, invokeProspectBinding } from "../bindings";
 import { getCompany, getContact } from "../service";
 import { registerCapability } from "../../webmcp/compiler";
-import { listPublishedCapabilities, publishedCapabilityContract } from "../../webmcp/publication";
-import { describeReadiness, type AgentReadiness } from "./agentReadiness";
+import { describeWebMcpSurface, normalizeInputSchema, settledToolListing } from "../../webmcp/harness";
+import { listPublishedCapabilities, publishedCapabilityContract, unpublishCapability } from "../../webmcp/publication";
+import { describeReadiness, type AgentFacingTool, type AgentReadiness } from "./agentReadiness";
 import { companyHref, parseRoute, searchHref, type ContactFilters, type Route } from "./router";
 import { APP_NAME, renderRoute, renderShell } from "./views";
 
@@ -20,7 +21,56 @@ const appRoot: HTMLDivElement = root;
  * to WebMCP.
  */
 const registeredCapabilities = new Map<string, string>();
+/** What this browser actually permits a page to do — asked, not assumed. */
+const webMcpSurface = describeWebMcpSurface(document.modelContext);
 let readiness: AgentReadiness = { webmcpAvailable: Boolean(document.modelContext), publishedNames: [] };
+/** The capability whose removal has been pressed once and awaits confirmation. */
+let removalArmed: string | undefined;
+/**
+ * Whether the badge's panel is open, remembered across renders.
+ *
+ * `render()` rebuilds the whole document body, which closes a `<details>`
+ * — so without this, arming a removal collapsed the panel holding the
+ * button that had to be pressed again, and returning to this tab shut a
+ * panel someone had deliberately opened.
+ */
+let panelOpen = false;
+
+/**
+ * The tools behind the badge, as an agent would receive them.
+ *
+ * Read from `getTools()` where the browser allows it, because that is the
+ * only source that supports the heading "what an agent sees". Where it does
+ * not, this document reports what it passed to `registerTool` and the panel
+ * says which of the two it is — an internal registry shown under an
+ * agent-facing heading would be a claim nobody checked.
+ */
+async function agentFacingTools(): Promise<{ tools: AgentFacingTool[]; source: "discovered" | "registered" }> {
+  const expected = [...registeredCapabilities.keys()];
+  if (webMcpSurface.canDiscover && document.modelContext) {
+    try {
+      const listed = await settledToolListing(document.modelContext, expected);
+      return {
+        source: "discovered",
+        tools: listed.map((tool) => {
+          const schema = normalizeInputSchema(tool.inputSchema);
+          return {
+            name: tool.name,
+            description: tool.description ?? "",
+            ...(schema ? { inputSchema: schema } : {})
+          };
+        })
+      };
+    } catch {
+      // A discovery that failed is not a registration that failed. Fall
+      // back to what this document knows and label it as exactly that.
+    }
+  }
+  return {
+    source: "registered",
+    tools: expected.map((name) => ({ name, description: "" }))
+  };
+}
 
 async function syncPublishedCapabilities(): Promise<void> {
   let published: Awaited<ReturnType<typeof listPublishedCapabilities>> = [];
@@ -53,9 +103,19 @@ async function syncPublishedCapabilities(): Promise<void> {
   // control plane lists. WebMCP has no unregister, so an unpublished capability
   // stays callable here until the page is reloaded, and saying otherwise
   // would misreport the tool surface an agent can still see.
+  // Registered here, no longer published there. The two can diverge in one
+  // direction only — WebMCP has no unregister — so this is reported rather
+  // than corrected: the tool really is still callable on this document, and
+  // a reload is the only thing that changes that.
+  const stillPublished = new Set(published.map((record) => record.capability.id));
+  const staleNames = [...registeredCapabilities.keys()].filter((id) => !stillPublished.has(id));
+
+  const surface = registeredCapabilities.size ? await agentFacingTools() : undefined;
   readiness = {
     webmcpAvailable: Boolean(document.modelContext),
-    publishedNames: [...registeredCapabilities.values()]
+    publishedNames: [...registeredCapabilities.values()],
+    ...(surface ? { tools: surface.tools, toolSource: surface.source } : {}),
+    ...(staleNames.length ? { staleNames } : {})
   };
   render();
 }
@@ -90,8 +150,17 @@ function filtersFromForm(form: HTMLFormElement): ContactFilters {
 
 function render(): void {
   const route = parseRoute(location.hash);
-  appRoot.innerHTML = renderShell(renderRoute(route), describeReadiness(readiness));
+  appRoot.innerHTML = renderShell(renderRoute(route), describeReadiness({ ...readiness, ...(removalArmed ? { removalArmed } : {}) }));
   document.title = documentTitle(route);
+
+  // Re-applied rather than preserved, because the element is new every time.
+  const panel = appRoot.querySelector<HTMLDetailsElement>("details.agent-status");
+  if (!panel) return;
+  panel.open = panelOpen;
+  // `toggle` does not bubble, so this cannot be delegated from the root.
+  panel.addEventListener("toggle", () => {
+    panelOpen = panel.open;
+  });
 }
 
 /**
@@ -128,6 +197,40 @@ appRoot.addEventListener("change", (event) => {
   const route = parseRoute(location.hash);
   if (route.view !== "company") return;
   navigate(companyHref(route.companyId, filtersFromForm(form)));
+});
+
+/**
+ * Removing a capability this site was taught.
+ *
+ * Two presses, because it is irreversible without teaching the capability
+ * again: it unpublishes from the control plane, which affects every site,
+ * and the recording it came from is not kept here.
+ *
+ * The reload is not tidying up — it is the removal. WebMCP has no
+ * unregister, so a tool stays callable on this document until the document
+ * is replaced, and a button that unpublished without reloading would report
+ * a site that had stopped exposing something it was still exposing.
+ */
+appRoot.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-remove-capability]");
+  const id = button?.dataset.removeCapability;
+  if (!id) return;
+
+  if (removalArmed !== id) {
+    removalArmed = id;
+    render();
+    return;
+  }
+
+  removalArmed = undefined;
+  void unpublishCapability(id)
+    .then(() => window.location.reload())
+    .catch(() => {
+      // The control plane refused or is unreachable. Nothing was removed
+      // and nothing was reloaded, so the site is exactly as it was; the
+      // panel re-renders with the button disarmed.
+      render();
+    });
 });
 
 window.addEventListener("hashchange", () => {

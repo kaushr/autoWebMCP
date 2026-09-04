@@ -126,7 +126,7 @@ export async function updateTraceRecording(sessionId: string, recording: Recordi
 }
 
 /** What the control plane's API currently offers. */
-export const REQUIRED_CONTROL_PLANE_PROTOCOL = 2;
+export const REQUIRED_CONTROL_PLANE_PROTOCOL = 3;
 
 /**
  * Whether the control-plane PROCESS is running the code this page expects.

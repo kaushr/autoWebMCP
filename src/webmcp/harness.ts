@@ -1,6 +1,6 @@
 import type { ExecutionResult } from "../binding/browserExecution/result";
 import type { QueryOutcome } from "../binding/browserExecution/query";
-import type { JsonObjectSchema, ModelContext, WebMcpToolResult } from "./types";
+import type { JsonObjectSchema, ModelContext, RegisteredTool, WebMcpToolResult } from "./types";
 
 /* ------------------------------------------------------------------ *
  * The judge-facing WebMCP test harness.
@@ -39,6 +39,44 @@ export function describeWebMcpSurface(modelContext: ModelContext | undefined): W
     canDiscover: typeof modelContext.getTools === "function",
     canInvoke: typeof modelContext.executeTool === "function"
   };
+}
+
+/**
+ * How long to keep asking the browser about a tool just registered.
+ *
+ * `registerTool` is fire-and-forget: it returns before `getTools()` will
+ * admit the tool exists, and nothing in the API says when that changes.
+ * Reading immediately after registering listed only the tool registered at
+ * module load, and the page then reported nothing registered about a
+ * document an agent was successfully calling.
+ */
+export const REGISTRATION_SETTLE_MS = 2_000;
+export const REGISTRATION_POLL_MS = 100;
+
+/**
+ * The browser's own tool listing, once what was just registered has
+ * appeared in it.
+ *
+ * Bounded and evidence-led: it stops the moment the browser reports every
+ * expected name, and gives up quickly rather than insisting. Give it no
+ * expectations and it is a single `getTools()` call.
+ *
+ * Shared by every document that shows a tool surface, because they all
+ * face the same race and must all answer it the same way — a page that
+ * polled and a page that did not would disagree about what an agent can
+ * see, and only one of them would be right.
+ */
+export async function settledToolListing(
+  modelContext: ModelContext,
+  expected: readonly string[] = []
+): Promise<RegisteredTool[]> {
+  const deadline = Date.now() + REGISTRATION_SETTLE_MS;
+  for (;;) {
+    const tools = await modelContext.getTools();
+    const missing = expected.filter((name) => !tools.some((tool) => tool.name === name));
+    if (missing.length === 0 || Date.now() >= deadline) return tools;
+    await new Promise((resolve) => setTimeout(resolve, REGISTRATION_POLL_MS));
+  }
 }
 
 /**
@@ -272,8 +310,18 @@ function textFromEnvelope(value: unknown): string | undefined {
 /** How deep to keep unwrapping before concluding the payload is not ours. */
 const MAX_ENVELOPE_DEPTH = 4;
 
+/** The JSON a tool returned, once every envelope around it has been opened. */
+export interface DecodedToolPayload {
+  /** The innermost JSON value the response carried, when it carried one. */
+  value?: unknown;
+  /** The raw text the tool returned, always kept. */
+  text: string;
+  /** Why nothing could be decoded, when nothing could. */
+  problem?: string;
+}
+
 /**
- * Reads what a tool returned, through however many envelopes it arrives in.
+ * Opens a tool's response through however many envelopes it arrives in.
  *
  * A live invocation established that Chrome's `executeTool` resolves with
  * the ENTIRE result envelope serialized as a string — so the payload is a
@@ -282,50 +330,74 @@ const MAX_ENVELOPE_DEPTH = 4;
  * valid JSON that was not a result, and the panel blamed the tool for a
  * shape it had itself failed to open.
  *
- * So layers are peeled until something answers to being an execution
- * result, bounded rather than unbounded: a payload that never becomes one
- * is reported as what it is, with the raw text kept for reading.
+ * So layers are peeled until something stops looking like an envelope,
+ * bounded rather than unbounded. Deliberately shape-agnostic: an execution
+ * result and a search outcome stop the peeling because neither carries
+ * `content`, and anything else — a taught application's own JSON — is
+ * returned as itself rather than reported as a failure. Reading it as one
+ * of OUR shapes is a separate question, asked by `readToolResult`.
  */
-export function readToolResult(result: WebMcpToolResult | string, route: InvocationRoute): HarnessInvocationOutcome {
+export function decodeToolPayload(result: WebMcpToolResult | string): DecodedToolPayload {
   const text = textFromEnvelope(result);
-  if (!text) return { route, text: "", unparsed: "The tool returned no readable content." };
+  if (!text) return { text: "", problem: "The tool returned no readable content." };
 
   let payload = text;
+  let value: unknown;
   for (let depth = 0; depth < MAX_ENVELOPE_DEPTH; depth++) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(payload);
     } catch {
-      return {
-        route,
-        text,
-        unparsed: depth === 0 ? "The tool's response was not JSON." : "The tool's response did not contain a result."
-      };
+      // Nothing parsed at all: the response was never JSON. Deeper down it
+      // means the envelope held plain text, and whatever was decoded on the
+      // way is still the best answer available.
+      return depth === 0 ? { text, problem: "The tool's response was not JSON." } : { value, text };
     }
+    value = parsed;
 
-    if (isExecutionResult(parsed)) return { route, execution: parsed, text };
-    if (isQueryOutcome(parsed)) return { route, query: parsed, text };
+    // Our own result shapes are terminal: neither is an envelope, and
+    // continuing past one would be looking for a payload inside an answer.
+    if (isExecutionResult(parsed) || isQueryOutcome(parsed)) return { value: parsed, text };
 
-    // Not a result, but possibly another envelope around one.
     const inner = textFromEnvelope(parsed);
-    if (!inner || inner === payload) {
-      return { route, text, unparsed: "The tool returned JSON that is not an execution result." };
-    }
+    if (!inner || inner === payload) return { value: parsed, text };
     payload = inner;
   }
 
-  return { route, text, unparsed: "The tool's response was nested more deeply than this panel unwraps." };
+  return { value, text, problem: "The tool's response was nested more deeply than this panel unwraps." };
+}
+
+/**
+ * Reads what a tool returned as one of the two shapes this panel renders.
+ *
+ * The envelope-opening is `decodeToolPayload`'s; the only judgement here is
+ * which of our shapes the decoded value is, and saying so plainly when it
+ * is neither. A tool that answered with something else is a fact worth
+ * showing, not an error to swallow.
+ */
+export function readToolResult(result: WebMcpToolResult | string, route: InvocationRoute): HarnessInvocationOutcome {
+  const decoded = decodeToolPayload(result);
+  if (decoded.value === undefined) {
+    return { route, text: decoded.text, unparsed: decoded.problem ?? "The tool returned no readable content." };
+  }
+  if (isExecutionResult(decoded.value)) return { route, execution: decoded.value, text: decoded.text };
+  if (isQueryOutcome(decoded.value)) return { route, query: decoded.value, text: decoded.text };
+  return {
+    route,
+    text: decoded.text,
+    unparsed: decoded.problem ?? "The tool returned JSON that is not an execution result."
+  };
 }
 
 /** Whether a decoded payload is a search's outcome: candidates rather than checks. */
-function isQueryOutcome(value: unknown): value is QueryOutcome {
+export function isQueryOutcome(value: unknown): value is QueryOutcome {
   if (!value || typeof value !== "object") return false;
   const candidate = value as QueryOutcome;
   return Array.isArray(candidate.candidates) && typeof candidate.status === "string";
 }
 
 /** Whether a decoded payload is an execution result rather than something else shaped like JSON. */
-function isExecutionResult(value: unknown): value is ExecutionResult {
+export function isExecutionResult(value: unknown): value is ExecutionResult {
   if (!value || typeof value !== "object") return false;
   const candidate = value as ExecutionResult;
   return Array.isArray(candidate.checks) && typeof candidate.status === "string";
