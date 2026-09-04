@@ -21,6 +21,10 @@ dist-extension/
 
 # Generated architecture write-ups kept local, not part of the repo's own docs
 docs/SYSTEM_OVERVIEW.md
+
+# Internal positioning material. Names a specific competitor and carries
+# go-to-market guidance, neither of which belongs in a public repository.
+docs/COMPETITIVE_CONTEXT.md
 .autowebmcp/
 
 # Environment files of every shape. `.env.local` is named above and kept

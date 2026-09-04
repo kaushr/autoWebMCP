@@ -112,17 +112,45 @@ The deployment is the static front end only, served with the same origin
 isolation and `Permissions-Policy: webmcp=(self)` headers the local dev server
 sends. What genuinely works there:
 
-- **SignalBase** renders with its synthetic dataset, and reports that it has no
-  published agent capabilities, which is the demo's starting state. Because
-  nothing can be taught without a control plane, the hosted copy also offers the
-  capability a human already taught in a real session: open the badge and press
-  **Publish Find decision maker contact**, and the site gains a live WebMCP tool
-  in front of you. The offer is the hosted stand-in for pressing Publish in the
-  Studio, and the site still starts with nothing until you accept it.
 - **The WebMCP control page** registers `hello_webmcp` at page load. In a
   WebMCP-capable browser you can discover and invoke a real tool on the live
   URL, with no backend involved.
+- **SignalBase** renders with its synthetic dataset, and can be made to publish
+  a real capability in front of you. See the smoke test below.
 - **The Training Studio UI** loads and can be read.
+
+#### The 30-second smoke test
+
+This is the shortest path to seeing an ordinary website gain an agent surface.
+Use a WebMCP-capable browser, or steps 3 and 5 will report that the browser
+cannot discover tools.
+
+1. Open <https://auto-web-mcp.vercel.app/prospect/>. The header reads
+   **Agent capabilities: Not published**. The site genuinely has no tools yet,
+   which is the demo's whole starting point.
+2. Run `await document.modelContext.getTools()` in the console. Nothing of
+   SignalBase's is there.
+3. Click the header badge to expand it, then press
+   **Publish Find decision maker contact**.
+4. The header turns green and reads **Agent capabilities: 1 published**.
+   Expanding it now shows the tool's name, description, and input schema, read
+   back from `getTools()` rather than from anything this page asserts.
+5. Run `await document.modelContext.getTools()` again. The capability is there,
+   and is callable.
+6. **Refresh the page.** It stays published, because the acceptance is
+   remembered in your browser the way the control plane remembers a publication
+   in its state file.
+7. Press **Unpublish and reload** to put the site back to step 1.
+
+What you accepted is not a fixture written to make a demo look good. It is the
+record the control plane stored when a human taught this workflow and confirmed
+the contract, exported verbatim with its provenance and observation ids intact,
+and it is registered through exactly the same compile path a local publication
+takes. Pressing that button is the hosted stand-in for pressing **Publish** in
+the Studio, which is why the site still starts with nothing until you do.
+
+Your acceptance is local to your browser. Nobody else's view of the site
+changes, so every judge sees the empty starting state first.
 
 What does not, and cannot, work on a hosted URL:
 
