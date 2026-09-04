@@ -5,6 +5,7 @@ import { registerCapability } from "../../webmcp/compiler";
 import { describeWebMcpSurface, normalizeInputSchema, settledToolListing } from "../../webmcp/harness";
 import { listPublishedCapabilities, publishedCapabilityContract, unpublishCapability } from "../../webmcp/publication";
 import { describeReadiness, type AgentFacingTool, type AgentReadiness } from "./agentReadiness";
+import { loadTaughtCapability } from "./taughtCapability";
 import { companyHref, parseRoute, searchHref, type ContactFilters, type Route } from "./router";
 import { APP_NAME, renderRoute, renderShell } from "./views";
 
@@ -26,6 +27,15 @@ const webMcpSurface = describeWebMcpSurface(document.modelContext);
 let readiness: AgentReadiness = { webmcpAvailable: Boolean(document.modelContext), publishedNames: [] };
 /** The capability whose removal has been pressed once and awaits confirmation. */
 let removalArmed: string | undefined;
+
+/**
+ * A taught capability this document could register, where no control plane
+ * exists to publish one.
+ *
+ * Held rather than registered. Accepting it is a person's act, because the
+ * site starting with nothing is what the demonstration is about.
+ */
+let offered: Awaited<ReturnType<typeof loadTaughtCapability>>;
 /**
  * Whether the badge's panel is open, remembered across renders.
  *
@@ -80,6 +90,12 @@ async function syncPublishedCapabilities(): Promise<void> {
     // No control plane reachable: the site is simply a website. That is a
     // legitimate state, not an error worth showing a visitor.
     published = [];
+    // Nothing can be taught against a site with no control plane behind it,
+    // so a copy served that way offers the result of a session that already
+    // happened. Only while nothing is registered: once something is, the
+    // page has a tool surface and an offer beside it would misdescribe how
+    // it got there.
+    if (!registeredCapabilities.size) offered = await loadTaughtCapability();
   }
 
   // Composition hints may only mention tools this document can actually
@@ -115,7 +131,10 @@ async function syncPublishedCapabilities(): Promise<void> {
     webmcpAvailable: Boolean(document.modelContext),
     publishedNames: [...registeredCapabilities.values()],
     ...(surface ? { tools: surface.tools, toolSource: surface.source } : {}),
-    ...(staleNames.length ? { staleNames } : {})
+    ...(staleNames.length ? { staleNames } : {}),
+    ...(offered && !registeredCapabilities.size
+      ? { offer: { id: offered.capability.id, name: offered.capability.name } }
+      : {})
   };
   render();
 }
@@ -211,6 +230,29 @@ appRoot.addEventListener("change", (event) => {
  * is replaced, and a button that unpublished without reloading would report
  * a site that had stopped exposing something it was still exposing.
  */
+/**
+ * Accepting the offer.
+ *
+ * The same compile-and-register path a control-plane publication takes,
+ * deliberately: an offered capability is not a second kind of tool, and a
+ * separate route to registerTool would be somewhere for the two to drift
+ * apart. Once accepted it stops being on offer, because the page is now
+ * describing a registered tool rather than an available one.
+ */
+appRoot.addEventListener("click", (event) => {
+  const accept = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-register-capability]");
+  if (!accept || !offered) return;
+  if (accept.dataset.registerCapability !== offered.capability.id) return;
+
+  const contract = publishedCapabilityContract(offered);
+  if (!bindingActionFor(offered.capability)) return;
+  if (registerCapability(contract, invokeProspectBinding, [contract]) === "registered") {
+    registeredCapabilities.set(offered.capability.id, offered.capability.name);
+  }
+  offered = undefined;
+  void syncPublishedCapabilities();
+});
+
 appRoot.addEventListener("click", (event) => {
   const button = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-remove-capability]");
   const id = button?.dataset.removeCapability;

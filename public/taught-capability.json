@@ -1,0 +1,66 @@
+{
+  "publications": [
+    {
+      "capability": {
+        "id": "find_decision_maker_contact",
+        "name": "Find decision maker contact",
+        "description": "Find a relevant contact at a target company who matches the seniority and functional area needed for a deal. This helps identify the person most likely to influence or move the opportunity forward. Read-only: it does not create, modify, or delete anything in the application.",
+        "inputs": [
+          {
+            "name": "company_name_domain_or_industry",
+            "description": "The company, website domain, or industry used to identify the target organization.",
+            "type": "string",
+            "required": true
+          },
+          {
+            "name": "seniority",
+            "description": "The level of seniority used to narrow contacts to the appropriate decision-making level.",
+            "type": "string",
+            "required": true
+          },
+          {
+            "name": "function",
+            "description": "The business function or department used to focus on contacts responsible for the relevant area.",
+            "type": "string",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "name": "contact",
+            "description": "The contact identified as a relevant person for the target company and filters applied.",
+            "type": "object"
+          }
+        ],
+        "provenance": {
+          "source": "confirmed",
+          "observationIds": [
+            "click-mtm82yb8-eej2m8",
+            "navigate-mtm8302f-acst5m",
+            "navigate-mtm8314g-mrocpo",
+            "click-mtm831ng-zyfjc5",
+            "navigate-mtm832ty-ftsjlz",
+            "click-mtm8339t-uvm9i7",
+            "navigate-mtm834al-no8fdr",
+            "navigate-mtm8359v-9onm4u"
+          ],
+          "confirmedByHuman": true,
+          "sourceApplication": {
+            "id": "prospect-intelligence",
+            "label": "SignalBase"
+          }
+        },
+        "safety": {
+          "readOnly": true,
+          "requiresConfirmation": false
+        },
+        "binding": {
+          "application": "prospect-intelligence",
+          "action": "find_relevant_contacts"
+        }
+      },
+      "publishedAt": "2026-09-04T04:41:56.268Z",
+      "orchestration": true
+    }
+  ]
+}

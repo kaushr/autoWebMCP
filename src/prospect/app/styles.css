@@ -179,6 +179,24 @@ details.agent-status[open] > summary::after {
   line-height: 1.5;
 }
 
+.agent-offer {
+  margin-top: 0.85rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.agent-offer:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 .agent-tool {
   margin-top: 0.8rem;
   padding-top: 0.8rem;

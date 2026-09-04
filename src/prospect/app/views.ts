@@ -310,6 +310,21 @@ function agentStatus(readiness: ReadinessDescription): string {
     <span>${escapeHtml(readiness.label)}</span>
     ${readiness.detail ? `<span class="agent-detail">${escapeHtml(readiness.detail)}</span>` : ""}`;
 
+  // An offer only ever accompanies "nothing published", so it expands the
+  // badge in the one state that otherwise has nothing behind it.
+  if (readiness.offer) {
+    return `<details class="agent-status" data-state="${readiness.state}">
+      <summary aria-live="polite">${summary}</summary>
+      <div class="agent-tools">
+        <p class="agent-tools-title">Nothing is registered here yet</p>
+        ${readiness.offerNote ? `<p class="agent-tools-source">${escapeHtml(readiness.offerNote)}</p>` : ""}
+        <button type="button" class="agent-offer" data-register-capability="${escapeHtml(readiness.offer.id)}">
+          Publish ${escapeHtml(readiness.offer.name)}
+        </button>
+      </div>
+    </details>`;
+  }
+
   if (!readiness.tools?.length) {
     return `<p class="agent-status" data-state="${readiness.state}" aria-live="polite">${summary}</p>`;
   }

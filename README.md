@@ -113,7 +113,12 @@ isolation and `Permissions-Policy: webmcp=(self)` headers the local dev server
 sends. What genuinely works there:
 
 - **SignalBase** renders with its synthetic dataset, and reports that it has no
-  published agent capabilities, which is the demo's starting state.
+  published agent capabilities, which is the demo's starting state. Because
+  nothing can be taught without a control plane, the hosted copy also offers the
+  capability a human already taught in a real session: open the badge and press
+  **Publish Find decision maker contact**, and the site gains a live WebMCP tool
+  in front of you. The offer is the hosted stand-in for pressing Publish in the
+  Studio, and the site still starts with nothing until you accept it.
 - **The WebMCP control page** registers `hello_webmcp` at page load. In a
   WebMCP-capable browser you can discover and invoke a real tool on the live
   URL, with no backend involved.

@@ -55,6 +55,21 @@ export interface AgentReadiness {
    * action in the Studio does.
    */
   removalArmed?: string;
+  /**
+   * A capability already taught to this site that nothing has registered yet.
+   *
+   * Only ever set where there is no control plane to publish from, which
+   * is what a static deployment of this site is. It does not change what
+   * the site currently exposes — an offer is not a registration, and the
+   * header still reports nothing published until someone accepts it.
+   */
+  offer?: OfferedCapability;
+}
+
+/** A taught capability this document could register, named for a person to decide about. */
+export interface OfferedCapability {
+  id: string;
+  name: string;
 }
 
 /** One tool, in the shape a caller reads it: a name, a contract, and prose. */
@@ -79,6 +94,17 @@ export interface ReadinessDescription {
   staleNote?: string;
   /** The capability awaiting a confirming second press, when one is. */
   removalArmed?: string;
+  /**
+   * A taught capability a person may register here, when one is on offer.
+   *
+   * Carried only on the `unpublished` state, because that is the only one
+   * where accepting it changes anything: once something is registered the
+   * page is telling a different story, and a second offer beside it would
+   * read as though the site publishes itself.
+   */
+  offer?: OfferedCapability;
+  /** Why the offer exists, in a sentence, so accepting it is an informed act. */
+  offerNote?: string;
 }
 
 const SOURCE_NOTES: Record<ToolListingSource, string> = {
@@ -114,7 +140,19 @@ export function describeReadiness(readiness: AgentReadiness): ReadinessDescripti
     return { state: "unsupported", label: "WebMCP unavailable in this browser" };
   }
   if (readiness.publishedNames.length === 0) {
-    return { state: "unpublished", label: "Agent capabilities: Not published" };
+    return {
+      state: "unpublished",
+      label: "Agent capabilities: Not published",
+      ...(readiness.offer
+        ? {
+            offer: readiness.offer,
+            offerNote:
+              "This copy has no control plane behind it, so nothing can be taught here. " +
+              `${readiness.offer.name} was taught and confirmed in a real session; registering it is what ` +
+              "pressing Publish in the Studio does."
+          }
+        : {})
+    };
   }
   return {
     state: "published",

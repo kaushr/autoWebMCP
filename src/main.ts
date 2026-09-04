@@ -913,9 +913,36 @@ function escapeHtml(value: string): string {
   })[character] ?? character);
 }
 
-/** Unmissable on purpose: a dead connection is not one panel's problem. */
+/**
+ * Whether this document is a hosted copy rather than one served locally.
+ *
+ * A control plane runs on a developer's own machine, so a page served from
+ * anywhere else was never going to have one. Read from the origin because
+ * that is the fact that decides it, not from a build flag someone has to
+ * remember to set.
+ */
+function servedRemotely(): boolean {
+  const host = window.location.hostname;
+  return host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "";
+}
+
+/**
+ * Unmissable on purpose: a dead connection is not one panel's problem.
+ *
+ * Except where there was never a connection to lose. A hosted copy of this
+ * page has no control plane by design, so the same fact is expected rather
+ * than wrong, and dressing it as an alert told judges the deployment was
+ * broken when it was doing exactly what it should. Same text, different
+ * claim about it: `role="alert"` and the failure styling are for the local
+ * case, where something really has stopped working.
+ */
 function renderConnectionBanner(): string {
   if (!connectionIssue) return "";
+  if (servedRemotely()) {
+    return `<div class="connection-banner is-expected"><strong>Hosted copy.</strong> ${escapeHtml(
+      connectionIssue
+    )}</div>`;
+  }
   return `<div class="connection-banner" role="alert"><strong>Connection problem.</strong> ${escapeHtml(
     connectionIssue
   )}</div>`;

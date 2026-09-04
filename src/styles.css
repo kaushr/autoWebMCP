@@ -23,6 +23,8 @@ form { display: flex; gap: .55rem; margin: 1.2rem 0; } input, select, textarea {
 .lifecycle-section { margin: .9rem 0 0; padding: .85rem 1rem; border: 1px dashed #4a6394; border-radius: 9px; background: rgba(6,15,29,.4); }
 .lifecycle-section .capability-state { margin-top: .5rem; }
 .connection-banner { margin: 0 0 1.4rem; padding: .85rem 1.1rem; border: 1px solid #a15a4a; border-radius: 10px; background: rgba(224,138,122,.14); color: #f3d8d0; font-size: .92rem; line-height: 1.5; }.connection-banner strong { color: #f6c9bd; }
+.connection-banner.is-expected { border-color: #33507d; background: rgba(18,40,73,.5); color: #c7d7ef; }
+.connection-banner.is-expected strong { color: #9dc0ff; }
 
 .trace-option .trace-description { color: #8fa6c8; font-size: .76rem; }
 .trace-option small { color: #62718a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .68rem; }
